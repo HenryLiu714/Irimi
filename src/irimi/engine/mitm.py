@@ -147,24 +147,28 @@ def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
     return [(k.encode("latin-1"), v.encode("latin-1")) for k, v in headers]
 
 
-def _to_mitm_response(r: Response) -> http.Response:
+def _to_mitm_response(r: Response, method: str) -> http.Response:
+    """Return `r` as mitmproxy sends it in answer to `method`, framed as HTTP requires."""
     # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
     # (`rot13`, `utf-8`); the body then goes out as it is, as mitmproxy's own fallback sends it.
     try:
-        return http.Response.make(r.status, r.body, _fields(r.headers))
+        built = http.Response.make(r.status, r.body, _fields(r.headers))
     except TypeError:
         fields = [(k, v) for k, v in _fields(r.headers) if k.lower() != b"content-encoding"]
-        return http.Response.make(r.status, r.body, fields)
+        built = http.Response.make(r.status, r.body, fields)
+    return _without_content(built) if wire.ends_at_head(method, r.status) else built
 
 
 def _without_content(response: http.Response) -> http.Response:
-    """Return `response` fit to answer HEAD: no content and no Content-Length.
+    """Return `response` bare: no content, Content-Length or Transfer-Encoding.
 
-    A HEAD answer carries no content (RFC 9110 9.3.2), which the client would read as its next
-    response, and no Content-Length, since it is not what a GET would get (8.6).
+    A 1xx or 204 must not send a Content-Length, and a HEAD answer's or a 304's must be what a GET
+    would get (RFC 9110 8.6), but `make` gives every answer one. mitmproxy ends a chunked 204 or
+    304 with a last chunk, which the client reads as its next response.
     """
     response.raw_content = b""
     response.headers.pop("content-length", None)
+    response.headers.pop("transfer-encoding", None)
     return response
 
 
@@ -179,7 +183,7 @@ def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
         flow.response.status_code = out.status
         flow.response.headers = http.Headers(fields=_fields(out.headers))
         return
-    flow.response = _to_mitm_response(out)
+    flow.response = _to_mitm_response(out, flow.request.method)
 
 
 def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
@@ -349,9 +353,7 @@ class IrimiAddon:
         elif isinstance(decision, Respond):
             # A replayed response comes off disk, and mitmproxy may refuse to encode its headers.
             try:
-                built = _to_mitm_response(decision.response)
-                if plan.request.method == "HEAD":
-                    built = _without_content(built)
+                built = _to_mitm_response(decision.response, plan.request.method)
             except Exception as exc:
                 refused = self.session.decision_failed(
                     admitted, exc, request=plan.request, issued=plan.issued
@@ -372,8 +374,7 @@ class IrimiAddon:
     def _answer_now(self, flow: http.HTTPFlow, plan: Plan) -> None:
         """Answer a settled plan, setting the response before recording it."""
         assert isinstance(plan.decision, Respond)
-        response = _to_mitm_response(plan.decision.response)
-        flow.response = _without_content(response) if plan.request.method == "HEAD" else response
+        flow.response = _to_mitm_response(plan.decision.response, plan.request.method)
         self.session.record(self.session.settle(plan))
         self._record_issued(plan)
 
@@ -384,15 +385,17 @@ class IrimiAddon:
 
     def _answer_control(self, flow: http.HTTPFlow, call: ControlCall) -> None:
         """Answer a control request. Never raises (fail-closed hook rule)."""
-        head = call.request.method == "HEAD"
+        method = call.request.method
         try:
             answer = self.control.answer(call.request, whole_body=call.whole_body)
-            response = _to_mitm_response(answer)
+            flow.response = _to_mitm_response(answer, method)
         except Exception:
             logger.exception("irimi: could not send the control endpoint's answer")
             error = control.INTERNAL_ERROR
             response = http.Response.make(error.status, error.body, _fields(error.headers))
-        flow.response = _without_content(response) if head else response
+            if wire.ends_at_head(method, error.status):
+                response = _without_content(response)
+            flow.response = response
 
     def _strip_irimi_headers(self, flow: http.HTTPFlow) -> None:
         """Remove irimi's headers before forwarding: only irimi may set them.

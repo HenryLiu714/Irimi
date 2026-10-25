@@ -555,8 +555,8 @@ def shown(result, run_id: str) -> list[str]:
 def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow, mode):
     """Every control post is answered `control`, and every read labelled `Irimi-Run` goes live.
 
-    A refusal has its documented status. Bare, the posts reach the fake internet, which serves no
-    such host, and the agent exits as under shadow."""
+    A refusal has its documented status, and a 204 no Content-Length. Bare, the posts reach the
+    fake internet, which serves no such host, and the agent exits as under shadow."""
     shadow = run_workflow(W, "control_runs", mode)
     bare = run_workflow(W, "control_runs", "bare")
     posts = [f"{tag}_{step}" for tag, _ in CONTROL_RUNS.values() for step in STEPS]
@@ -576,6 +576,13 @@ def test_the_sdks_posts_are_answered_by_irimi_and_its_reads_go_live(run_workflow
         "health_after": (502, None),
     }
     assert bare.exit_code == shadow.exit_code == 0
+    framed = [(e["label"], e["content_length"]) for e in shadow.events("framing")]
+    assert sorted(framed) == sorted((label, None) for label in controls)
+    # Bare, the same posts get the fake internet's 502, whose body gives it a length. Its threads
+    # post in either order.
+    bare_framed = [(e["label"], e["content_length"]) for e in bare.events("framing")]
+    assert sorted(label for label, _ in bare_framed) == sorted(controls)
+    assert all(length is not None and int(length) > 0 for _, length in bare_framed)
     assert [e["given"] for e in shadow.events("control_base")] == [True]
     assert [e["given"] for e in bare.events("control_base")] == [False]
     # irimi prints only the labelled reads, and the fake internet sees only those, unlabelled.

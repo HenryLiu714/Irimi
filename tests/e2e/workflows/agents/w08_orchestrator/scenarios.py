@@ -13,6 +13,8 @@ from tests.e2e.workflows.harness.scenario import Scenario, Workflow
 from tests.e2e.workflows.harness.services import JsonService, World
 
 PRICES = {"SKU-A": 1200, "SKU-B": 800, "SKU-C": 5000}
+# The stock's version, which never changes: asked for changes since it, the service has none.
+STOCK_ETAG = '"stock-1"'
 
 SUBAGENT_MAP = f"""\
 version: 1
@@ -25,6 +27,11 @@ routes:
       method: GET
       path: /inventory
     operation: inventory.list
+    kind: read
+  - match:
+      method: GET
+      path: /inventory/changes
+    operation: inventory.changes
     kind: read
   - match:
       method: POST
@@ -56,8 +63,18 @@ UNJUSTIFIED_MAP = re.sub(r"    live_because: .*\n", "", SUBAGENT_MAP)
 
 
 def _inventory(req: Req, state: dict[str, Any]) -> Resp:
+    if req.headers.get("if-none-match") == STOCK_ETAG:
+        return Resp(304, headers={"etag": STOCK_ETAG})
     stock = [("SKU-A", 5), ("SKU-B", 2), ("SKU-C", 0)]
-    return Resp(200, {"items": [{"sku": sku, "qty": qty} for sku, qty in stock]})
+    items = [{"sku": sku, "qty": qty} for sku, qty in stock]
+    return Resp(200, {"items": items}, {"etag": STOCK_ETAG})
+
+
+def _changes(req: Req, state: dict[str, Any]) -> Resp:
+    """Answer 204 for no changes since the version asked about, as a sync endpoint does."""
+    if req.query.get("since") == STOCK_ETAG:
+        return Resp(204)
+    return Resp(200, {"changed": True})
 
 
 def _quote(req: Req, state: dict[str, Any]) -> Resp:
@@ -79,6 +96,7 @@ def _world(world: World) -> None:
             (SUBAGENT_HOST,),
             {
                 ("GET", "/inventory"): _inventory,
+                ("GET", "/inventory/changes"): _changes,
                 ("POST", "/quote"): _quote,
                 ("POST", "/reservations"): _reserve,
             },
@@ -156,6 +174,13 @@ WORKFLOW = Workflow(
             extra_maps={"subagent.yaml": TARGET_DOWN_MAP},
             doc="target_down with the decision recorded through its write tool's fake: the "
             "closing lines say the tool write did not happen either",
+        ),
+        "revalidate": Scenario(
+            ("--revalidate",),
+            setup=_world,
+            extra_maps={"subagent.yaml": SUBAGENT_MAP},
+            doc="with_map with the stock checked again on one connection: no changes since its "
+            "ETag (204), and a conditional read of it (304)",
         ),
         "nested_write": Scenario(
             ("--runs", "2", "--nested-reserve"),

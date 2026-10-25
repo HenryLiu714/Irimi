@@ -136,10 +136,11 @@ def engine(tmp_path, monkeypatch):
 
 
 def _ok(response):
-    """A 204 with the control stamp and nothing else to say."""
+    """A 204 with the control stamp and nothing else to say, so no Content-Length either."""
     status, headers, body = response
     assert (status, body) == (204, b"")
     assert STAMP in headers
+    assert [name for name, _ in headers if name == "content-length"] == []
 
 
 def test_a_start_a_tool_call_and_an_end_are_one_sdk_run_on_disk(engine):
@@ -775,6 +776,34 @@ def test_a_head_request_gets_its_405_without_a_body_and_the_connection_stays_usa
     # The next byte after the 405's head is the GET's answer, not the 405's JSON.
     assert get.startswith(b"HTTP/1.1 200 ")
     assert json.loads(get.split(b"\r\n\r\n", 1)[1])["engine_version"] == __version__
+
+
+def test_a_control_answer_that_could_not_be_built_is_a_500_without_a_body_to_head(
+    engine, monkeypatch
+):
+    """The engine's own 500, sent when the endpoint raised, ends at its head in answer to HEAD.
+
+    The GET sent next on the same connection gets its own 500, with the JSON error."""
+
+    def boom(self, request, *, whole_body):
+        raise RuntimeError("the endpoint broke")
+
+    monkeypatch.setattr(ControlEndpoint, "answer", boom)
+    host = f"127.0.0.1:{engine.port}"
+    sent = "".join(f"{m} /_irimi/health HTTP/1.1\r\nhost: {host}\r\n\r\n" for m in ("HEAD", "GET"))
+    with socket.create_connection(("127.0.0.1", engine.port), timeout=10) as sock:
+        sock.sendall(sent.encode())
+        received = b""
+        while not received.endswith(b"}"):  # the GET's JSON is the last thing on the wire
+            chunk = sock.recv(65536)
+            assert chunk, f"the connection closed after {received!r}"
+            received += chunk
+    head, get = received.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.1 500 ")
+    assert b"\r\nirimi-answered-by: control\r\n" in head
+    assert b"content-length" not in head.lower()
+    assert get.startswith(b"HTTP/1.1 500 ")
+    assert json.loads(get.split(b"\r\n\r\n", 1)[1])["error"]["type"] == "irimi_internal_error"
 
 
 # Every Python's `json.loads` reads this depth on any thread (3.12's stops near 10,000), so the
