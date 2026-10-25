@@ -41,7 +41,7 @@ class ReplayPolicy:
     | --- | --- | --- |
     | llm; read before the replay diverged | the recorded response | live |
     | read, after the replay diverged | never taken | live, with the overlay |
-    | write, unknown | the recorded answer, at its recorded level | faked; diverges unless refused |
+    | write, unknown | the recorded answer, at its recorded level | as shadow mode; see below |
     | telemetry, sent to a target | not looked up, no flag | as in shadow mode |
 
     A write is looked up with its idempotency standing; a checked write is served only while the

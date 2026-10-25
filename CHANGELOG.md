@@ -137,8 +137,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
 - A replay no longer diverges on a missed write that shadow mode refuses (a precondition
-  rejection, a retry, a reused idempotency key), so the reads after it are still answered from the
-  recording.
+  rejection, a reused idempotency key) or answers as a retry, so the reads after it are still
+  answered from the recording.
 
 ## [0.1.0] - 2026-10-20
 
