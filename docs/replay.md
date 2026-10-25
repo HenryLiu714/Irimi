@@ -117,8 +117,9 @@ reuses an idempotency key) changes nothing a recorded read shows, so it does not
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes
 never count. The line under it counts the agent's exchanges and read tools answered from the
-recording, and missed. Past the divergence the agent talks to the real services for its reads and
-to the model again.
+recording, and missed. A missed model call is sent to the model, and reads go to the real services
+once a missed write is faked or a stale recorded answer is reached, which may come after the
+divergence the report names.
 
 ### Tools in a replay
 
