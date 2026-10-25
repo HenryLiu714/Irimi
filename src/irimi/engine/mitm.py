@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 
 from mitmproxy import ctx, http, tls
 from mitmproxy.addons import default_addons
+from mitmproxy.connection import ConnectionState
 from mitmproxy.master import Master
 from mitmproxy.options import Options
 
@@ -136,6 +137,28 @@ def _response_from_flow(flow: http.HTTPFlow) -> tuple[Response, bool]:
         body=body.body,
     )
     return response, body.cut
+
+
+def _agent_hung_up(flow: http.HTTPFlow, capture: StreamCapture | None) -> bool:
+    """Return True if the agent's connection had closed when its flow failed.
+
+    mitmproxy marks a connection unreadable as it reads the end, before the `error` hook runs; the
+    error's message cannot say which side closed (over HTTP/2 both read `peer closed connection`).
+    mitmproxy also closes a connection idle for `tcp_timeout` itself, which is not the agent's
+    doing. An HTTP/2 stream the agent resets on a connection it keeps open is not seen as one.
+    """
+    try:
+        if flow.client_conn.state & ConnectionState.CAN_READ:
+            return False
+        heard = max(
+            flow.request.timestamp_end or 0.0,
+            flow.response.timestamp_start if flow.response is not None else 0.0,
+            capture.last_chunk_at if capture is not None else 0.0,
+        )
+        idle_limit: float = ctx.options.tcp_timeout
+        return time.time() - heard < idle_limit
+    except Exception:
+        return False  # unknown: reported as still connected
 
 
 def _is_event_stream(content_type: str) -> bool:
@@ -479,10 +502,12 @@ class IrimiAddon:
         try:
             received = None
             tee = flow.metadata.pop(STREAM_KEY, None)
-            if flow.response is not None and isinstance(tee, StreamCapture):
-                response, chunks, _ = _recorded_stream(flow, tee, whole=False)
+            capture = tee if isinstance(tee, StreamCapture) else None
+            if flow.response is not None and capture is not None:
+                response, chunks, _ = _recorded_stream(flow, capture, whole=False)
                 received = Received(response, True, chunks)
-            exchange = self.session.fail(plan, received)
+            hung_up = _agent_hung_up(flow, capture)
+            exchange = self.session.fail(plan, received, agent_hung_up=hung_up)
         except Exception:
             logger.exception("irimi: could not record a failed connection")
             return

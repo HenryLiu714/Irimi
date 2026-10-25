@@ -4,19 +4,28 @@ import asyncio
 import http.client
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from irimi.config import ca, paths
-from irimi.core.exchange import Response
+from irimi.core.exchange import Flag, Response
 from irimi.decide.overlay import NoOverlay, Overlaid
 from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import MitmEngine
 from tests.support.doubles import NullStore
-from tests.support.engine import engine_config, start_engine, via_proxy
+from tests.support.engine import (
+    close_idle_connections_after,
+    engine_config,
+    start_engine,
+    via_proxy,
+)
 from tests.support.maps import SLACK_MAP, map_index
+from tests.support.upstreams import Logged, serve
+from tests.support.waiting import eventually
 
 
 def test_a_get_is_forwarded_live(engine, upstream):
@@ -105,6 +114,53 @@ def test_an_upstream_error_is_flagged(engine, upstream):
     assert status == 502
     assert seen[0].response is None
     assert "upstream-error" in seen[0].flags
+
+
+class _LateAnswer(Logged):
+    """Sends its headers 2 s late, then one byte of a ten-byte body, then waits for `gate`."""
+
+    protocol_version = "HTTP/1.1"
+    gate: threading.Event
+
+    @classmethod
+    def per_server(cls):
+        return {**super().per_server(), "gate": threading.Event()}
+
+    def do_GET(self):
+        time.sleep(2.0)
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", "10")
+        self.end_headers()
+        self.wfile.write(b"{")
+        self.wfile.flush()
+        self.gate.wait(timeout=20)
+        self.close_connection = True
+
+
+def test_an_agent_that_gives_up_on_a_late_answer_is_flagged_though_its_request_is_old(
+    tmp_path, monkeypatch
+):
+    """An agent that times out 5 s after its request, 3 s after the headers, hung up itself.
+
+    mitmproxy's idle limit is 4 s here, so it is the headers that say the connection was busy;
+    mitmproxy holds a buffered answer back, so the agent sees nothing before its timeout."""
+    close_idle_connections_after(monkeypatch, 4)
+    srv = serve(_LateAnswer)
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+        conn.request("GET", f"http://127.0.0.1:{srv}/late", headers={"host": f"127.0.0.1:{srv}"})
+        with pytest.raises(TimeoutError):
+            conn.getresponse()
+        conn.close()
+        eventually(lambda: seen, message="the abandoned read was never recorded")
+    finally:
+        srv.gate.set()
+        stop()
+        srv.stop()
+    (ex,) = seen
+    assert (ex.response, ex.flags) == (None, (Flag.AGENT_DISCONNECTED,))
 
 
 def test_mitmproxys_ca_bundle_is_written_from_irimis_ca(engine, upstream):

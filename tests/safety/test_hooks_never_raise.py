@@ -258,6 +258,16 @@ def _error_with_raising_store(tmp_path, monkeypatch, seen):
     assert Flag.UPSTREAM_ERROR in seen[-1].flags
 
 
+def _error_with_unreadable_client_state(tmp_path, monkeypatch, seen):
+    """A failure whose agent side cannot be read is recorded, blamed on the upstream as before."""
+    addon = bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
+    flow = bare_flow(b"GET", b"/hello")
+    asyncio.run(addon.request(flow))
+    flow.client_conn = types.SimpleNamespace()  # no `state` to read
+    addon.error(flow)
+    assert seen[-1].flags == (Flag.UPSTREAM_ERROR,)
+
+
 def _tls_failure_with_raising_callback(tmp_path, monkeypatch, seen):
     addon = bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
 
@@ -281,6 +291,7 @@ def _tls_failure_with_raising_callback(tmp_path, monkeypatch, seen):
         _response_with_raising_store,
         _response_with_raising_overlay,
         _error_with_raising_store,
+        _error_with_unreadable_client_state,
         _tls_failure_with_raising_callback,
     ],
     ids=lambda case: case.__name__.lstrip("_"),

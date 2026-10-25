@@ -4,6 +4,7 @@ import gzip
 import http.client
 import itertools
 import threading
+import time
 
 import pytest
 from mitmproxy.net import encoding
@@ -19,6 +20,7 @@ from irimi.record.store.writer import DirectoryStore
 from tests.support.credentials import TORN_STREAM_SECRET
 from tests.support.engine import (
     THREE_CHUNKS,
+    close_idle_connections_after,
     engine_config,
     leaf_cert_for_loopback,
     open_stream,
@@ -30,6 +32,7 @@ from tests.support.engine import (
 from tests.support.maps import READ_STREAM_MAP, STREAM_MAP, map_index
 from tests.support.servers import stop_server
 from tests.support.upstreams import SSE_FIRST, SSE_SECOND, StreamUpstream, serve
+from tests.support.waiting import eventually
 
 
 def _stream_three_chunks(tmp_path, monkeypatch, store=None):
@@ -144,6 +147,89 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
     assert ex.response is not None
     assert (ex.response.status, ex.response.body) == (200, THREE_CHUNKS[0])
     assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
+
+
+def test_an_agent_that_hangs_up_mid_stream_is_flagged_and_the_upstream_is_not_blamed(
+    tmp_path, monkeypatch
+):
+    """An agent that closes its connection after one chunk is flagged, not `upstream-error`.
+
+    The upstream holds the second chunk until the exchange is recorded, so nothing failed there."""
+    gates = [threading.Event(), threading.Event()]
+    srv = stream_server(THREE_CHUNKS, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        assert resp.status == 200
+        assert resp.read(len(THREE_CHUNKS[0])) == THREE_CHUNKS[0]
+        resp.close()
+        conn.close()
+        eventually(lambda: seen, message="the abandoned stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED)
+    assert ex.response is not None
+    assert (ex.response.status, ex.response.body) == (200, THREE_CHUNKS[0])
+    assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
+
+
+def test_an_agent_that_hangs_up_after_a_long_stream_is_flagged_though_its_headers_are_old(
+    tmp_path, monkeypatch
+):
+    """A stream that ran past mitmproxy's idle limit, its chunks never idle, was the agent's to end.
+
+    It is the last chunk that says the connection was busy, not the headers."""
+    close_idle_connections_after(monkeypatch, 2)
+    chunks = [b"data: %d\n\n" % i for i in range(8)]
+    gates = [threading.Event() for _ in chunks]  # the last one holds the stream open
+    srv = stream_server(chunks, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        for chunk, gate in zip(chunks[:-1], gates[:-1], strict=True):
+            assert resp.read(len(chunk)) == chunk
+            time.sleep(0.5)  # 3.5 s of stream in all, no gap near the 2 s limit
+            gate.set()
+        assert resp.read(len(chunks[-1])) == chunks[-1]
+        resp.close()
+        conn.close()
+        eventually(lambda: seen, message="the abandoned stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED)
+
+
+def test_a_stream_mitmproxy_closes_for_idleness_is_not_blamed_on_the_agent(tmp_path, monkeypatch):
+    """mitmproxy closes the agent's connection itself when nothing moves for its idle limit."""
+    close_idle_connections_after(monkeypatch, 1)
+    gates = [threading.Event(), threading.Event()]
+    srv = stream_server(THREE_CHUNKS, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        assert resp.read(len(THREE_CHUNKS[0])) == THREE_CHUNKS[0]
+        with pytest.raises(http.client.IncompleteRead):
+            resp.read()  # the agent waits; the upstream sends nothing more
+        conn.close()
+        eventually(lambda: seen, message="the idle stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
 
 
 def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
