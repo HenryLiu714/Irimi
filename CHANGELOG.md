@@ -65,9 +65,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   request, a failed decision, an unreachable target) are JSON,
   `{"error": {"type": ..., "message": ...}}`, carry `Irimi-Answered-By: irimi`, and are recorded
   in the run. They were plain text, unstamped and unrecorded, or stamped `delegated` or `fake-L0`.
-- **Breaking:** the trace format is schema 3. It adds the `irimi` answered-by value and the
-  `refused` flag, and drops the `validation` field and the `fidelity:*` flags. irimi still reads
-  runs that 0.1.0 stored.
+- **Breaking:** the trace format is schema 3. It adds the `irimi` answered-by value, the
+  `refused` flag and a tool call's error `args`, and drops the `validation` field and the
+  `fidelity:*` flags. irimi still reads runs that 0.1.0 stored.
 - **Breaking:** a control-protocol client posting a tool call must send `awaited`. The SDK does;
   a client in another language must add it.
 - **Breaking:** the CA `irimi init` generates is valid for 825 days, not ten years. A CA already

@@ -119,7 +119,7 @@ A run's or tool call's `error` (`trace.ErrorInfo`):
 | --- | --- | --- | --- |
 | `type` | string | 2 | The exception's `module.qualname`, at most 300 characters. |
 | `message` | string | 2 | Its `str()`, at most 1000 characters. |
-| `args` | any JSON, or absent | 3 | A tool call's only: the exception's `args`, [captured](#captured-arguments) as a list and never cut, but for `bytes`, stored as `{"__irimi_repr__": "<bytes>"}`, so a replay raises it again with them. Absent from a run's error, and from a tool call recorded before irimi kept them; a reader takes `null` as absent. |
+| `args` | any JSON, or absent | 3 | A tool call's only: the exception's `args`, [captured](#captured-arguments) as a list, except that `bytes` among them are stored as `{"__irimi_repr__": "<bytes>"}`. Not cut to a length; past the size budget they are the truncation marker. Absent from a run's error, from a tool call whose exception's `args` could not be read, and from one recorded before irimi kept them; a reader takes `null` as absent. |
 
 All three are redacted, `type` and `message` whole and only then cut; a secret across the cut is
 kept as its placeholder, never dropped or split. A replay raises a recorded error with its `args`
