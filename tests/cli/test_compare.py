@@ -3,6 +3,7 @@
 Runs are stored from hand-made events and read back through the real command and shipped maps."""
 
 import dataclasses
+import functools
 import json
 import random
 import unicodedata
@@ -35,6 +36,7 @@ LABELS = [
     "  B  refund_ticket  agent:refund_ticket  agent 1.0",
 ]
 REFUND = "○ stripe  refund $49.00 on ch_1  faked; checked against live state: would succeed"
+SENT_ALIKE = "(both sent the same; only the outcome differs)"
 TOOL = "○ tool  db.mark_refunded  fake ran instead"
 
 
@@ -257,6 +259,7 @@ def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
     assert compare.compare_runs(_run([a]), _run([b]), index).lines() == [
         f"  ~ A {UPDATE}",
         f"    B {UPDATE}",
+        f"      {SENT_ALIKE}",
         '      currency: "usd" -> "eur"',
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
@@ -385,6 +388,95 @@ def test_a_refund_l3_rejected_in_b_is_the_same_write_changed_and_shows_its_mark(
     )
 
 
+def test_a_refund_irimi_could_not_check_in_b_says_both_sent_the_same_and_what_irimi_did():
+    """B's refund prints otherwise, as irimi could not check it, though the agent sent the same.
+
+    It is still changed and exits 1: a check irimi could not make again is a difference."""
+    sent = builders.request(
+        method="POST", path="/v1/refunds", headers=FORM, body=b"charge=ch_1&amount=4900"
+    )
+    checked = _refund(request=sent, precondition=Precondition("passed", currency="usd"))
+    unchecked = _refund(
+        request=sent, answered_by="fake-L2", precondition=Precondition("not_evaluable")
+    )
+    comparison = compare.compare_runs(_run([checked]), _run([unchecked]), servicemaps.load())
+    assert (comparison.exit_code, comparison.lines()) == (
+        exitcodes.DIFFERENT,
+        [
+            f"  ~ A {REFUND}",
+            "    B ○ stripe  refund 4900 (minor units, currency unknown) on ch_1  faked; could not "
+            "check: irimi made no check read",
+            f"      {SENT_ALIKE}",
+            '      answered by: "fake-L1" -> "fake-L2"',
+            '      currency: "usd" -> (absent)',
+            '      precondition: "passed" -> "not_evaluable"',
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    )
+
+
+def test_a_stand_in_that_raised_in_b_given_the_same_args_says_both_sent_the_same():
+    raised = dataclasses.replace(
+        _tool(), error=ErrorInfo("builtins.LookupError", "no such account")
+    )
+    assert compare.compare_runs(_run([_tool()]), _run([raised]), None).lines() == [
+        f"  ~ A {TOOL}",
+        "    B ○ tool  db.mark_refunded  fake raised builtins.LookupError",
+        f"      {SENT_ALIKE}",
+        '      raised: (absent) -> "builtins.LookupError"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_a_pair_whose_data_json_cannot_hold_is_never_said_to_have_sent_the_same():
+    """Two writes whose fields JSON cannot hold equal nothing, so they never sent the same."""
+    a = compare.Action((compare.TOOL_KEY, "db.x"), "x", fields=None)
+    b = compare.Action((compare.TOOL_KEY, "db.x"), "y", fields=None)
+    assert compare.Comparison(compare.align([a], [b])).lines() == [
+        "  ~ A x",
+        "    B y",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+@pytest.mark.parametrize(
+    "sent_to",
+    [{"query": "expand[]=charge"}, {"headers": (*FORM, ("stripe-account", "acct_2"))}],
+    ids=["query", "scope"],
+)
+def test_a_refund_sent_with_another_query_or_account_is_never_said_to_have_sent_the_same(sent_to):
+    """A write's query and scope headers are part of what it sent, as its body is."""
+    a = _refund()
+    b = _refund(
+        request=dataclasses.replace(a.request, **sent_to),
+        precondition=Precondition("rejected", "charge_already_refunded"),
+    )
+    assert compare.compare_runs(_run([a]), _run([b]), servicemaps.load()).lines() == [
+        f"  ~ A {REFUND}",
+        "    B ✗ stripe  refund $49.00 on ch_1  faked; would fail: charge_already_refunded",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_the_line_that_says_both_sent_the_same_is_not_one_of_the_five_parts_shown():
+    names = ("answered by", "currency", "flags", "precondition", "rejection code", "target")
+    a = compare.Action((compare.TOOL_KEY, "db.x"), "x", outcome=tuple((n, '"a"') for n in names))
+    b = compare.Action((compare.TOOL_KEY, "db.x"), "y", outcome=tuple((n, '"b"') for n in names))
+    assert compare.Comparison(compare.align([a], [b])).lines() == [
+        "  ~ A x",
+        "    B y",
+        f"      {SENT_ALIKE}",
+        *(f'      {name}: "a" -> "b"' for name in names[:5]),
+        "      and 1 more",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
 def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
     """Equal writes pair first, so B's refused second refund is the one marked `+`."""
     refused = _refund(precondition=Precondition("rejected", "charge_already_refunded"))
@@ -397,6 +489,29 @@ def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
             f"  = {TOOL}",
             "",
             "  2 same · 0 changed · 0 only in A · 1 only in B",
+        ],
+    )
+
+
+@pytest.mark.parametrize("repeated", ["a", "b"])
+def test_a_changed_write_before_a_repeated_one_is_one_write_changed(home, capfd, repeated):
+    """A refund of another amount, then one both runs made, against that refund made twice.
+
+    Pairing the first of the two identical refunds instead leaves a refund only in each run."""
+    other = "○ stripe  refund $24.00 on ch_1  faked; checked against live state: would succeed"
+    twice: list[Event] = [_refund(), _refund()]
+    changed: list[Event] = [_refund(2400), _refund()]
+    a, b = (twice, changed) if repeated == "a" else (changed, twice)
+    first = (REFUND, other) if repeated == "a" else (other, REFUND)
+    code, lines = _compare(home, capfd, a, b)
+    assert (code, lines[3:]) == (
+        1,
+        [
+            f"  ~ A {first[0]}",
+            f"    B {first[1]}",
+            f"  = {REFUND}",
+            "",
+            "  1 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
 
@@ -428,11 +543,17 @@ def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
         answered_by="delegated", target="http://127.0.0.1:9999", precondition=Precondition()
     )
     code, lines = _compare(home, capfd, [_refund()], [delegated])
-    assert (code, lines[3:5]) == (
+    assert (code, lines[3:]) == (
         1,
         [
             f"  ~ A {REFUND}",
             "    B ○ stripe  refund $49.00 on ch_1  sent to target 127.0.0.1:9999",
+            f"      {SENT_ALIKE}",
+            '      answered by: "fake-L1" -> "delegated"',
+            '      precondition: "passed" -> (absent)',
+            '      target: (absent) -> "http://127.0.0.1:9999"',
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
 
@@ -662,6 +783,8 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
     assert comparison.lines() == [
         "  ~ A ○ tool  db.mark_refunded  fake raised a\\nb",
         "    B ○ tool  db.mark_refunded  fake raised a\\\\nb",
+        f"      {SENT_ALIKE}",
+        '      raised: "a\\nb" -> "a\\\\nb"',
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
@@ -778,6 +901,178 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
         ]
 
 
+def _best(
+    a: list[compare.Action], b: list[compare.Action]
+) -> tuple[tuple[int, int, int], list[tuple[int, int]]]:
+    """Return the best in-order pairing's score and its `(i, j)` pairs, by exhaustive search.
+
+    The score is the `same` rows, the pairs, and minus the pairs' index sum, so the best has the
+    most `same` rows, then the most pairs, then the soonest. Of pairings as good, from each place
+    it pairs if one of them does, else passes over `b[j]` if one does, else over `a[i]`."""
+
+    @functools.cache
+    def paired(i: int, j: int) -> tuple[int, int, int]:
+        same, pairs, soon = best(i + 1, j + 1)
+        return (same + (a[i].data == b[j].data), pairs + 1, soon - i - j)
+
+    @functools.cache
+    def best(i: int, j: int) -> tuple[int, int, int]:
+        if i == len(a) or j == len(b):
+            return (0, 0, 0)
+        options = [best(i + 1, j), best(i, j + 1)]
+        if a[i].key == b[j].key:
+            options.append(paired(i, j))
+        return max(options)
+
+    pairs: list[tuple[int, int]] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i].key == b[j].key and paired(i, j) == best(i, j):
+            pairs.append((i, j))
+            i, j = i + 1, j + 1
+        elif best(i, j + 1) == best(i, j):
+            j += 1
+        else:
+            i += 1
+    return best(0, 0), pairs
+
+
+@pytest.mark.parametrize("amounts", [3, 20])
+def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_the_soonest(amounts):
+    """Property test against an exhaustive search over seeded random runs of few writes.
+
+    Half the time B is A with a write or two changed, added or dropped, so the runs often share a
+    start or an end, which `align` pairs before its table."""
+    rng = random.Random(11)
+
+    def action() -> compare.Action:
+        key = (compare.EXCHANGE_KEY, "stripe", rng.choice(["refunds.create", "customers.update"]))
+        fields = (("body.amount", str(rng.randrange(amounts))),)
+        return compare.Action(key, "", cut=rng.random() < 0.1, fields=fields)
+
+    def edited(a: list[compare.Action]) -> list[compare.Action]:
+        b = [dataclasses.replace(x) for x in a]
+        for _ in range(rng.randrange(1, 3)):
+            n = rng.randrange(len(b) + 1)
+            if n == len(b) or rng.random() < 0.4:
+                b.insert(n, action())
+            elif rng.random() < 0.5:
+                b[n] = action()
+            else:
+                del b[n]
+        return b
+
+    for _ in range(2000):
+        a = [action() for _ in range(rng.randrange(9))]
+        b = edited(a) if rng.random() < 0.5 else [action() for _ in range(rng.randrange(9))]
+        rows = compare.align(a, b)
+        at_a, at_b = ({id(x): n for n, x in enumerate(side)} for side in (a, b))
+        pairs = [
+            (at_a[id(r.a)], at_b[id(r.b)]) for r in rows if r.a is not None and r.b is not None
+        ]
+        same = sum(row.mark == "same" for row in rows)
+        score = (same, len(pairs), -sum(i + j for i, j in pairs))
+        assert (score, pairs) == _best(a, b), (a, b)
+
+
+def _refunded(amount: str) -> compare.Action:
+    key = (compare.EXCHANGE_KEY, "stripe", "refunds.create")
+    return compare.Action(key, amount, fields=(("body.amount", amount),))
+
+
+def _tool_action(name: str) -> compare.Action:
+    return compare.Action((compare.TOOL_KEY, name), name)
+
+
+def test_of_pairings_as_good_align_takes_the_soonest_pairs_so_a_repeat_is_the_extra_copy():
+    """A write one run made twice pairs its first copy, whichever run repeats it.
+
+    Each run starts with a tool the other lacks, so the ties are not at the start. Of pairings
+    whose pairs come as soon, `align` leaves B's action unpaired before A's."""
+    a = [_tool_action("a"), _refunded("49"), _refunded("49")]
+    b = [_tool_action("b"), _refunded("49")]
+    assert [(row.mark, row.a, row.b) for row in compare.align(a, b)] == [
+        ("only_a", a[0], None),
+        ("only_b", None, b[0]),
+        ("same", a[1], b[1]),
+        ("only_a", a[2], None),
+    ]
+    assert [(row.mark, row.a, row.b) for row in compare.align(b, a)] == [
+        ("only_a", b[0], None),
+        ("only_b", None, a[0]),
+        ("same", b[1], a[1]),
+        ("only_b", None, a[2]),
+    ]
+    a, b = [_refunded("49"), _refunded("24")], [_refunded("24"), _refunded("49")]
+    assert [(row.mark, row.a, row.b) for row in compare.align(a, b)] == [
+        ("only_b", None, b[0]),
+        ("same", a[0], b[1]),
+        ("only_a", a[1], None),
+    ]
+    # Pairing `a[1]` with `b[0]` and `a[2]` with `b[1]` pairs as many, as soon: a tie pairs at once.
+    a = [_refunded("1"), _refunded("2"), _refunded("1")]
+    b = [_refunded("2"), _refunded("3"), _refunded("3"), _refunded("2")]
+    assert [(row.mark, row.a, row.b) for row in compare.align(a, b)] == [
+        ("changed", a[0], b[0]),
+        ("only_b", None, b[1]),
+        ("only_b", None, b[2]),
+        ("same", a[1], b[3]),
+        ("only_a", a[2], None),
+    ]
+
+
+@pytest.fixture
+def table_sizes(monkeypatch) -> list[tuple[int, int]]:
+    """Return the sizes of the runs each table `align` builds is scored over, as it builds them.
+
+    The table costs the product of the two runs' lengths."""
+    sizes: list[tuple[int, int]] = []
+    steps = compare._steps
+
+    def spy(a, b):
+        sizes.append((len(a), len(b)))
+        return steps(a, b)
+
+    monkeypatch.setattr(compare, "_steps", spy)
+    return sizes
+
+
+def test_the_identical_actions_both_runs_start_with_pair_before_the_table_is_built(table_sizes):
+    """Only what follows a shared start is scored, so a replay matching its recording is cheap."""
+    shared = [_refunded("49") for _ in range(300)]
+    a = [*shared, _refunded("24")]
+    b = [*shared, _tool_action("b"), _refunded("24"), _tool_action("b")]
+    marks = ["only_b", "same", "only_b"]
+    assert [row.mark for row in compare.align(a, b)] == ["same"] * 300 + marks
+    assert table_sizes == [(1, 3)]
+
+
+def test_an_identical_end_with_every_copy_of_its_writes_pairs_before_the_table_too(table_sizes):
+    """A replay that differs at its first write and then matches its recording is cheap too.
+
+    An end holding an action that either run also made before it is scored, since the soonest
+    pairing may pair that earlier copy."""
+    shared = [_refunded(str(n)) for n in range(300)]
+    a, b = [_refunded("x"), *shared], [_tool_action("b"), *shared]
+    assert [row.mark for row in compare.align(a, b)] == ["only_a", "only_b"] + ["same"] * 300
+    assert table_sizes == [(1, 1)]
+    table_sizes.clear()
+    repeated = [_refunded("49") for _ in range(300)]
+    marks = [
+        row.mark
+        for row in compare.align([_refunded("x"), *repeated], [_tool_action("b"), *repeated])
+    ]
+    assert marks == ["only_a", "only_b"] + ["same"] * 300
+    assert table_sizes == [(1, 1)]
+    table_sizes.clear()
+    assert [row.mark for row in compare.align(shared, b)] == ["only_b"] + ["same"] * 300
+    assert table_sizes == [(0, 1)]
+    table_sizes.clear()
+    b = [_refunded("299"), *shared]
+    assert [row.mark for row in compare.align(a, b)] == ["changed"] + ["same"] * 300
+    assert table_sizes == [(301, 301)]
+
+
 def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too():
     """A `?` pair that prints alike though it differs escapes its backslashes, as `~` does."""
     cut = dataclasses.replace(_post("line1\nline2"), flags=(Flag.BODY_TRUNCATED,))
@@ -789,9 +1084,7 @@ def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too
 
 
 def test_a_run_of_hundreds_of_one_write_is_lined_up_write_by_write():
-    """250 identical fakes after differing first writes each line up as `=`.
-
-    `difflib`'s junk heuristic, which would drop an item over 1% of a long sequence, is off."""
+    """250 identical fakes after differing first writes each line up as `=`."""
     many = [_tool() for _ in range(250)]
     comparison = compare.compare_runs(_run([_post("hi"), *many]), _run([_refund(), *many]), None)
     assert comparison.lines() == [

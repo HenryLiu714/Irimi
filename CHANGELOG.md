@@ -136,6 +136,11 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
+- `irimi compare` pairs a changed write with its counterpart when one run repeats an identical
+  write beside it, instead of showing one write only in A and one only in B.
+- `irimi compare` says when a changed pair's two writes sent the same, such as a refund irimi
+  could check in one run and not the other, and lists what differs, instead of showing two lines
+  that read as a change the agent made.
 
 ## [0.1.0] - 2026-10-20
 
