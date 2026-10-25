@@ -546,7 +546,7 @@ def _forge_in_name(k, v):
 @pytest.mark.parametrize(
     ("edit", "reason"),
     [
-        (_forge_in_value, "the 'etag' header holds a CR, LF or NUL"),
+        (_forge_in_value, "the 'etag' header holds a control character"),
         (_forge_in_name, "the header name 'set-cookie: session=forged; etag' is not a token"),
     ],
 )

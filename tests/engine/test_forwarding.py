@@ -342,7 +342,7 @@ FORGED_NAME = ("set-cookie: session=forged; etag", '"v1"')
 @pytest.mark.parametrize(
     ("header", "reason"),
     [
-        (FORGED_VALUE, "the 'etag' header holds a CR, LF or NUL"),
+        (FORGED_VALUE, "the 'etag' header holds a control character"),
         (FORGED_NAME, "the header name 'set-cookie: session=forged; etag' is not a token"),
     ],
 )
@@ -400,7 +400,8 @@ def _with_requests(port, method):
         ),
         ("GET", Response(204, HOP_BY_HOP, b"stray"), 204, None),
         ("GET", Response(200, HOP_BY_HOP, b"stray"), 200, "5"),
-        ("GET", Response(200, (FORGED_VALUE,), b"{}"), 502, "149"),
+        ("GET", Response(200, (FORGED_VALUE,), b"{}"), 502, "153"),
+        ("GET", Response(200, (("x-note", "a\x0bb"),), b"{}"), 502, "155"),
         ("GET", Response(200, (FORGED_NAME,), b"{}"), 502, "175"),
         ("HEAD", Response(200, (FORGED_NAME,), b""), 502, None),
     ],
@@ -452,10 +453,11 @@ def test_only_an_answer_that_ends_at_its_head_is_built_without_content(
     An answer to HEAD keeps the length it names, unless a GET's answer would have no content; any
     other answer gets its body's. `rot13` is an encoding mitmproxy cannot apply, so it takes the
     other way `make` is called."""
-    headers = (("content-encoding", encoding), ("content-length", "42"))
+    headers = (("content-encoding", encoding), ("content-length", "42"), ("etag", '"v1"'))
     built = mitm._to_mitm_response(Response(status, headers, b"stray"), method)
     assert built.raw_content == sent
     assert built.headers.get("content-length") == length
+    assert built.headers.get("etag") == '"v1"'
 
 
 @pytest.mark.parametrize(
@@ -480,11 +482,18 @@ def test_a_rebuilt_answer_is_built_without_hop_by_hop_headers(method, status, bo
         ("etag", '"v1"\nSet-Cookie: session=forged'),
         ("etag", '"v1"\r'),
         ("etag", '"v1"\0'),
+        ("x-note", "a\x0bSet-Cookie: session=forged"),
+        ("x-note", "a\x0cb"),
+        ("x-note", "a\x01b"),
+        ("x-note", "a\x1fb"),
+        ("x-note", "a\x7fb"),
     ],
 )
 def test_a_header_that_is_not_one_line_is_never_built(method, name, value):
-    """mitmproxy writes a header as it is, so a CR or LF would start another (RFC 9110 5.5)."""
-    with pytest.raises(ValueError, match="header holds a CR, LF or NUL"):
+    """mitmproxy writes a header as it is, so a CR or LF would start another (RFC 9110 5.5).
+
+    httpx refuses the whole answer over a VT or FF, and no control character but a tab is valid."""
+    with pytest.raises(ValueError, match="header holds a control character"):
         mitm._to_mitm_response(Response(200, ((name, value),), b"{}"), method)
 
 
@@ -538,9 +547,10 @@ def test_an_answer_to_head_names_one_length_or_none(named, sent):
     assert built.headers.get("etag") == '"v1"'
 
 
-def test_a_header_value_may_hold_a_tab():
-    built = mitm._to_mitm_response(Response(200, (("x-note", "a\tb"),), b"{}"), "GET")
-    assert built.headers.get("x-note") == "a\tb"
+@pytest.mark.parametrize("value", ["a\tb", "caf\xe9", "a\x85b"])
+def test_a_header_value_may_hold_a_tab_and_any_byte_past_ascii(value):
+    built = mitm._to_mitm_response(Response(200, (("x-note", value),), b"{}"), "GET")
+    assert built.headers.fields[0] == (b"x-note", value.encode("latin-1"))
 
 
 @pytest.mark.parametrize("fold", ["\r\n ", "\r\n\t", "\r\n  \t"])

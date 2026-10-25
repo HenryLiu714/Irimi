@@ -72,8 +72,9 @@ _HOP_BY_HOP = frozenset(
 )
 # mitmproxy keeps a folded value it read with the fold, which RFC 9112 5.2 makes one space.
 _OBS_FOLD = re.compile(r"\r\n[ \t]+")
-# mitmproxy writes a header as it is, so any of these would start a header of its own.
-_BREAKS_LINE = re.compile(r"[\r\n\0]")
+# A control character but a tab (RFC 9110 5.5). mitmproxy writes a header as it is, so a CR or LF
+# would start a header of its own, and httpx refuses a whole answer over a VT or FF.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 # A field name (RFC 9110 5.1): a `:` in one would end it early and name another header.
 _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
@@ -174,14 +175,14 @@ def _one_line(headers: Headers) -> Headers:
 
     A folded value is unfolded, and the whitespace a service left before a name's colon is
     dropped, as RFC 9112 5.1 and 5.2 tell a proxy to. Raises ValueError for a name that is not a
-    token, or a value that still holds a CR, LF or NUL.
+    token, or a value that still holds a control character other than a tab.
     """
     unfolded = tuple((k.rstrip(" \t"), _OBS_FOLD.sub(" ", v)) for k, v in headers)
     for name, value in unfolded:
         if not _TOKEN.fullmatch(name):
             raise ValueError(f"the header name {name!r} is not a token")
-        if _BREAKS_LINE.search(value):
-            raise ValueError(f"the {name!r} header holds a CR, LF or NUL")
+        if _CONTROL.search(value):
+            raise ValueError(f"the {name!r} header holds a control character")
     return unfolded
 
 
@@ -192,7 +193,7 @@ def _to_mitm_response(r: Response, method: str) -> http.Response:
     """
     fields = _fields(tuple((k, v) for k, v in _one_line(r.headers) if k.lower() not in _HOP_BY_HOP))
     if wire.ends_at_head(method, r.status):
-        return _head_only(r.status, fields, method)
+        return _head_only(r.status, fields)
     # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
     # (`rot13`, `utf-8`); the body then goes out as it is, as mitmproxy's own fallback sends it.
     try:
@@ -202,18 +203,19 @@ def _to_mitm_response(r: Response, method: str) -> http.Response:
         return http.Response.make(r.status, r.body, kept)
 
 
-def _head_only(status: int, fields: list[tuple[bytes, bytes]], method: str) -> http.Response:
+def _head_only(status: int, fields: list[tuple[bytes, bytes]]) -> http.Response:
     """Return an answer that ends at its head: no content, and a Content-Length only to HEAD.
 
-    An answer to HEAD keeps the one length its fields name, which says what its GET would carry; a
-    1xx or 204 must not send one, and a 304 need not (RFC 9110 8.6). The fields are set after
-    `make`, which would give the answer a length of 0.
+    An answer whose status a GET would carry content with ends at its head only to HEAD, and keeps
+    the one length its fields name, which says what that GET would carry. A 1xx or 204 must not
+    send one, and a 304 need not (RFC 9110 8.6). The fields are set after `make`, which would give
+    the answer a length of 0.
     """
     response = http.Response.make(status)
     response.headers = http.Headers(fields)
     named = _one_length(response.headers.get_all("content-length"))
     response.headers.pop("content-length", None)
-    if named is not None and method == "HEAD" and not wire.ends_at_head("GET", status):
+    if named is not None and not wire.ends_at_head("GET", status):
         response.headers["content-length"] = named
     return response
 

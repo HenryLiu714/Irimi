@@ -137,9 +137,10 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - An answer irimi builds (a replayed one, an overlaid read) leaves out the hop-by-hop headers it
   holds (`Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`,
   `Upgrade`), so a recorded `Connection: close` no longer ends the agent's connection.
-- A recorded header that holds a CR, LF or NUL once a folded value is unfolded, or whose name is
-  not a token (a `:` in it would name another header), is refused with irimi's `502` flagged
-  `decision-failed`, instead of being sent as more than one header.
+- A recorded header that holds a control character other than a tab once a folded value is
+  unfolded (a CR or LF would start another header), or whose name is not a token (a `:` in it
+  would name another), is refused with irimi's `502` flagged `decision-failed`, instead of being
+  sent as more than one header.
 - A base-URL request whose path starts with `//` names no host and is refused.
 - An argument no command takes is refused with the usage of the command it was typed to, with a
   hint for `--serve` and for a command typed without its `--`.
