@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from irimi.config import ca, paths
-from irimi.core.exchange import Response
+from irimi.core.exchange import Flag, Response
 from irimi.decide.overlay import NoOverlay, Overlaid
 from irimi.decide.policy import Decided, Respond, ShadowPolicy
 from irimi.engine import EngineConfig, EngineStartError, mitm
@@ -232,27 +232,34 @@ def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream
     assert cookies == ["a=1", "b=2"]
 
 
-@pytest.mark.parametrize("framed", [(), (("transfer-encoding", "chunked"),)])
-@pytest.mark.parametrize(("method", "status"), [("GET", 204), ("GET", 304), ("HEAD", 200)])
-def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connection_usable(
-    tmp_path, monkeypatch, method, status, framed
-):
-    """A policy's 204, 304 or answer to HEAD has no content, Content-Length or Transfer-Encoding.
+# Every header a connection keeps to itself, in the spellings a service may send.
+HOP_BY_HOP = (
+    ("Connection", "Upgrade, close"),
+    ("Keep-Alive", "timeout=5"),
+    ("proxy-connection", "close"),
+    ("te", "trailers"),
+    ("Trailer", "X-Checksum"),
+    ("transfer-encoding", "chunked"),
+    ("Upgrade", "h2c"),
+)
 
-    Bytes after it would be read as the next response (RFC 9112 6.3), a chunked one's last chunk
-    included, so the GET sent next on the same connection must get its own answer. Both go in one
-    raw-socket write, and both are recorded as sent."""
+
+def _on_one_connection(tmp_path, monkeypatch, first, method="GET"):
+    """Return the raw answer to `method /first`, the one to a GET after it, and what was recorded.
+
+    Both requests go in one raw-socket write. The policy answers `/first` with `first` and the GET
+    with `{}`, so the connection must stay open, and `first` end where it says, for `{}` to come."""
 
     class _Answers(ShadowPolicy):
         def decide(self, request, classification, write_log=(), run_id="", target=None):
-            if request.path == "/empty":
-                return Decided(Respond(Response(status, framed, b"stray"), "recording"))
+            if request.path == "/first":
+                return Decided(Respond(first, "recording"))
             return Decided(Respond(Response(200, (), b"{}"), "recording"))
 
     eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), policy=_Answers())
     sent = "".join(
         f"{verb} http://127.0.0.1:9/{path} HTTP/1.1\r\nhost: 127.0.0.1:9\r\n\r\n"
-        for verb, path in ((method, "empty"), ("GET", "after"))
+        for verb, path in ((method, "first"), ("GET", "after"))
     )
     try:
         with socket.create_connection(("127.0.0.1", eng.listen_port()), timeout=10) as sock:
@@ -265,6 +272,21 @@ def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connecti
     finally:
         stop()
     head, after = received.split(b"\r\n\r\n", 1)
+    return head, after, seen
+
+
+@pytest.mark.parametrize("framed", [(), (("transfer-encoding", "chunked"),)])
+@pytest.mark.parametrize(("method", "status"), [("GET", 204), ("GET", 304), ("HEAD", 200)])
+def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connection_usable(
+    tmp_path, monkeypatch, method, status, framed
+):
+    """A policy's 204, 304 or answer to HEAD has no content, Content-Length or Transfer-Encoding.
+
+    Bytes after it would be read as the next response (RFC 9112 6.3), a chunked one's last chunk
+    included, so the GET sent next on the same connection must get its own answer. Both are
+    recorded as sent."""
+    first = Response(status, framed, b"stray")
+    head, after, seen = _on_one_connection(tmp_path, monkeypatch, first, method)
     assert head.startswith(f"HTTP/1.1 {status} ".encode())
     assert b"\r\nirimi-answered-by: recording" in head.lower()
     assert b"content-length" not in head.lower()
@@ -275,42 +297,146 @@ def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connecti
     assert seen[0].response is not None and seen[0].response.header("content-length") is None
 
 
+@pytest.mark.parametrize(("status", "length"), [(200, "42"), (404, "42"), (204, None), (304, None)])
+def test_an_answer_to_head_keeps_the_length_it_names_and_the_next_answer_is_read_whole(
+    tmp_path, monkeypatch, status, length
+):
+    """An answer to HEAD may say how long its GET's content is (RFC 9110 8.6), and still has none.
+
+    A 204 must not say, and a 304 is not asked to."""
+    first = Response(status, (("content-length", "42"),), b"")
+    head, after, seen = _on_one_connection(tmp_path, monkeypatch, first, "HEAD")
+    assert head.startswith(f"HTTP/1.1 {status} ".encode())
+    named = [line for line in head.lower().split(b"\r\n") if line.startswith(b"content-length")]
+    assert named == ([] if length is None else [f"content-length: {length}".encode()])
+    assert after.startswith(b"HTTP/1.1 200 ")
+    assert seen[0].response is not None
+    assert (seen[0].response.header("content-length"), seen[0].response.body) == (length, b"")
+
+
+def test_a_policy_s_connection_close_does_not_end_the_agent_s_connection(tmp_path, monkeypatch):
+    """A policy's answer goes out without the hop-by-hop headers it holds, framed by its length.
+
+    Its `Connection: close` would otherwise end the connection before the GET sent after it."""
+    first = Response(200, (*HOP_BY_HOP, ("etag", '"v1"')), b"stray")
+    head, after, seen = _on_one_connection(tmp_path, monkeypatch, first)
+    names = [line.split(b":", 1)[0].lower() for line in head.split(b"\r\n")[1:]]
+    assert names == [b"etag", b"irimi-answered-by", b"content-length"]
+    assert after.startswith(b"stray" + b"HTTP/1.1 200 ")
+    assert seen[0].response is not None and seen[0].response.body == b"stray"
+
+
+def test_an_answer_with_a_header_that_is_not_one_line_is_refused_as_irimi_s_502(
+    tmp_path, monkeypatch
+):
+    """A header holding CRLF would add a header of its own to the answer; irimi refuses it."""
+    first = Response(200, (("etag", '"v1"\r\nSet-Cookie: session=forged'),), b"stray")
+    head, after, seen = _on_one_connection(tmp_path, monkeypatch, first)
+    assert head.startswith(b"HTTP/1.1 502 ")
+    assert b"set-cookie" not in head.lower()
+    assert b"\r\nirimi-answered-by: irimi" in head.lower()
+    error = json.loads(after.split(b"HTTP/1.1 200 ", 1)[0])["error"]
+    assert error == {
+        "type": "irimi_decision_failed",
+        "message": "irimi could not decide how to answer this request: "
+        "the 'etag' header holds a CR, LF or NUL",
+    }
+    assert seen[0].response is not None and seen[0].response.status == 502
+    assert Flag.DECISION_FAILED in seen[0].flags
+
+
 @pytest.mark.parametrize("encoding", ["identity", "rot13"])
 @pytest.mark.parametrize(
-    ("method", "status", "sent"),
+    ("method", "status", "sent", "length"),
     [
-        ("GET", 100, b""),
-        ("GET", 199, b""),
-        ("GET", 204, b""),
-        ("GET", 304, b""),
-        ("HEAD", 200, b""),
-        ("HEAD", 403, b""),
-        ("GET", 200, b"stray"),
-        ("GET", 203, b"stray"),
-        ("GET", 303, b"stray"),
-        ("POST", 403, b"stray"),
+        ("GET", 100, b"", None),
+        ("GET", 199, b"", None),
+        ("GET", 204, b"", None),
+        ("GET", 304, b"", None),
+        ("HEAD", 100, b"", None),
+        ("HEAD", 200, b"", "42"),
+        ("HEAD", 204, b"", None),
+        ("HEAD", 304, b"", None),
+        ("HEAD", 403, b"", "42"),
+        ("GET", 200, b"stray", "5"),
+        ("GET", 203, b"stray", "5"),
+        ("GET", 303, b"stray", "5"),
+        ("POST", 403, b"stray", "5"),
     ],
 )
 def test_only_an_answer_that_ends_at_its_head_is_built_without_content(
-    method, status, sent, encoding
+    method, status, sent, length, encoding
 ):
     """A 1xx, 204 or 304, or any answer to HEAD, is built bare; the rest keep body and length.
 
-    `rot13` is an encoding mitmproxy cannot apply, so it takes the other way `make` is called."""
-    headers = (("content-encoding", encoding), ("content-length", "5"))
+    An answer to HEAD keeps the length it names, unless a GET's answer would have no content; any
+    other answer gets its body's. `rot13` is an encoding mitmproxy cannot apply, so it takes the
+    other way `make` is called."""
+    headers = (("content-encoding", encoding), ("content-length", "42"))
     built = mitm._to_mitm_response(Response(status, headers, b"stray"), method)
     assert built.raw_content == sent
-    assert built.headers.get("content-length") == (str(len(sent)) if sent else None)
+    assert built.headers.get("content-length") == length
 
 
 @pytest.mark.parametrize(
-    ("method", "status", "kept"),
-    [("GET", 204, None), ("GET", 304, None), ("HEAD", 200, None), ("GET", 200, "chunked")],
+    ("method", "status", "body"),
+    [("GET", 200, b"stray"), ("POST", 403, b"stray"), ("GET", 204, b""), ("HEAD", 200, b"")],
 )
-def test_an_answer_that_ends_at_its_head_is_built_without_a_transfer_encoding(method, status, kept):
-    """mitmproxy would end a chunked 204 or 304 with a last chunk, read as the next response."""
-    response = Response(status, (("transfer-encoding", "chunked"),), b"")
-    assert mitm._to_mitm_response(response, method).headers.get("transfer-encoding") == kept
+def test_a_rebuilt_answer_is_built_without_hop_by_hop_headers(method, status, body):
+    """A Transfer-Encoding included: mitmproxy would end a chunked 204 with a last chunk."""
+    response = Response(status, (*HOP_BY_HOP, ("etag", '"v1"')), b"stray")
+    built = mitm._to_mitm_response(response, method)
+    framing = [("content-length", str(len(body)))] if body else []
+    assert built.headers.fields == tuple(
+        (k.encode(), v.encode()) for k, v in [("etag", '"v1"'), *framing]
+    )
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("etag", '"v1"\r\nSet-Cookie: session=forged'),
+        ("etag", '"v1"\nSet-Cookie: session=forged'),
+        ("etag", '"v1"\r'),
+        ("etag", '"v1"\0'),
+        ("etag\r\nSet-Cookie", "session=forged"),
+    ],
+)
+def test_a_header_that_is_not_one_line_is_never_built(method, name, value):
+    """mitmproxy writes a header as it is, so a CR or LF would start another (RFC 9110 5.5)."""
+    with pytest.raises(ValueError, match="header holds a CR, LF or NUL"):
+        mitm._to_mitm_response(Response(200, ((name, value),), b"{}"), method)
+
+
+def test_a_header_value_may_hold_a_tab():
+    built = mitm._to_mitm_response(Response(200, (("x-note", "a\tb"),), b"{}"), "GET")
+    assert built.headers.get("x-note") == "a\tb"
+
+
+@pytest.mark.parametrize("fold", ["\r\n ", "\r\n\t", "\r\n  \t"])
+def test_a_folded_value_mitmproxy_read_is_rebuilt_unfolded(fold):
+    """mitmproxy keeps a service's obsolete line folding in the value it read (RFC 9112 5.2)."""
+    built = mitm._to_mitm_response(Response(200, (("x-note", f"a{fold}b"),), b"{}"), "GET")
+    assert built.headers.get("x-note") == "a b"
+
+
+@pytest.mark.parametrize("value", ["a\r\n b", "a\0b", "a\rb"])
+def test_a_live_answer_is_sent_with_the_header_values_the_service_sent(value):
+    """Only the stamp is written onto a delegated answer whose body nothing changed, as it came.
+
+    A value mitmproxy read is sent again as a live forward sends it, never refused."""
+    from mitmproxy.test import tutils
+
+    flow = bare_flow("GET", "/v1/charges")
+    flow.response = tutils.tresp(content=b"{}")
+    upstream = Response(200, (("x-note", value),), b"{}")
+    out = Response(200, (("x-note", value), ("irimi-answered-by", "delegated")), upstream.body)
+    mitm._send(flow, out, upstream)
+    assert flow.response.headers.fields == (
+        (b"x-note", value.encode()),
+        (b"irimi-answered-by", b"delegated"),
+    )
 
 
 @pytest.mark.parametrize(("method", "sent"), [("HEAD", b""), ("GET", b'{"overlaid": true}')])

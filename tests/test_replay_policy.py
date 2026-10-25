@@ -22,6 +22,7 @@ from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.replay.policy import ReplayPolicy
 from irimi.servicemaps.classify import classify
+from irimi.servicemaps.loader import parse_service
 from tests.support import builders
 from tests.support.builders import FORM_CONTENT_TYPE
 from tests.support.credentials import OTHER_RECORDED_SECRET, RECORDED_SECRET
@@ -345,8 +346,60 @@ def test_a_recorded_read_is_served_as_it_was_recorded():
     )
     stored = _stored(_req(), recorded, answered_by="overlay", flags=(), overlay="full")
     answer = _answer(ReplayPolicy(_recording(stored), SHIPPED), _req())
+    framing = (("content-length", "999"), ("transfer-encoding", "chunked"))
     assert answer.response == Response(
-        200, (("content-type", JSON), ("request-id", "req_1")), recorded.body
+        200, (("content-type", JSON), *framing, ("request-id", "req_1")), recorded.body
+    )
+
+
+# A map naming HEAD, which no shipped map does, so an answer to HEAD can be replayed.
+FILES = servicemaps.MapIndex(
+    (
+        parse_service(
+            {
+                "version": 1,
+                "service": "files",
+                "hosts": ["files.example.test"],
+                "routes": [
+                    {
+                        "match": {"method": method, "path": "/report.csv"},
+                        "operation": f"report.{method.lower()}",
+                        "kind": "read",
+                    }
+                    for method in ("GET", "HEAD")
+                ],
+            },
+            "files.yaml",
+        ),
+    )
+)
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_a_replayed_answer_to_head_keeps_the_encoding_its_get_would_carry(method):
+    """A recorded answer to HEAD has no body, so its Content-Encoding still holds.
+
+    An answer to any other method was stored decoded, so it no longer describes its body."""
+    request = _req(method, "files.example.test", "/report.csv")
+    recorded = Response(
+        200,
+        (
+            ("content-type", "text/csv"),
+            ("content-encoding", "gzip"),
+            ("content-length", "999"),
+            ("irimi-answered-by", "recording"),
+        ),
+        b"",
+    )
+    stored = _stored(request, recorded, kind="read")
+    recording = ReplayIndex.from_events([stored], KEY, FILES)
+    answer = decided(ReplayPolicy(recording, FILES), request, classify(request, FILES))
+    encoding = (("content-encoding", "gzip"),) if method == "HEAD" else ()
+    assert answer.flags == (Flag.FROM_RECORDING,)
+    assert answer.response.headers == (
+        ("content-type", "text/csv"),
+        *encoding,
+        ("content-length", "999"),
     )
 
 

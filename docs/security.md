@@ -80,6 +80,9 @@ Rules that follow from these, each also held by a test:
 - **A store failure never affects traffic.** The store only enqueues; one writer thread does the
   I/O. A full queue or a failed write drops the event and counts it on the run
   (`dropped_events`), never blocking or failing the agent's request.
+- **A replayed answer has one header per line.** A recorded header that holds a CR, LF or NUL is
+  never sent (a folded value is unfolded first): irimi answers with its `502` flagged
+  `decision-failed`, so a stored answer cannot add headers of its own.
 - **Telemetry is forwarded and never stored.** A request classified `telemetry` is recorded only as
   the fact that it happened, and to which host.
 - **Nothing is answered from part of a body.** A write whose request body decodes past 64 MiB is
