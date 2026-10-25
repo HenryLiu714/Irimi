@@ -526,10 +526,10 @@ def _redact_event(lines: list[str], key: bytes) -> list[str]:
     keeps its line count for `_rechunk`. Any other event is redacted line by line.
     """
     data = [i for i, line in enumerate(lines) if line.startswith(_SSE_DATA)]
-    values = [_content(lines[i])[len(_SSE_DATA) :] for i in data]
+    values = [_content(lines[i])[len(_SSE_DATA) :] for i in data] if len(data) > 1 else []
     document = "\n".join(values)
     walked = None
-    if len(data) > 1 and document.lstrip().startswith(("{", "[")):
+    if document.lstrip().startswith(("{", "[")):
         walked = _redact_json_text(document, key)
     if walked is None or walked is document:
         return [_redact_line(line, key) for line in lines]
