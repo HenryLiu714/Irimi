@@ -57,7 +57,7 @@ by a [body ref](#body-ref). An empty body stores nothing, and its ref is `null`.
 - **What the bytes are.** The body as the agent sent it or received it, after redaction, decoded
   from its `Content-Encoding`: `gzip` (every member), `x-gzip`, `deflate`, `br`, `zstd`, S3's
   `aws-chunked` and `identity`, stacked up to five deep (`gzip, br`). A body irimi cannot decode,
-  or whose stream ends early, is stored empty, flagged `body-truncated`, never as it came.
+  or whose gzip ends early, is stored empty, flagged `body-truncated`, never as it came.
 - **Cut bodies.** A body over 8 MiB keeps its first 8 MiB: its ref says `truncated: true` and its
   exchange carries `body-truncated`. A body that decodes past 64 MiB is stored empty, also flagged
   `body-truncated`. A stored body is always a prefix of the whole redacted body, never part of a

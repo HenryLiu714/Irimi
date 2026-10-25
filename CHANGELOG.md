@@ -136,11 +136,13 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - A body in a `Content-Encoding` irimi does not decode, or whose gzip ends early, is stored empty
-  and flagged `body-truncated`, never compressed where redaction cannot read it. A write in one is
-  refused with irimi's `502`, a read in one is never overlaid, and a control post in one gets
-  `413`. Stacked codings (`gzip, br`), every member of a gzip body, `x-gzip` and S3's
-  `aws-chunked` are decoded, so their writes are faked from the whole body. A refused write's
-  summary line reads `its body could not be read whole`.
+  and flagged `body-truncated`, never compressed where redaction cannot read it. A write in one,
+  which irimi used to fake from bytes it never read, is refused with irimi's `502`, even where the
+  service would ignore the header (a plain body labelled `utf-8`). A read in one is never
+  overlaid, and a control post in one gets `413`. Stacked codings (`gzip, br`), every member of a
+  gzip body, `x-gzip` and S3's `aws-chunked`, wherever the list names it, are decoded, so their
+  writes are faked from the whole body. A refused write's summary line reads `its body could not
+  be read whole`.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
 
 ## [0.1.0] - 2026-10-20

@@ -26,7 +26,9 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - **A body irimi cannot read whole is passed on, not overlaid.** A read in a `Content-Encoding`
   irimi does not decode (`bzip2`, `compress`), or that decodes past 64 MiB, reaches the agent as the
   service sent it, without the run's faked writes, and is recorded empty. A write in one is refused
-  with irimi's `502`.
+  with irimi's `502`, even where the service would ignore the header and succeed: a plain body
+  labelled `utf-8`, or an S3 upload whose `ContentEncoding` is not a coding (boto3 sends
+  `utf-8,aws-chunked`). irimi cannot tell a mislabelled body from an encoded one.
 - **Clients that ignore `SSL_CERT_FILE`** fail TLS under irimi rather than writing for real. The
   summary counts these failures per host and names the CA to point them at.
 
