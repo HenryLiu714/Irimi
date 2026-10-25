@@ -429,7 +429,7 @@ def _run_serve(
         _as_irimi(env, cwd, tmp, internet, scenario, workdir),
         contextlib.redirect_stdout(buf),
         contextlib.redirect_stderr(err),
-        _summaries_held(scenario.serve_holds_summaries) as release,
+        _summaries_held(scenario.serve_holds_summaries) as hold,
     ):
         serving = threading.Thread(
             target=lambda: codes.append(args.func(args, stop, engine_factory=building)),
@@ -448,13 +448,13 @@ def _run_serve(
             agent_env = _serve_env(env, port, ca.ca_paths().cert)
             done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
             code = runner.exit_code_for(done.returncode)
-            if release is not None:
+            if hold is not None:
                 [store] = stores
                 obs = Path(env["WORKFLOW_OBS"])
-                held = _held_store(store, handed or [], obs, compose.store_root(args))
+                held = _held_store(store, handed or [], obs, compose.store_root(args), hold, buf)
         finally:
-            if release is not None:
-                release.set()
+            if hold is not None:
+                hold.release.set()
             stop.set()
             serving.join(timeout=SERVE_TIMEOUT_S)
     if serving.is_alive() or codes != [0]:
@@ -471,32 +471,49 @@ def _run_serve(
     return code, buf.getvalue().splitlines(), err.getvalue().splitlines(), held
 
 
+class _Hold:
+    """Serve's summary read-backs, each waiting until `release` is set."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.waiting: list[str] = []  # the run ids whose read-back waits now
+        self._load = compose.load_stored_run
+
+    def held(self, root: Path, run_id: str, **kwargs: Any) -> StoredRun:
+        self.waiting.append(run_id)
+        try:
+            self.release.wait(SERVE_TIMEOUT_S)
+        finally:
+            self.waiting.remove(run_id)
+        return self._load(root, run_id, **kwargs)
+
+
 @contextlib.contextmanager
-def _summaries_held(hold: bool) -> Iterator[threading.Event | None]:
-    """Make each summary serve reads back wait until the event yielded is set, if `hold`."""
+def _summaries_held(hold: bool) -> Iterator[_Hold | None]:
+    """Make each summary serve reads back wait until the hold yielded is released, if `hold`."""
     if not hold:
         yield None
         return
-    release = threading.Event()
-    real = compose.load_stored_run
-
-    def held(*args: Any, **kwargs: Any) -> StoredRun:
-        release.wait(SERVE_TIMEOUT_S)
-        return real(*args, **kwargs)
-
+    held = _Hold()
     try:
-        with mock.patch.object(compose, "load_stored_run", held):
-            yield release
+        with mock.patch.object(compose, "load_stored_run", held.held):
+            yield held
     finally:
-        release.set()
+        held.release.set()
 
 
 def _held_store(
-    store: RunStore, handed: list[Exchange | ToolCall], obs: Path, root: Path
+    store: RunStore,
+    handed: list[Exchange | ToolCall],
+    obs: Path,
+    root: Path,
+    hold: _Hold,
+    out: io.StringIO,
 ) -> HeldSummaries:
     """Return what `store` holds once it has written all it was handed, or after HELD_STORE_S.
 
-    All it was handed is every event, and the end of each run the agent logged ending."""
+    All it was handed is every event, and the end of each run the agent logged ending. Also what
+    `hold` held then and how many blocks serve had printed to `out`."""
     logged = [json.loads(line) for line in obs.read_text().splitlines() if line.strip()]
     ends = {o["run"] for o in logged if o["event"] == "run.end"}
     reader = StoreReader(root)
@@ -508,6 +525,8 @@ def _held_store(
         settled,
         frozenset(r.run_id for r in records if r.end is not None),
         {r.run_id: len(reader.load_run(r.run_id, bodies=False).events) for r in records},
+        tuple(hold.waiting),
+        sum(line.startswith("--- run ") for line in out.getvalue().splitlines()),
     )
 
 

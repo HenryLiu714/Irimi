@@ -728,10 +728,17 @@ def test_a_printer_that_cannot_start_leaves_no_store_or_lock_behind(home, monkey
 
     monkeypatch.setattr(threading.Thread, "start", refused)
     opened = []
-    monkeypatch.setattr(compose, "prepare_run", lambda *args, **kwargs: opened.append(args))
+    prepare = compose.prepare_run
+
+    def preparing(*args, **kwargs):
+        opened.append(args)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(compose, "prepare_run", preparing)
     with pytest.raises(RuntimeError, match="can't start new thread"):
         serve.cmd_serve(cli.parse_args(["serve", "--port", "0"]), threading.Event())
     assert opened == []
+    assert "irimi-store" not in {t.name for t in threading.enumerate()}
     ServeLock.hold(home / "store").release()
 
 

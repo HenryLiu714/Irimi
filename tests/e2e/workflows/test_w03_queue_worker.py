@@ -71,6 +71,8 @@ def test_serve_stores_every_run_while_each_summary_waits_to_be_read_back(run_wor
     serve = run_workflow(W, "ledger_threads_8", "serve")
     held, reader = serve.held, serve.stored()
     assert held is not None and held.settled
+    # One printer: the first run's read-back waits, the others queue behind it, none printed.
+    assert len(held.waiting) == 1 and held.blocks == 0
     assert held.ended == set(ends(serve)) and len(held.ended) == 8
     stored = {run_id: reader.load_run(run_id).events for run_id in held.ended}
     assert held.event_counts == {run_id: len(events) for run_id, events in stored.items()}

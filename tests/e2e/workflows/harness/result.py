@@ -53,6 +53,8 @@ class HeldSummaries:
     settled: bool  # it had written every event and end the engine handed it
     ended: frozenset[str]  # the runs whose end it had written
     event_counts: dict[str, int]  # how many events each stored run held
+    waiting: tuple[str, ...]  # the runs whose read-back was being held then
+    blocks: int  # the `--- run` blocks serve had printed by then
 
 
 @dataclass

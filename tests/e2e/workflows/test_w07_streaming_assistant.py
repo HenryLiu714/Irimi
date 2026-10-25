@@ -574,6 +574,7 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
     if mode == "shadow":
         return
     assert shadow.held is not None and shadow.held.settled
+    assert (shadow.held.waiting, shadow.held.blocks) == ((run.run_id,), 0)
     assert shadow.held.event_counts[run.run_id] == 1
     assert shadow.run_blocks()[run.run_id][-1] == (
         "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
