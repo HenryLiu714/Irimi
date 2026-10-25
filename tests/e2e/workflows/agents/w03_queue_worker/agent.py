@@ -329,7 +329,7 @@ def handle(message: dict[str, Any]) -> None:
         worker.join()
     elif how == "inherited_pool":
         # No `sdk.propagate` either: the refund runs in the run the pool's worker started in.
-        _inheriting_pool().submit(refund, message).result()
+        _inheriting_pool().submit(_on_worker, refund, message).result()
     elif how == "in_turn":
         refund_in_turn(message)
     else:
@@ -354,6 +354,12 @@ def _inheriting_pool() -> ThreadPoolExecutor:
         context = contextvars.copy_context()
         _inheriting = ThreadPoolExecutor(1, initializer=_inherit, initargs=(context,))
     return _inheriting
+
+
+def _on_worker(fn: Any, message: dict[str, Any]) -> None:
+    """Call `fn(message)`, logging the thread, so a test can tell it ran on the pool's worker."""
+    agentkit.obs("on_worker", fn=fn.__name__, thread=threading.get_ident())
+    fn(message)
 
 
 @dataclass
@@ -613,7 +619,7 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
     elif how == "inherited":
         # Then `audit`, called from outside any run on the worker that kept the first run.
         done = [safe(message) for message in messages]
-        _inheriting_pool().submit(audit, messages[0]).result()
+        _inheriting_pool().submit(_on_worker, audit, messages[0]).result()
         _inheriting_pool().shutdown()
     else:
         done = [safe(message) for message in messages]

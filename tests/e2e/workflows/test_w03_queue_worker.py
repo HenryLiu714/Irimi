@@ -667,6 +667,10 @@ def test_a_pool_worker_that_kept_an_ended_run_adds_nothing_to_it_and_its_trigger
     without `sdk.propagate`, lands in the engine's own run, and `audit`, called there from outside
     any run, is a run of its own. No run holds an exchange made after its end."""
     shadow = run_workflow(W, "inherited_worker", mode)
+    # Both refunds and `audit` ran on the one worker that kept the first run's context.
+    on_worker = shadow.events("on_worker")
+    assert [e["fn"] for e in on_worker] == ["refund", "refund", "audit"]
+    assert len({e["thread"] for e in on_worker}) == 1
     started = [(e["name"], e["run"]) for e in shadow.events("run.start")]
     assert [name for name, _ in started] == ["handle", "handle", "audit"]
     first, second, audit = (run_id for _, run_id in started)
