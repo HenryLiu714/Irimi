@@ -146,7 +146,8 @@ Under a write, `↳` lines name the agent's later reads of that service that the
 ```
 
 `saw it in part  overlay (partial)` and `did not show it  real (partial)` mean irimi knows the read
-showed only part of the run's writes.
+showed only part of the run's writes. A streamed read, or one cut at irimi's decoding cap, reaches
+the agent as the service sent it, so it is `did not show it`.
 
 A write tool whose fake ran gets a line after the HTTP writes: `○ tool  <name>  fake ran instead`,
 or `fake raised <type>`.

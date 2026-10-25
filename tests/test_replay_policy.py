@@ -15,7 +15,7 @@ from irimi.core.exchange import (
     Precondition,
     Response,
 )
-from irimi.decide.policy import ShadowPolicy
+from irimi.decide.policy import Respond, ShadowPolicy
 from irimi.decide.reader import NoReader, UpstreamReader, answered_as
 from irimi.protocol.trace import ErrorInfo, TelemetrySeen, ToolCall
 from irimi.record import redact
@@ -611,6 +611,16 @@ def test_only_an_llm_call_is_bucketed_by_streaming():
     sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\n")
     recording = _recording(_stored(_req(path="/v1/events"), sse, stream_chunks=(9,)))
     assert recording.answer_for(_req(path="/v1/events"), "read") is not None
+
+
+def test_a_recorded_stream_is_answered_with_the_chunks_it_was_recorded_with():
+    """A recorded stream's answer carries its chunks, so the replay records it as a stream."""
+    sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\ndata: 2\n\n")
+    recording = _recording(_stored(_llm(stream=True), sse, stream_chunks=(9, 9)))
+    request = _llm(stream=True)
+    decided = ReplayPolicy(recording, SHIPPED).decide(request, classify(request, SHIPPED))
+    assert isinstance(decided.decision, Respond)
+    assert (decided.decision.response.body, decided.decision.stream_chunks) == (sse.body, (9, 9))
 
 
 def test_a_streaming_call_answered_with_an_error_is_answered_with_it_again():

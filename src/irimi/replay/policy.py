@@ -123,6 +123,7 @@ class ReplayPolicy:
                 answered_by,
                 WriteOutcome(recorded.precondition, recorded.would_fire),
                 overlay=recorded.overlay if kind == "read" else None,
+                stream_chunks=recorded.stream_chunks,
             ),
             flags=tuple(flag for flag in recorded.flags if flag in _ANSWER_FLAGS),
         )

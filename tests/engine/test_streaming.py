@@ -1,15 +1,36 @@
 """Server-sent events and other streamed answers reach the client as they arrive."""
 
 import http.client
+import threading
 import time
 
 import pytest
 
-from irimi.core.exchange import Response
+from irimi.core.exchange import Flag, Response
 from irimi.decide.overlay import Overlaid
-from tests.support.engine import engine_config, start_engine, via_proxy
+from irimi.protocol.headers import ANSWERED_BY_HEADER
+from tests.support.engine import (
+    THREE_CHUNKS,
+    engine_config,
+    open_stream,
+    start_engine,
+    stream_server,
+    via_proxy,
+)
 from tests.support.maps import READ_STREAM_MAP, STREAM_MAP, map_index
-from tests.support.upstreams import SSE_FIRST, SSE_SECOND, StreamUpstream, serve
+from tests.support.servers import stop_server
+from tests.support.upstreams import (
+    SSE_FIRST,
+    SSE_SECOND,
+    StreamUpstream,
+    refusing_port,
+    serve,
+)
+
+# STREAM_MAP's route as a read: `style: rpc` lets a POST be one.
+RPC_READ_STREAM_MAP = STREAM_MAP.replace("hosts:", "style: rpc\nhosts:").replace(
+    "kind: llm", "kind: read"
+)
 
 
 @pytest.mark.parametrize(
@@ -108,41 +129,46 @@ def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leav
 
 
 class _RewritingOverlay:
-    """An overlay that returns a new Response, unlike `NoOverlay`, which returns the one it got."""
+    """An overlay that returns a new Response, unlike `NoOverlay`, at the fidelity it is given."""
 
-    def __init__(self) -> None:
-        self.calls: list[str] = []
+    def __init__(self, fidelity) -> None:
+        self.fidelity = fidelity
+        self.shown: list[bytes] = []
 
     def __call__(
         self, write_log, classification, read_request, upstream_response, translated_from=None
     ):
-        self.calls.append(read_request.path)
+        self.shown.append(upstream_response.body)
         return Overlaid(
             Response(
                 status=200,
                 headers=(("content-type", "application/json"),),
                 body=b'{"overlaid": true}',
-            )
+            ),
+            self.fidelity,
         )
 
     def rewrite(self, write_log, classification, read_request):
         return None
 
 
-def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
-    """A streamed read never reaches the overlay, and its chunks reach the client unchanged.
+@pytest.mark.parametrize(
+    ("said", "recorded"), [(None, None), ("full", "partial"), ("partial", "partial")]
+)
+def test_a_streamed_read_reaches_the_client_unchanged_whatever_the_overlay_says(
+    tmp_path, monkeypatch, said, recorded
+):
+    """A streamed read's chunks reach the client unchanged, and the overlay never edits them.
 
-    mitmproxy never assembles a streamed body, so an overlay would see `b""` and replace the
-    stream with an empty buffered body."""
+    The overlay is shown the recorded stream, so a read the run has a write for is `partial`."""
     srv = serve(StreamUpstream)
     cfg = engine_config(
         tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, READ_STREAM_MAP)
     )
-    overlay = _RewritingOverlay()
+    overlay = _RewritingOverlay(said)
     eng, seen, stop = start_engine(cfg, overlay=overlay)
     try:
-        # A faked write first: with an empty write log the overlay is never asked at all, and
-        # this test would pass without the streaming guard.
+        # A faked write first: with an empty write log the overlay is never asked at all.
         via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{srv}/w", body=b"{}")
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
         url = f"http://127.0.0.1:{srv}/v1/chat/completions"
@@ -150,6 +176,7 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
         resp = conn.getresponse()
         assert resp.status == 200
         assert resp.getheader("content-type") == "text/event-stream"
+        assert resp.getheader(ANSWERED_BY_HEADER) is None
         assert resp.read(len(SSE_FIRST)) == SSE_FIRST
         srv.gate.set()
         assert resp.read() == SSE_SECOND
@@ -158,9 +185,86 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
         srv.gate.set()
         stop()
         srv.stop()
-    assert overlay.calls == [], "the overlay was handed a body mitmproxy never assembled"
+    assert overlay.shown == [SSE_FIRST + SSE_SECOND]
     _, ex = seen
-    assert (ex.kind, ex.answered_by) == ("read", "live")
+    assert (ex.kind, ex.answered_by, ex.overlay) == ("read", "live", recorded)
+    assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
+
+
+@pytest.mark.parametrize(("said", "recorded"), [(None, None), ("full", "partial")])
+def test_a_streamed_read_that_breaks_is_recorded_partial_when_it_would_show_a_write(
+    tmp_path, monkeypatch, said, recorded
+):
+    """A streamed read reset mid-stream keeps what arrived, and the overlay never edits it.
+
+    It is `partial` when the run has a write it would have shown, as a whole stream is."""
+    gate = threading.Event()
+    srv = stream_server(THREE_CHUNKS[:1], [gate], reset=True)
+    cfg = engine_config(
+        tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, RPC_READ_STREAM_MAP)
+    )
+    overlay = _RewritingOverlay(said)
+    eng, seen, stop = start_engine(cfg, overlay=overlay)
+    try:
+        # A faked write first, or the overlay is never asked at all.
+        port = srv.server_address[1]
+        via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{port}/w", body=b"{}")
+        conn, resp = open_stream(eng, srv)
+        assert resp.read(len(THREE_CHUNKS[0])) == THREE_CHUNKS[0]
+        gate.set()
+        with pytest.raises(http.client.IncompleteRead):
+            resp.read()
+        conn.close()
+    finally:
+        gate.set()
+        stop()
+        stop_server(srv)
+    assert overlay.shown == [THREE_CHUNKS[0]]
+    _, ex = seen
+    assert (ex.kind, ex.answered_by, ex.overlay) == ("read", "live", recorded)
+    assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+    assert ex.response is not None and ex.response.body == THREE_CHUNKS[0]
+
+
+def test_a_read_that_gets_no_answer_after_a_faked_write_is_not_judged(tmp_path, monkeypatch):
+    """A read whose upstream refuses the connection has no answer to judge: its overlay is null."""
+    port = refusing_port()
+    cfg = engine_config(
+        tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, READ_STREAM_MAP)
+    )
+    overlay = _RewritingOverlay("full")
+    eng, seen, stop = start_engine(cfg, overlay=overlay)
+    try:
+        via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{port}/w", body=b"{}")
+        via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{port}/v1/chat/completions")
+    finally:
+        stop()
+    assert overlay.shown == []
+    write, ex = seen
+    assert write.answered_by.startswith("fake-")
+    assert (ex.kind, ex.answered_by, ex.overlay, ex.response) == ("read", "live", None, None)
+    assert ex.flags == (Flag.UPSTREAM_ERROR,)
+
+
+def test_an_llm_stream_after_a_faked_write_is_never_shown_to_the_overlay(tmp_path, monkeypatch):
+    """Only a read is shown to the overlay: a model's answer reads nothing the run wrote."""
+    srv = stream_server(THREE_CHUNKS)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    overlay = _RewritingOverlay("full")
+    eng, seen, stop = start_engine(cfg, overlay=overlay)
+    try:
+        port = srv.server_address[1]
+        via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{port}/w", body=b"{}")
+        conn, resp = open_stream(eng, srv)
+        assert resp.read() == b"".join(THREE_CHUNKS)
+        conn.close()
+    finally:
+        stop()
+        stop_server(srv)
+    assert overlay.shown == []
+    write, ex = seen
+    assert write.answered_by.startswith("fake-")
+    assert (ex.kind, ex.answered_by, ex.overlay) == ("llm", "live", None)
 
 
 def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, upstream):

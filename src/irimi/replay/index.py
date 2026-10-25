@@ -95,7 +95,7 @@ def _depends_on_prior_writes(exchange: Exchange) -> bool:
 
 
 def _streamed(exchange: Exchange) -> bool:
-    """Return True if a recorded answer streamed: it has chunks, or is an empty event stream."""
+    """Return True if a recorded answer streamed: it has chunks, or is an event stream."""
     if exchange.stream_chunks:
         return True
     content_type = "" if exchange.response is None else exchange.response.header("content-type")

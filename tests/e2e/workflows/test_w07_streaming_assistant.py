@@ -24,6 +24,7 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     pair_decision,
 )
 from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.execute import replay, replayed_run_id
 from tests.e2e.workflows.harness.internet import BOMB_LINE
 from tests.e2e.workflows.harness.invariants import check_invariants
 
@@ -339,6 +340,56 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     assert pieces == ["", *(arguments[i : i + 5] for i in range(0, len(arguments), 5))]
 
 
+SUMMARY_POSTED = "Summary: refunds go back to the card within 5-10 days."
+POSTED_LINE = (
+    f'  ○ slack  post to #{CHANNEL}: "{SUMMARY_POSTED}"  faked; checked against live state: '
+    "would succeed"
+)
+# A streamed read back of the channel is never edited, so it never shows the faked post.
+NOT_SHOWN_LINE = "    ↳ POST /api/conversations.history did not show it  real (partial)"
+# Slack's own history of the channel, which holds nothing under irimi.
+EMPTY_HISTORY = [{"ok": True, "messages": [], "has_more": False}]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_that_streams_after_a_faked_post_is_never_edited(run_workflow, mode):
+    """A read back that streams reaches the agent as Slack sent it, without the faked post.
+
+    It is recorded `partial`, so the summary says it did not show the post. Bare, it shows it."""
+    bare = run_workflow(W, "streamed_read_back", "bare")
+    shadow = run_workflow(W, "streamed_read_back", mode)
+    posted = {"ok": True, "channel": CHANNEL, "text": SUMMARY_POSTED}
+    assert bare.result()["posted"] == {**posted, "seen": True}
+    assert shadow.result()["posted"] == {**posted, "seen": False}
+    assert [c["answered_by"] for c in shadow.calls("read_back")] == [None]
+    assert shadow.exchange_lines()[-2:] == [
+        "faked         write     POST slack.com/api/chat.postMessage -> 200",
+        "real          read      POST slack.com/api/conversations.history -> 200",
+    ]
+    read = stored_exchanges(shadow)["/api/conversations.history"]
+    assert (read.answered_by, read.overlay, read.flags) == ("live", "partial", ())
+    assert read.response is not None and data_lines(read.response.body) == EMPTY_HISTORY
+    assert read.stream_chunks == (len(read.response.body),)
+    summary = shadow.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == NOT_SHOWN_LINE
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_that_breaks_mid_stream_is_still_marked_as_not_showing_the_post(
+    run_workflow, mode
+):
+    """A streamed read back that Slack resets after its event is stored broken, and `partial`."""
+    bare = run_workflow(W, "streamed_read_back_reset", "bare")
+    shadow = run_workflow(W, "streamed_read_back_reset", mode)
+    assert bare.result()["outcome"] == shadow.result()["outcome"] == "upstream_broke"
+    read = stored_exchanges(shadow)["/api/conversations.history"]
+    broken = (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+    assert (read.answered_by, read.overlay, read.flags) == ("live", "partial", broken)
+    assert read.response is not None and data_lines(read.response.body) == EMPTY_HISTORY
+    summary = shadow.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == NOT_SHOWN_LINE
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow, mode):
     """A secret split across two chunk writes is redacted in the joined stream.
@@ -647,15 +698,53 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
 RECORDED_LINES = [line.replace("real    ", "recorded") + "  [from-recording]" for line in LLM_LINES]
 
 
+def stored_streams(result, run_id: str) -> dict[str, tuple[int, ...]]:
+    """The chunk lengths of each stream `run_id` stored, by request path."""
+    events = result.stored().load_run(run_id).events
+    exchanges = [e for e in events if isinstance(e, Exchange)]
+    return {e.request.path: e.stream_chunks for e in exchanges if e.stream_chunks}
+
+
 def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(replayed):
     """A replay serves a recorded stream in one piece, and the agent reassembles it as before.
 
-    The trace post is telemetry, which a replay forwards as shadow mode does."""
+    It stores each stream with the chunks it was recorded with. The trace post is telemetry,
+    which a replay forwards as shadow mode does."""
     recorded, replay = replayed(W, "normal", command=True)
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.result()["caller_text"] == ANSWER
     assert replay.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
     assert [r.host for r in replay.internet.requests()] == ["api.smith.langchain.com"]
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert sorted(streams) == ["/v1/chat/completions", "/v1/messages"]
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
+
+
+def test_a_replay_of_a_replay_serves_both_streams_with_their_recorded_chunks(replayed, tmp_path):
+    """A replay of a replay answers both streams from the first and stores the recorded chunks."""
+    recorded, first = replayed(W, "normal", command=True)
+    second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
+    assert check_invariants(second) == []
+    assert second.result(with_time=False) == recorded.result(with_time=False)
+    assert second.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
+    assert [r.host for r in second.internet.requests()] == ["api.smith.langchain.com"]
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert sorted(streams) == ["/v1/chat/completions", "/v1/messages"]
+    assert stored_streams(second, replayed_run_id(second)) == streams
+
+
+def test_a_streamed_read_back_replays_with_its_chunks_and_still_does_not_show_the_post(replayed):
+    """A replayed read back that streamed keeps its recorded chunks and its `partial` fidelity."""
+    recorded, replay = replayed(W, "streamed_read_back", command=True)
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/api/conversations.history" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
+    summary = replay.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == (
+        "    ↳ POST /api/conversations.history did not show it  recorded (partial)"
+    )
 
 
 def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placeholder(replayed):
@@ -667,6 +756,9 @@ def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placehol
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
 
 
 def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
@@ -677,6 +769,9 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
     assert replay.result()["caller_text"] == LONG_ANSWER.replace(SECRET, hidden)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
 
 
 # The replay's flags for a stream recorded cut: a miss, which the fake's fault cuts again. A miss
@@ -764,3 +859,6 @@ def test_a_gzip_encoded_stream_replays_decoded_without_its_encoding(replayed):
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert [c["answered_by"] for c in replay.calls("anthropic_stream")] == ["recording"]
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
