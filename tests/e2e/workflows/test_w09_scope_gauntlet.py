@@ -231,7 +231,9 @@ def test_an_s3_upload_framed_aws_chunked_is_faked_from_its_data_and_stored_redac
         # Redaction re-serializes a JSON body it changed, compactly.
         (f'{{"note":"{hidden}"}}'.encode(), (Flag.UNCLASSIFIED,), "fake-L0")
     ] * 2
-    assert [line.strip() for line in summary_of(shadow) if OBJECT_STORE + "/" in line] == UPLOADS
+    # Under serve, `runs show` prints each exchange's line too; only the write lines are kept.
+    written = [line.strip() for line in summary_of(shadow) if line.startswith("  ○ ")]
+    assert [line for line in written if OBJECT_STORE + "/" in line] == UPLOADS
     assert [r for r in shadow.internet.requests() if r.host == OBJECT_STORE] == []
 
 
@@ -275,6 +277,12 @@ def test_a_read_back_in_stacked_codings_is_overlaid_and_one_in_bzip2_is_not(run_
         ((Flag.BODY_TRUNCATED,), "partial"),
     ]
     assert reads[1].response is not None and reads[1].response.body == b""
+    # The service's coding, as recorded, shows the fault reached each read.
+    assert [
+        [v for k, v in e.response.headers if k.lower() == "content-encoding"]
+        for e in reads
+        if e.response is not None
+    ] == [["gzip, br"], ["bzip2"]]
     assert shadow.exchange_lines()[-2:] == [
         "real          read      GET api.stripe.com/v1/refunds -> 200  [overlay]",
         "real          read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
