@@ -5,10 +5,12 @@ import http.client
 import json
 import socket
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
 import requests
+from urllib3.connection import HTTPConnection
 
 from irimi.config import ca, paths
 from irimi.core.exchange import Flag, Response
@@ -373,14 +375,16 @@ def _with_httpx(port, method):
 
 def _with_requests(port, method):
     """Return requests' answer to `method /first`, the GET after it, and if one connection did."""
-    with requests.Session() as session:
+    # urllib3 reconnects a pooled connection the proxy closed in place, so only `connect` sees it.
+    connect = HTTPConnection.connect
+    with (
+        mock.patch.object(HTTPConnection, "connect", autospec=True, side_effect=connect) as dialled,
+        requests.Session() as session,
+    ):
         session.proxies = {"http": f"http://127.0.0.1:{port}"}
         first = session.request(method, "http://127.0.0.1:9/first", timeout=10)
         after = session.get("http://127.0.0.1:9/after", timeout=10)
-        managers = session.adapters["http://"].proxy_manager.values()  # type: ignore[attr-defined]
-        # urllib3's pool container refuses to be iterated, but lists its keys.
-        opened = sum(m.pools[key].num_connections for m in managers for key in list(m.pools.keys()))
-        return first.status_code, first.headers, after.content, opened == 1
+        return first.status_code, first.headers, after.content, dialled.call_count == 1
 
 
 @pytest.mark.parametrize("client", [_with_httpx, _with_requests])

@@ -520,14 +520,17 @@ def _replay_edited(run_workflow, tmp_path, method, status, edit):
     events = (
         home / recorded.store_root().relative_to(recorded.home) / "runs" / run_id / "events.jsonl"
     )
-    edited = []
+    edited, changed = [], 0
     for line in events.read_text().splitlines():
         event = json.loads(line)
         answer = (event.get("request", {}).get("method"), event.get("response", {}).get("status"))
         if event["type"] == "exchange" and answer == (method, status):
-            event["response"]["headers"] = [edit(k, v) for k, v in event["response"]["headers"]]
+            headers = [edit(k, v) for k, v in event["response"]["headers"]]
+            changed += headers != event["response"]["headers"]
+            event["response"]["headers"] = headers
         edited.append(json.dumps(event))
-    assert edited != events.read_text().splitlines()
+    # Every line is written again, so only the count shows that the answer was edited.
+    assert changed == 1
     events.write_text("\n".join(edited) + "\n")
     return replay(dataclasses.replace(recorded, home=home), run_id, tmp_path / "replay")
 
