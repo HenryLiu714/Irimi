@@ -530,13 +530,13 @@ def test_a_run_s_block_is_the_run_at_its_end_and_a_late_event_prints_it_again_wh
     ]
 
 
-def test_a_run_an_earlier_serve_ended_prints_a_late_block_alone_and_keeps_no_writes(
+def test_a_run_an_earlier_serve_ended_prints_a_late_block_alone_and_keeps_its_writes(
     tmp_path, monkeypatch, capsys
 ):
     """An event in a run whose stored end an earlier serve wrote prints the run late, alone.
 
-    "Late" is the run's stored end, not this process's. From that event on, the run's write log
-    and keys keep nothing, as for a run this serve ended."""
+    "Late" is the run's stored end, not this process's. The late call leaves the run's write log
+    and keys, so a retry this serve answered once is answered alike however soon it comes."""
     from irimi.decide import idempotency
     from irimi.record.store.reader import StoreReader
     from irimi.record.store.writer import DirectoryStore
@@ -555,12 +555,11 @@ def test_a_run_an_earlier_serve_ended_prints_a_late_block_alone_and_keeps_no_wri
         write_log.add(builders.exchange(run_id="r1"))
         keys.put(slot, builders.REFUND_PARAMS, builders.first_answer())
         run.store.record(builders.exchange(run_id="r1"))
-        eventually(lambda: write_log.for_run("r1") == (), timeout=5)
-        assert keys.get(slot, builders.REFUND_PARAMS) == (None, False)
-        write_log.add(builders.exchange(run_id="r1"))
-        assert write_log.for_run("r1") == ()
+    # The block printed, so the late call has run.
     stored = StoreReader(root).load_run("r1")
     assert len(stored.events) == 1
+    assert len(write_log.for_run("r1")) == 1
+    assert keys.get(slot, builders.REFUND_PARAMS) == (builders.first_answer(), False)
     whole = summary_lines(RunView(stored.record, stored.events), run.index)
     assert capsys.readouterr().out.splitlines() == ["--- run r1 (late) ---", *whole]
 

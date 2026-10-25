@@ -84,7 +84,8 @@ class Run:
                 self.lock.release()
 
 
-# Called with the maps, then `writer.OnRunEnded`'s arguments, once the run's state is dropped.
+# Called with the maps, then `writer.OnRunEnded`'s arguments: at the end once the run's state is
+# dropped, and late with it left.
 OnRunEnded = Callable[[MapIndex, str, int | None, bool], None]
 
 
@@ -145,10 +146,12 @@ def prepare_run(
     keys = idempotency.Store()
 
     def ended(run_id: str, last_seq: int | None, late: bool) -> None:
-        # An ended run's writes and keys are never read again. A late call ends them for a run an
-        # earlier process ended, which this one did not know had ended.
-        write_log.end_run(run_id)
-        keys.end_run(run_id)
+        # An ended run's writes and keys are never read again. A late call leaves them: for a run
+        # an earlier process ended, dropping them once the writer caught up would answer a retry
+        # planned before that as a retry and one planned after it as a fresh write.
+        if not late:
+            write_log.end_run(run_id)
+            keys.end_run(run_id)
         if on_run_ended is not None:
             on_run_ended(index, run_id, last_seq, late)
 
