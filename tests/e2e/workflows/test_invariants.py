@@ -13,6 +13,7 @@ import pytest
 from irimi.protocol import trace
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
+from tests.e2e.workflows import __main__ as hand_runner
 from tests.e2e.workflows.agents.w10_flaky_upstream.scenarios import CONTROL_DOWN
 from tests.e2e.workflows.harness.invariants import (
     CANARIES,
@@ -221,6 +222,21 @@ def test_invariant_4_finds_a_canary_that_names_a_directory(shared_store_run, tmp
     assert check_invariants(dataclasses.replace(shadow, store=tmp_path)) == [
         f"4. a canary reached disk where irimi writes: ['RUN_ID_KEY in {named}']"
     ]
+
+
+def test_the_hand_runner_checks_the_invariants_while_the_runs_files_are_on_disk(monkeypatch):
+    """`python -m tests.e2e.workflows` deletes a run's files when it is done with them.
+
+    A check after that finds no canary on disk, and so would say every invariant holds."""
+    on_disk = []
+
+    def check(result: Result, bare: Result | None) -> list[str]:
+        on_disk.append(result.store_root().is_dir())
+        return check_invariants(result, bare)
+
+    monkeypatch.setattr(hand_runner, "check_invariants", check)
+    assert hand_runner.main(["w01_ticket_triage", "full_refund", "--mode", "shadow"]) == 0
+    assert on_disk == [True]
 
 
 @pytest.mark.parametrize("name", [*CANARIES, *SERVED_CANARIES])
