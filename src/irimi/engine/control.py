@@ -134,7 +134,7 @@ class ControlEndpoint:
     def answer(self, request: Request, *, whole_body: bool = True) -> Response:
         """Return the response to one control request. Never raises (fail-closed hook rule).
 
-        `whole_body` is False when the body decoded past the engine's cap; it is then refused 413.
+        `whole_body` is False when the engine could not read the body whole; it is then refused 413.
         """
         try:
             return self._answer(request, whole_body)
@@ -257,7 +257,9 @@ def _require_method(request: Request, method: str) -> None:
 def _posted(request: Request, whole_body: bool) -> Mapping[str, Any]:
     """Return the body as a JSON object, refusing `NaN` and `Infinity` (the store rejects them)."""
     if not whole_body:
-        raise _Refused(413, f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed")
+        raise _Refused(
+            413, f"the body does not decode, or decodes past the {MAX_CONTROL_BODY} bytes allowed"
+        )
     if len(request.body) > MAX_CONTROL_BODY:
         raise _Refused(
             413, f"the body is {len(request.body)} bytes, over the {MAX_CONTROL_BODY} allowed"

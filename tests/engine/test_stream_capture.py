@@ -314,8 +314,8 @@ def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends
 def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_encoding):
     """An undecodable stream is recorded empty and flagged, never as bytes redaction cannot read.
 
-    mitmproxy raises TypeError for an unknown encoding, decodes `utf-8` to a str, and cannot
-    decode two stacked encodings."""
+    mitmproxy raises TypeError for an unknown encoding and decodes `utf-8` to a str, and the bytes
+    are compressed in none of the others."""
     tee = StreamCapture()
     tee(b"not compressed at all\n")
     flow = streamed_flow((b"content-encoding", content_encoding.encode()))

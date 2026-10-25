@@ -5,6 +5,7 @@ at MAX_DECODED_BODY. Never raises (fail-closed hook rule): hooks decode every re
 """
 
 import io
+import re
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,58 +16,95 @@ import zstandard
 from irimi.core.limits import MAX_DECODED_BODY
 
 _IDENTITY_ENCODINGS = frozenset({"identity", "none"})
+# As many codings as urllib3 undoes on one body; past that, an agent's client cannot read it either.
+_MAX_CODINGS = 5
 
 
 @dataclass(frozen=True)
 class Decoded:
     body: bytes
-    cut: bool  # decoding stopped at MAX_DECODED_BODY: `body` is the start of it, not all of it
+    cut: bool  # stopped at MAX_DECODED_BODY, or ended early: `body` is the start of it, not all
 
 
 def decode_body(body: bytes, content_encoding: str) -> Decoded | None:
     """Return `body` decoded up to MAX_DECODED_BODY, or None when it cannot be decoded.
 
-    Never raises; holds at most twice the cap. Other encodings than `_DECODERS` and the identities
-    return None, since mitmproxy's codec fallback is unbounded.
+    Stacked codings (`gzip, br`) are undone last first, each output stopping at the cap. Never
+    raises; holds at most three times the cap beside `body`. Other encodings than `_DECODERS` and
+    the identities return None, since mitmproxy's codec fallback is unbounded.
     """
-    name = content_encoding.lower()
-    if name in _IDENTITY_ENCODINGS:
-        return Decoded(body, False)
-    decode = _DECODERS.get(name)
-    if decode is None:
+    names = (name.strip().lower() for name in content_encoding.split(","))
+    codings = [name for name in names if name and name not in _IDENTITY_ENCODINGS]
+    if len(codings) > _MAX_CODINGS or any(name not in _DECODERS for name in codings):
         return None
-    if not body:  # brotli would refuse an empty body; mitmproxy's decoders accept it
-        return Decoded(body, False)
-    try:
-        decoded, cut = decode(body, MAX_DECODED_BODY)
-    except Exception:
-        return None
-    return Decoded(decoded, cut)
+    cut = False
+    for name in reversed(codings):
+        if cut:  # the start of an inner coding's stream is not the start of the body
+            return Decoded(b"", True)
+        if not body:  # brotli would refuse an empty body; mitmproxy's decoders accept it
+            break
+        try:
+            body, cut = _DECODERS[name](body, MAX_DECODED_BODY)
+        except Exception:
+            return None
+    return Decoded(body, cut)
 
 
-def _inflate(body: bytes, limit: int, wbits: int, *, whole: bool) -> tuple[bytes, bool]:
-    """Return up to `limit` inflated bytes and whether more remain; `whole` refuses a cut stream."""
+def _inflate(body: bytes, limit: int, wbits: int) -> tuple[bytes, bool]:
+    """Return up to `limit` inflated bytes and whether more remain; refuse a stream cut short."""
     inflater = zlib.decompressobj(wbits)
     out = inflater.decompress(body, limit)
     if len(out) == limit and not inflater.eof and inflater.decompress(inflater.unconsumed_tail, 1):
         return out, True
     # Only a short tail is left inside, so flushing it stays bounded.
     out += inflater.flush()
-    if whole and not inflater.eof:
+    if not inflater.eof:
         raise zlib.error("incomplete or truncated stream")
     return out[:limit], len(out) > limit
 
 
+_GZIP_WBITS = 32 + zlib.MAX_WBITS  # gzip or zlib, detected
+_GZIP_MAGIC = b"\x1f\x8b"
+_NOT_ZERO = re.compile(rb"[^\x00]")
+# Input goes to zlib in steps: a member's unread input is copied when it ends, so many members
+# fed whole would copy the body once per member.
+_GZIP_STEP = 4 * 1024
+
+
 def _gzip(body: bytes, limit: int) -> tuple[bytes, bool]:
-    return _inflate(body, limit, 32 + zlib.MAX_WBITS, whole=False)  # gzip or zlib, detected
+    """Decode every gzip member; a last member that ends early keeps its start, said to be cut.
+
+    Zeros between members are skipped, as Python's gzip skips them, and bytes after the last
+    member that start none are ignored, as urllib3 ignores them.
+    """
+    view = memoryview(body)
+    out = bytearray()
+    inflater = zlib.decompressobj(_GZIP_WBITS)
+    at = 0
+    while at < len(body):
+        step = view[at : at + _GZIP_STEP]
+        # One byte past the room tells a cut from a fit, and zlib reads a limit of 0 as none.
+        out += inflater.decompress(step, limit - len(out) + 1)
+        if len(out) > limit:
+            del out[limit:]
+            return bytes(out), True
+        if not inflater.eof:
+            at += len(step)
+            continue
+        found = _NOT_ZERO.search(body, at + len(step) - len(inflater.unused_data))
+        if found is None or not body.startswith(_GZIP_MAGIC, found.start()):
+            break
+        at = found.start()
+        inflater = zlib.decompressobj(_GZIP_WBITS)
+    return bytes(out), not inflater.eof
 
 
 def _deflate(body: bytes, limit: int) -> tuple[bytes, bool]:
     """Decode deflate with a zlib header (RFC 9110) or without one, as some servers send it."""
     try:
-        return _inflate(body, limit, zlib.MAX_WBITS, whole=True)
+        return _inflate(body, limit, zlib.MAX_WBITS)
     except zlib.error:
-        return _inflate(body, limit, -zlib.MAX_WBITS, whole=True)
+        return _inflate(body, limit, -zlib.MAX_WBITS)
 
 
 # brotli's `output_buffer_limit` can overshoot by one block; small steps bound the overshoot.
@@ -103,10 +141,38 @@ def _zstd(body: bytes, limit: int) -> tuple[bytes, bool]:
     return out, False
 
 
+_CHUNK_LINE = re.compile(rb"([0-9A-Fa-f]{1,16})(?:;[^\r\n]*)?\r\n")
+
+
+def _aws_chunked(body: bytes, limit: int) -> tuple[bytes, bool]:
+    """Undo S3's `aws-chunked` framing: sized chunks up to an empty one, its trailers dropped.
+
+    boto3 frames S3 uploads this way by default, so an S3 write could not be faked otherwise.
+    """
+    out = bytearray()
+    at = 0
+    while True:
+        line = _CHUNK_LINE.match(body, at)
+        if line is None:
+            raise ValueError("not an aws-chunked chunk")
+        size, at = int(line.group(1), 16), line.end()
+        if not size:
+            return bytes(out), False
+        if len(out) + size > limit:
+            out += body[at : at + limit - len(out)]
+            return bytes(out), True
+        if not body.startswith(b"\r\n", at + size):
+            raise ValueError("an aws-chunked chunk ends early")
+        out += body[at : at + size]
+        at += size + 2
+
+
 _DECODERS: dict[str, Callable[[bytes, int], tuple[bytes, bool]]] = {
     "gzip": _gzip,
+    "x-gzip": _gzip,  # RFC 9110 has a recipient read it as gzip
     "deflate": _deflate,
     "deflateraw": _deflate,
     "br": _brotli,
     "zstd": _zstd,
+    "aws-chunked": _aws_chunked,
 }

@@ -155,7 +155,7 @@ A refusal or failure answers with irimi's JSON error:
 | `400` | the body is not a JSON object, is not valid JSON, nests too deeply, holds `NaN` or `Infinity`, lacks a field or holds a wrong type; the run id cannot name a run; a start or end for the process run |
 | `404` | no such route (`type` `irimi_control_refused`), or a recorded-call miss |
 | `405` | the wrong method; the `Allow` header names the right one |
-| `413` | the body is over 2 MiB, or decodes past irimi's limit |
+| `413` | the body is over 2 MiB, does not decode, or decodes past irimi's limit |
 | `426` | another major protocol version |
 | `500` | irimi failed (`type` `irimi_internal_error`); the request may not have been recorded |
 

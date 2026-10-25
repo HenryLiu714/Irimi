@@ -130,7 +130,7 @@ The status says what irimi did and what it knew:
 | `sent to target <host:port>` | a target you configured answered it |
 | `could not reach target <host:port>` | the target was unreachable or refused; the agent got irimi's `502` |
 | `refused by irimi` | irimi refused the request before deciding it |
-| `refused by irimi: its body is too large to read whole` | the request body decodes past 64 MiB, so irimi would not fake it |
+| `refused by irimi: its body could not be read whole` | the request body does not decode, or decodes past 64 MiB, so irimi would not fake it |
 | `refused by irimi: irimi could not decide how to answer it` | the decision failed; the agent got irimi's `502` |
 
 `could not check` names why: `<service> answered irimi's check read with <status>` (a `401` or

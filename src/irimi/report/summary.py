@@ -45,7 +45,7 @@ UNCLASSIFIED = "unclassified"
 SENT_TO_TARGET = "sent to target"
 TARGET_UNREACHABLE = "could not reach target"
 REFUSED_BY_IRIMI = "refused by irimi"
-TOO_LARGE = "its body is too large to read whole"
+NOT_READ_WHOLE = "its body could not be read whole"
 DECISION_FAILED = "irimi could not decide how to answer it"
 UNKNOWN_CURRENCY = "minor units, currency unknown"
 # `irimi replay` and `runs show` accept a unique prefix of a run id.
@@ -177,7 +177,7 @@ def write_sentence(entry: WriteEntry) -> str:
         case Refused(decision_failed=False):
             return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI}"
         case Refused():
-            why = TOO_LARGE if status.body_cut else DECISION_FAILED
+            why = NOT_READ_WHOLE if status.body_cut else DECISION_FAILED
             return f"{REJECTED_MARKER} {what}  {REFUSED_BY_IRIMI}: {why}"
         case TargetUnreachable():
             return f"{REJECTED_MARKER} {what}  {TARGET_UNREACHABLE} {_target_host(status.target)}"

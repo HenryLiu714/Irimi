@@ -1180,7 +1180,8 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
     shadow = run_workflow(W, "bombs", mode)
     allowed = MAX_CONTROL_BODY
     assert {e["label"]: e["body"] for e in shadow.events("refusal")} == dict.fromkeys(
-        CONTROL_BOMBS, control_refusal(f"the body decodes past the {allowed} bytes allowed")
+        CONTROL_BOMBS,
+        control_refusal(f"the body does not decode, or decodes past the {allowed} bytes allowed"),
     )
     root = shadow.home / paths.STORE_DIR_NAME
     # No run but the process run, which serve mode does not have.
@@ -1198,10 +1199,9 @@ def test_a_run_start_that_decodes_past_the_cap_is_refused_413_unread(run_workflo
 PLAIN_REFUND = (
     "○ stripe  refund $9.00 on ch_GAUNTLET  faked; checked against live state: would succeed"
 )
-# A write cut at the cap prints as refused, with no sentence filled from a body irimi did not read.
+# A write irimi could not read whole prints as refused, with no sentence filled from its body.
 CUT_REFUND = (
-    "✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: "
-    "its body is too large to read whole"
+    "✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: its body could not be read whole"
 )
 
 
@@ -1237,7 +1237,7 @@ def test_irimi_compare_keeps_two_cut_writes_of_different_routes_apart(shared_sto
         "",
         f"  - {CUT_REFUND}",
         "  + ✗ stripe  POST api.stripe.com/v1/customers/cus_GAUNTLET  refused by irimi: its body "
-        "is too large to read whole",
+        "could not be read whole",
         f"  = {PLAIN_REFUND}",
         "",
         "  1 same · 0 changed · 1 only in A · 1 only in B",

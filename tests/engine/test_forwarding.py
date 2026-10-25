@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 from irimi.config import ca, paths
-from irimi.core.exchange import Response
+from irimi.core.exchange import Flag, Response
 from irimi.decide.overlay import NoOverlay, Overlaid
 from irimi.decide.policy import ShadowPolicy
-from irimi.engine import EngineConfig, EngineStartError
+from irimi.engine import EngineConfig, EngineStartError, mitm
 from irimi.engine.mitm import MitmEngine
 from tests.support.doubles import NullStore
 from tests.support.engine import engine_config, start_engine, via_proxy
@@ -115,8 +115,12 @@ def test_mitmproxys_ca_bundle_is_written_from_irimis_ca(engine, upstream):
 
 # `rot13` is an encoding mitmproxy raises TypeError for rather than ValueError.
 @pytest.mark.parametrize("content_encoding", ["gzip", "rot13"])
-def test_undecodable_request_body_is_still_faked(engine, upstream, content_encoding):
-    # A strict body decode raising inside the hook would make mitmproxy forward the write.
+def test_a_write_whose_body_irimi_cannot_decode_is_refused_and_never_forwarded(
+    engine, upstream, content_encoding
+):
+    """A write irimi cannot decode gets irimi's 502, never a fake built from bytes it did not read.
+
+    A strict body decode raising inside the hook would make mitmproxy forward the write."""
     eng, seen = engine
     status, data = via_proxy(
         eng.listen_port(),
@@ -125,26 +129,47 @@ def test_undecodable_request_body_is_still_faked(engine, upstream, content_encod
         body=b'{"not":"gzip"}',
         extra_headers={"content-encoding": content_encoding},
     )
-    assert status == 200  # the upstream answers every POST with 500, so it was not reached
-    assert json.loads(data)["not"] == "gzip"  # reflected from the body we could not decode
-    assert [ex.answered_by for ex in seen] == ["fake-L0"]
-    assert seen[0].request.body == b'{"not":"gzip"}'
+    assert status == 502  # the upstream answers every POST with 500, so it was not reached
+    assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
+    (ex,) = seen
+    assert (ex.answered_by, ex.request.body) == ("irimi", b"")
+    assert ex.flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED, Flag.BODY_TRUNCATED)
 
 
-def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
+def test_a_write_framed_aws_chunked_is_faked_from_the_data_its_chunks_carry(engine, upstream):
+    """boto3 frames an S3 upload `aws-chunked`; the fake is built from the upload, not refused."""
+    eng, seen = engine
+    status, data = via_proxy(
+        eng.listen_port(),
+        "POST",
+        f"http://127.0.0.1:{upstream}/things",
+        body=b'5\r\n{"a":\r\n3\r\n 1}\r\n0\r\n\r\n',
+        extra_headers={"content-encoding": "aws-chunked"},
+    )
+    assert (status, json.loads(data)["a"]) == (200, 1)
+    (ex,) = seen
+    assert (ex.answered_by, ex.request.body, ex.flags) == (
+        "fake-L0",
+        b'{"a": 1}',
+        (Flag.UNCLASSIFIED,),
+    )
+
+
+def test_an_upstream_body_irimi_cannot_decode_is_recorded_empty_and_flagged(engine, upstream):
+    """The agent gets the body as it came; the trace keeps none of what redaction cannot read."""
     eng, seen = engine
     status, data = via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/badgzip")
     assert (status, data) == (200, b"not-gzip")
-    assert len(seen) == 1
-    assert seen[0].answered_by == "live"
-    assert seen[0].response.body == b"not-gzip"
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == ("live", (Flag.BODY_TRUNCATED,))
+    assert ex.response is not None and ex.response.body == b""
 
 
 @pytest.mark.parametrize("content_encoding", ["rot13", "utf-8"])
-def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorded(
+def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_recorded_empty(
     engine, upstream, content_encoding
 ):
-    """A body in a text codec (`rot13`, `utf-8`) is recorded as it came, like an undecodable one.
+    """A body in a text codec (`rot13`, `utf-8`) is recorded empty and flagged, as undecodable.
 
     mitmproxy raises TypeError for `rot13`, and `utf-8` decodes to a str, which is no body."""
     eng, seen = engine
@@ -152,8 +177,8 @@ def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorde
     status, data = via_proxy(eng.listen_port(), "GET", url)
     assert (status, data) == (200, b"not-" + content_encoding.encode())
     (ex,) = seen
-    assert (ex.answered_by, ex.flags) == ("live", ())
-    assert ex.response is not None and ex.response.body == data
+    assert (ex.answered_by, ex.flags) == ("live", (Flag.BODY_TRUNCATED,))
+    assert ex.response is not None and ex.response.body == b""
 
 
 def test_an_overlays_answer_reaches_the_client(tmp_path, monkeypatch, upstream):
@@ -178,12 +203,10 @@ def test_an_overlays_answer_reaches_the_client(tmp_path, monkeypatch, upstream):
 
 
 @pytest.mark.parametrize("content_encoding", ["rot13", "utf-8"])
-def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_the_client(
+def test_a_read_irimi_cannot_decode_is_never_overlaid_and_reaches_the_client_as_it_came(
     tmp_path, monkeypatch, upstream, content_encoding
 ):
-    """An overlaid body goes out as the overlay built it, whatever `content-encoding` it keeps.
-
-    mitmproxy would re-encode it per that header, and raises TypeError for a text codec."""
+    """A read in a text codec is not read whole, so the overlay's answer is never sent for it."""
 
     class _Overlay:
         def __call__(
@@ -202,9 +225,20 @@ def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_th
         status, data = via_proxy(eng.listen_port(), "GET", url)
     finally:
         stop()
-    assert (status, data) == (200, b"not-" + content_encoding.encode() + b"-OVERLAID")
+    assert (status, data) == (200, b"not-" + content_encoding.encode())
     assert len(seen) == 2 and seen[-1].response is not None
-    assert (seen[-1].answered_by, seen[-1].response.body) == ("overlay", data)
+    assert (seen[-1].answered_by, seen[-1].response.body) == ("live", b"")
+    assert seen[-1].flags == (Flag.BODY_TRUNCATED,)
+
+
+@pytest.mark.parametrize("content_encoding", ["rot13", "utf-8"])
+def test_a_rebuilt_answer_in_a_text_codec_goes_out_as_built(content_encoding):
+    """A rebuilt body goes out as built, whatever `content-encoding` it keeps.
+
+    mitmproxy would re-encode it per that header, and raises TypeError for a text codec."""
+    headers = (("content-encoding", content_encoding),)
+    built = mitm._to_mitm_response(Response(200, headers, b"as built"))
+    assert (built.raw_content, built.headers.get("content-encoding")) == (b"as built", None)
 
 
 def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream):

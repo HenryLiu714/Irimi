@@ -23,6 +23,10 @@ all is listed under [known bypasses](security.md#known-bypasses).
   recorded `overlay: partial`, and the summary's `↳` lines say so; it is never silently wrong. A
   read of a faked object that the service answers with an error other than `404` is passed on as
   sent, so an agent that retries it sees what it would see in production.
+- **A body irimi cannot read whole is passed on, not overlaid.** A read in a `Content-Encoding`
+  irimi does not decode (`bzip2`, `compress`), or that decodes past 64 MiB, reaches the agent as the
+  service sent it, without the run's faked writes, and is recorded empty. A write in one is refused
+  with irimi's `502`.
 - **Clients that ignore `SSL_CERT_FILE`** fail TLS under irimi rather than writing for real. The
   summary counts these failures per host and names the CA to point them at.
 

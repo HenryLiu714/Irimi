@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 META_KEY = "irimi"  # flow.metadata slot holding the flow's `Plan`
 STREAM_KEY = "irimi-stream"  # flow.metadata slot holding a streamed response's capture
-REQUEST_CUT_KEY = "irimi-request-cut"  # flow.metadata slot: request body cut at the cap
+REQUEST_CUT_KEY = "irimi-request-cut"  # flow.metadata slot: request body not read whole
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
@@ -94,25 +94,23 @@ def _recorded_stream(
 
 
 def _body(message: http.Message) -> Decoded:
-    """Return a buffered body as the trace records it, and whether decoding stopped at the cap.
+    """Return a buffered body as the trace records it, and whether it was not read whole.
 
-    An undecodable body is kept as it came. A body cut at the cap is recorded empty: the start of
-    a JSON document is not JSON, so redaction could not scan it.
+    A body decoded only in part, or one irimi cannot decode, is recorded empty: redaction could
+    scan neither the start of a JSON document, which is not JSON, nor an encoded body.
     """
     raw = message.raw_content or b""
     content_encoding = message.headers.get("content-encoding", "")
     if not raw or not content_encoding:
         return Decoded(raw, False)
     decoded = decode_body(raw, content_encoding)
-    if decoded is None:
-        return Decoded(raw, False)
-    if decoded.cut:
+    if decoded is None or decoded.cut:
         return Decoded(b"", True)
     return decoded
 
 
 def _request_from_flow(flow: http.HTTPFlow) -> tuple[Request, bool]:
-    """Return the flow's request, and whether its body's decoding stopped at the cap."""
+    """Return the flow's request, and whether its body was not read whole."""
     body = _body(flow.request)
     request = wire.parse(
         flow.request.method,
@@ -127,7 +125,7 @@ def _request_from_flow(flow: http.HTTPFlow) -> tuple[Request, bool]:
 
 
 def _response_from_flow(flow: http.HTTPFlow) -> tuple[Response, bool]:
-    """Return the flow's response, and whether its body's decoding stopped at the cap."""
+    """Return the flow's response, and whether its body was not read whole."""
     assert flow.response is not None
     body = _body(flow.response)
     response = Response(
