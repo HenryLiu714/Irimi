@@ -35,6 +35,9 @@ ARGS_DIFFER = "(the triggers' args differ)"
 # Noted for a pair either side of which is flagged `body-truncated`; the flag does not say which
 # body was cut, so a cut response counts too.
 CUT_NOTE = "a body was cut when stored"
+# Printed under a changed pair whose two writes sent the same, above how their outcomes differ, so
+# a check irimi made in one run and could not in the other does not read as the agent's change.
+SENT_ALIKE = "(both sent the same; only the outcome differs)"
 # Flags that say what irimi did with a write. `from-recording` and `replay-miss` are left out:
 # they would set every replayed write apart from its recording.
 OUTCOME_FLAGS = frozenset(
@@ -88,11 +91,16 @@ class Action:
         return "".join(_seen(char) for char in self.text)
 
     @property
-    def data(self) -> Hashable:
-        """Return what it is compared by; a fresh object, equal to nothing, if cut or not JSON."""
+    def sent(self) -> Hashable:
+        """Return its key and fields; a fresh object, equal to nothing, if cut or not JSON."""
         if self.cut or self.fields is None:
             return object()
-        return (self.key, self.outcome, self.fields)
+        return (self.key, self.fields)
+
+    @property
+    def data(self) -> Hashable:
+        """Return what it is compared by: what it `sent`, and its outcome."""
+        return (self.sent, self.outcome)
 
 
 # Unicode categories that print as nothing or as a space (format, separator, private-use and
@@ -411,8 +419,9 @@ def _row_lines(row: Row, alike: frozenset[str] = frozenset()) -> list[str]:
     """Return a row's lines: a differing pair as A over B, any other row as its one action.
 
     An action whose sentence prints like another's in the comparison (`alike`) prints `escaped`
-    text (`printable` prints a newline and a typed `\\n` alike), in a pair or not. A pair with one
-    sentence prints its differing fields."""
+    text (`printable` prints a newline and a typed `\\n` alike), in a pair or not. A changed pair
+    that sent the same says so above its outcome's differences; one with one sentence prints its
+    differing fields."""
     marker = MARKERS[row.mark]
 
     def shown(action: Action) -> str:
@@ -420,7 +429,9 @@ def _row_lines(row: Row, alike: frozenset[str] = frozenset()) -> list[str]:
 
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
         lines = [f"  {marker} A {shown(row.a)}", f"    B {shown(row.b)}"]
-        if row.mark == "changed" and row.a.sentence == row.b.sentence:
+        if row.a.sent == row.b.sent:
+            lines += [f"      {SENT_ALIKE}", *field_diff(row.a, row.b)]
+        elif row.mark == "changed" and row.a.sentence == row.b.sentence:
             lines += field_diff(row.a, row.b)
         return lines
     action = row.a if row.a is not None else row.b

@@ -36,6 +36,7 @@ LABELS = [
     "  B  refund_ticket  agent:refund_ticket  agent 1.0",
 ]
 REFUND = "○ stripe  refund $49.00 on ch_1  faked; checked against live state: would succeed"
+SENT_ALIKE = "(both sent the same; only the outcome differs)"
 TOOL = "○ tool  db.mark_refunded  fake ran instead"
 
 
@@ -258,6 +259,7 @@ def test_a_write_answered_otherwise_is_changed_though_its_line_reads_the_same():
     assert compare.compare_runs(_run([a]), _run([b]), index).lines() == [
         f"  ~ A {UPDATE}",
         f"    B {UPDATE}",
+        f"      {SENT_ALIKE}",
         '      currency: "usd" -> "eur"',
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
@@ -384,6 +386,60 @@ def test_a_refund_l3_rejected_in_b_is_the_same_write_changed_and_shows_its_mark(
             "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
+
+
+def test_a_refund_irimi_could_not_check_in_b_says_both_sent_the_same_and_what_irimi_did():
+    """B's refund prints otherwise, as irimi could not check it, though the agent sent the same.
+
+    It is still changed and exits 1: a check irimi could not make again is a difference."""
+    sent = builders.request(
+        method="POST", path="/v1/refunds", headers=FORM, body=b"charge=ch_1&amount=4900"
+    )
+    checked = _refund(request=sent, precondition=Precondition("passed", currency="usd"))
+    unchecked = _refund(
+        request=sent, answered_by="fake-L2", precondition=Precondition("not_evaluable")
+    )
+    comparison = compare.compare_runs(_run([checked]), _run([unchecked]), servicemaps.load())
+    assert (comparison.exit_code, comparison.lines()) == (
+        exitcodes.DIFFERENT,
+        [
+            f"  ~ A {REFUND}",
+            "    B ○ stripe  refund 4900 (minor units, currency unknown) on ch_1  faked; could not "
+            "check: irimi made no check read",
+            f"      {SENT_ALIKE}",
+            '      answered by: "fake-L1" -> "fake-L2"',
+            '      currency: "usd" -> (absent)',
+            '      precondition: "passed" -> "not_evaluable"',
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
+        ],
+    )
+
+
+def test_a_stand_in_that_raised_in_b_given_the_same_args_says_both_sent_the_same():
+    raised = dataclasses.replace(
+        _tool(), error=ErrorInfo("builtins.LookupError", "no such account")
+    )
+    assert compare.compare_runs(_run([_tool()]), _run([raised]), None).lines() == [
+        f"  ~ A {TOOL}",
+        "    B ○ tool  db.mark_refunded  fake raised builtins.LookupError",
+        f"      {SENT_ALIKE}",
+        '      raised: (absent) -> "builtins.LookupError"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_a_pair_whose_data_json_cannot_hold_is_never_said_to_have_sent_the_same():
+    """Two writes whose fields JSON cannot hold equal nothing, so they never sent the same."""
+    a = compare.Action((compare.TOOL_KEY, "db.x"), "x", fields=None)
+    b = compare.Action((compare.TOOL_KEY, "db.x"), "y", fields=None)
+    assert compare.Comparison(compare.align([a], [b])).lines() == [
+        "  ~ A x",
+        "    B y",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
 
 
 def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
@@ -686,6 +742,8 @@ def test_a_newline_and_a_typed_backslash_n_print_alike_and_are_still_not_the_sam
     assert comparison.lines() == [
         "  ~ A ○ tool  db.mark_refunded  fake raised a\\nb",
         "    B ○ tool  db.mark_refunded  fake raised a\\\\nb",
+        f"      {SENT_ALIKE}",
+        '      raised: "a\\nb" -> "a\\\\nb"',
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]

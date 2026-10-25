@@ -11,7 +11,7 @@ from irimi.core.exchange import Exchange, Flag
 from irimi.core.limits import MAX_DECODED_BODY
 from irimi.protocol.trace import ErrorInfo
 from tests.e2e.workflows.agents.w10_flaky_upstream.scenarios import BOMBED, CONTROL_DOWN
-from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.compare import SENT_ALIKE, compare, rows_not_shown
 from tests.e2e.workflows.harness.internet import bomb
 from tests.e2e.workflows.harness.invariants import check_invariants
 
@@ -454,13 +454,16 @@ AGAINST_A_RETRIED_READ = {
     "reset_on_write": (0, False, WROTE_BOTH),
     "retry_without_key": (0, True, WROTE_BOTH),
     # irimi's check read failed, so it could neither check nor price the refund: a difference the
-    # live service, not the agent, made.
+    # live service, not the agent, made. The pair says the agent sent the same refund both times.
     "precondition_read_fails": (
         1,
         False,
         [
             f"  ~ A {REFUND}",
             f"    B {UNCHECKED_REFUND}",
+            SENT_ALIKE,
+            '      currency: "usd" -> (absent)',
+            '      precondition: "passed" -> "not_evaluable"',
             f"  = {POSTED}",
         ],
     ),

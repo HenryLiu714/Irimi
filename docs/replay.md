@@ -144,6 +144,13 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   query, the scope headers and the body less `compare_ignores:`. A write tool compares its
   arguments. When a changed pair prints alike, the fields that differ are listed under it, as
   `args.body` is above.
+- **Sent the same, answered otherwise.** When a changed pair's two writes sent the same (the
+  fields above; for a write tool, its arguments), the line under it says
+  `(both sent the same; only the outcome differs)`, above the parts of the outcome that differ:
+  how irimi answered, the precondition outcome and rejection code, the currency the check read
+  found, the target, the flags, or the error a write tool's fake raised. So a check irimi could
+  make in one run and not the other, or a target that was down, does not read as the agent's
+  change. The pair is still `~`, and the comparison exits 1.
 - **Pairing.** Writes line up in order, with as many identical pairs as the two runs allow, then
   as many pairs of one operation, so a refund of another amount is one changed write, not one
   removed and one added, even beside a refund one run made twice. Writes of one operation pair

@@ -14,7 +14,7 @@ from tests.e2e.workflows.agents.w08_orchestrator.scenarios import (
     SUBAGENT_MAP,
     UNJUSTIFIED_MAP,
 )
-from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.compare import SENT_ALIKE, compare, rows_not_shown
 from tests.e2e.workflows.harness.invariants import check_invariants
 
 W = "w08_orchestrator"
@@ -310,7 +310,7 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     """A write to an unreachable target is answered 502 by irimi and compared as it was printed.
 
     Compare pairs it with `with_map`'s reservation: a write whose target failed is still a write
-    the agent attempted."""
+    the agent attempted, and the same one, which irimi answered otherwise."""
     bare = run_workflow(W, "target_down", "bare")
     down = run_workflow(W, "target_down", mode)
     assert bare.by_label()["reserve"] == (200, None)
@@ -334,6 +334,10 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
         "",
         f"  ~ A {RESERVATION}",
         f"    B {UNREACHED}",
+        SENT_ALIKE,
+        '      answered by: "fake-L0" -> "irimi"',
+        '      flags: (absent) -> ["target-failed"]',
+        f'      target: (absent) -> "{DOWN_TARGET}/reservations"',
         "",
         "  0 same · 1 changed · 0 only in A · 0 only in B",
     ]
