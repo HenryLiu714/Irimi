@@ -22,7 +22,7 @@ import pytest
 from irimi import sdk
 from irimi.cli import runner
 from irimi.decide.policy import ShadowPolicy
-from irimi.protocol.control import RECORDED_ACTION, RecordedOutcome
+from irimi.protocol.control import NO_RECORDED_CALL, RECORDED_ACTION, RecordedOutcome
 from irimi.protocol.env import (
     AGENT_VERSION_ENV,
     CONTROL_ENV,
@@ -31,7 +31,15 @@ from irimi.protocol.env import (
     RUN_ENV,
 )
 from irimi.protocol.headers import RUN_HEADER
-from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall, new_run_id
+from irimi.protocol.trace import (
+    REPR_KEY,
+    TRUNCATED_KEY,
+    ErrorInfo,
+    JSONValue,
+    RunRecord,
+    ToolCall,
+    new_run_id,
+)
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
@@ -41,7 +49,7 @@ from irimi.sdk import _context as context
 from irimi.sdk import _control_client as client
 from irimi.sdk import _runs as runs
 from irimi.sdk import _tools as tools
-from irimi.sdk._errors import recorded_error
+from irimi.sdk._errors import recorded_error, tool_error_info
 from irimi.sdk._state import state
 from tests.support.engine import RealWriteRan, engine_config, start_engine
 
@@ -246,6 +254,8 @@ def test_a_recorded_key_error_comes_back_as_recorded_tool_error_catchable_as_key
     raised, [call] = irimi.replay(run_id, look)
     assert isinstance(raised, sdk.RecordedToolError) and isinstance(raised, KeyError)
     assert (raised.type_name, raised.message) == ("builtins.KeyError", "'acc_missing'")
+    # Its args are the original's: the key, not the key quoted.
+    assert raised.args == ("acc_missing",)
     # Its `str` is the recorded message, not KeyError's quoting of it again.
     assert str(raised) == "'acc_missing'"
     # Named as recorded, module included, so a traceback says `KeyError: 'acc_missing'`.
@@ -253,7 +263,7 @@ def test_a_recorded_key_error_comes_back_as_recorded_tool_error_catchable_as_key
     assert traceback.format_exception_only(raised) == ["KeyError: 'acc_missing'\n"]
     assert (call.ran, call.result) == ("recording", None)
     # Recorded as it was recorded, not as the class it was raised as.
-    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])
 
 
 def test_a_recorded_result_held_as_its_repr_runs_the_real_function(irimi):
@@ -361,7 +371,7 @@ def test_a_recorded_error_that_is_not_a_builtin_is_a_plain_recorded_tool_error(i
     raised, [call] = irimi.replay(run_id, lambda: _raised(lambda: balance("acc_mystery")))
     # LookupError is a builtin: it is caught as one.
     assert isinstance(raised, LookupError) and isinstance(raised, sdk.RecordedToolError)
-    assert call.error == ErrorInfo("builtins.LookupError", "no such account")
+    assert call.error == ErrorInfo("builtins.LookupError", "no such account", ["no such account"])
 
 
 def _raised(fn: Callable[[], Any]) -> BaseException | None:
@@ -567,13 +577,92 @@ def test_a_recorded_builtin_that_is_no_exception_is_never_raised_as_itself(kind)
     assert type(raised) is sdk.RecordedToolError
 
 
+@pytest.mark.parametrize(
+    ("error", "builtin", "args"),
+    [
+        (ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"]), KeyError, ("acc_1",)),
+        (ErrorInfo("builtins.ValueError", "", []), ValueError, ()),
+        (ErrorInfo("builtins.KeyError", "['a', 1]", [["a", 1]]), KeyError, (["a", 1],)),
+        (ErrorInfo("myapp.errors.NotFound", "acc_1 (3)", ["acc_1", 3]), None, ("acc_1", 3)),
+    ],
+)
+def test_a_recorded_error_s_args_come_back_as_its_args(error, builtin, args):
+    """A recorded error raised again has the args the original had, as JSON holds them."""
+    raised = recorded_error(error)
+    assert raised.args == args
+    assert str(raised) == error.message
+    assert builtin is None or isinstance(raised, builtin)
+
+
+def test_a_recorded_os_error_s_args_give_back_its_errno_and_strerror():
+    """OSError reads `errno` and `strerror` from its args; its filename is not one of them."""
+    raised = recorded_error(ErrorInfo("builtins.FileNotFoundError", "x", [2, "No such file"]))
+    assert isinstance(raised, FileNotFoundError)
+    assert (raised.errno, raised.strerror, raised.filename) == (2, "No such file", None)
+
+
+def test_a_builtin_that_needs_its_args_is_raised_as_itself_once_they_are_recorded():
+    """UnicodeDecodeError takes five arguments: with them it is a builtin, without them plain."""
+    said = "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+    args: list[JSONValue] = ["utf-8", {"__irimi_bytes__": "/w=="}, 0, 1, "invalid start byte"]
+    raised = recorded_error(ErrorInfo("builtins.UnicodeDecodeError", said, args))
+    assert isinstance(raised, UnicodeDecodeError)
+    assert (raised.object, raised.start, raised.reason) == (b"\xff", 0, "invalid start byte")
+    assert type(recorded_error(ErrorInfo("builtins.UnicodeDecodeError", said))) is (
+        sdk.RecordedToolError
+    )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        None,  # recorded before args were, or by a client that sends none
+        [{REPR_KEY: "<object object at 0x1>"}],  # a description, not the value
+        {TRUNCATED_KEY: True, "bytes": 2_000_000},  # past the capture budget
+        redact.REDACTION_FAILED,  # what redaction stores when it cannot read them
+    ],
+)
+def test_a_recorded_error_with_no_args_that_rebuild_has_its_message_as_its_args(args):
+    raised = recorded_error(ErrorInfo("builtins.KeyError", "'acc_1'", args))
+    assert isinstance(raised, KeyError)
+    assert raised.args == ("'acc_1'",)
+
+
+def test_args_a_builtin_refuses_still_raise_it_as_that_builtin_with_its_message():
+    """Being caught as the builtin matters more than the args, which a trace may hold damaged."""
+    raised = recorded_error(ErrorInfo("builtins.SyntaxError", "bad", ["bad", "no details"]))
+    assert isinstance(raised, SyntaxError)
+    assert raised.args == ("bad",)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [None, ["acc_1"], [{REPR_KEY: "<object object at 0x1>"}], {TRUNCATED_KEY: True, "bytes": 9}],
+    ids=["none", "args", "a-description", "truncated"],
+)
+def test_a_replayed_error_is_recorded_again_as_its_recording_holds_it(args):
+    """A call a replay answered records the recorded error, not args read off what it rebuilt."""
+    error = ErrorInfo("builtins.KeyError", "'acc_1'", args)
+    raised = recorded_error(error)
+    for again in (raised, pickle.loads(pickle.dumps(raised)), copy.copy(raised)):
+        assert tool_error_info(again) == error
+        assert tool_error_info(again).args == args
+
+
+def test_a_recorded_tool_error_built_by_hand_records_its_own_args():
+    raised = sdk.RecordedToolError("builtins.KeyError", "'acc_1'", ("acc_1",))
+    assert tool_error_info(raised) == ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])
+
+
+@pytest.mark.parametrize("args", [None, ["acc_1", 2]], ids=["no-args", "args"])
 @pytest.mark.parametrize("kind", ["builtins.KeyError", "myapp.errors.NotFound"])
-def test_a_recorded_tool_error_pickles_and_copies_as_itself(kind):
-    """A RecordedToolError pickles and copies, so agents can hand it across processes."""
-    raised = recorded_error(ErrorInfo(kind, "'acc_1'"))
+def test_a_recorded_tool_error_pickles_and_copies_as_itself(kind, args):
+    """A RecordedToolError pickles and copies, args too, so agents can hand it across processes."""
+    raised = recorded_error(ErrorInfo(kind, "'acc_1'", args))
     for again in (pickle.loads(pickle.dumps(raised)), copy.copy(raised)):
         assert type(again) is type(raised)
         assert (again.type_name, again.message, str(again)) == (kind, "'acc_1'", "'acc_1'")
+        assert again.args == raised.args == (("'acc_1'",) if args is None else tuple(args))
 
 
 def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop(
@@ -621,15 +710,16 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
     [recorded] = [
         e for e in StoreReader(irimi.root).load_run(run_id).events if isinstance(e, ToolCall)
     ]
-    assert recorded.error == ErrorInfo("asyncio.exceptions.CancelledError", "")
+    assert recorded.error == ErrorInfo("asyncio.exceptions.CancelledError", "", [])
     result, [call] = irimi.replay(run_id, _times_out)
     assert result == "timed out"
     assert _REAL_READS == ["acc_1", "acc_1"]
     assert (call.ran, call.error) == ("real", recorded.error)
 
 
-def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
-    """A recorded `GeneratorExit` is a miss: it is no outcome of the tool's own."""
+@pytest.mark.parametrize("stopped", ["builtins.GeneratorExit", "trio.Cancelled"])
+def test_a_recorded_call_closed_unawaited_or_cancelled_under_trio_is_a_miss(monkeypatch, stopped):
+    """A recorded `GeneratorExit` or trio cancellation is a miss: no outcome of the tool's own."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
@@ -640,7 +730,7 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
             posted.append(doc)
 
         def recorded(self, *args: Any) -> RecordedOutcome:
-            return RecordedOutcome(None, ErrorInfo("builtins.GeneratorExit", ""), awaited=False)
+            return RecordedOutcome(None, ErrorInfo(stopped, ""), awaited=False)
 
     monkeypatch.setattr(state, "reporter", _Closed())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
@@ -716,6 +806,45 @@ def test_an_answer_the_sdk_cannot_read_is_a_miss_warned_once(monkeypatch, warnin
         assert [balance("acc_1"), balance("acc_1")] == [{"account": "acc_1", "balance": 100}] * 2
     said = [w.getMessage() for w in warnings()]
     assert len([w for w in said if "look up a recorded call of tool db.balance" in w]) == 1
+
+
+def _refused(message: str) -> bytes:
+    return json.dumps({"error": {"type": "irimi_control_refused", "message": message}}).encode()
+
+
+def _lookup_warnings(warnings: Callable[[], Any]) -> list[str]:
+    return [w.getMessage() for w in warnings() if "look up a recorded call" in w.getMessage()]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _refused("no control route '/_irimi/runs/abcd1234abcd1234/tool-calls/recorded'"),
+        b"<html>Not Found</html>",
+        b'{"error": "no recorded call"}',
+        b"[]",
+        b"",
+    ],
+    ids=["no-route", "not-json", "not-irimi-s-error", "not-an-object", "empty"],
+)
+def test_a_404_that_is_not_the_endpoint_s_miss_runs_the_tool_and_is_warned_once(
+    monkeypatch, warnings, body
+):
+    """A 404 for a route this irimi does not have, as an SDK newer than it gets, is no miss.
+
+    Taken for one, every read tool of every replay would run for real with nothing said."""
+    with _answering(monkeypatch, 404, body):
+        assert [balance("acc_1"), balance("acc_1")] == [{"account": "acc_1", "balance": 100}] * 2
+    [said] = _lookup_warnings(warnings)
+    assert "(rejected: HTTP 404: " in said and said.endswith(
+        "; the tool runs for real; further failures of this kind are not logged"
+    )
+
+
+def test_the_endpoint_s_404_for_a_miss_is_silent_whoever_sends_it(monkeypatch, warnings):
+    with _answering(monkeypatch, 404, _refused(NO_RECORDED_CALL)):
+        assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    assert _lookup_warnings(warnings) == []
 
 
 def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):

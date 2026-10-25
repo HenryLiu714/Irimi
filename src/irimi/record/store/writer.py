@@ -595,7 +595,10 @@ def _item_bytes(item: _Item) -> int:
 
 
 def _queued_error(error: ErrorInfo, key: bytes) -> ErrorInfo:
-    """Return `error` cut to MAX_QUEUED_ERROR by `_cut_hiding`; TypeError if not text."""
+    """Return `error` cut to MAX_QUEUED_ERROR by `_cut_hiding`; TypeError if not text.
+
+    A run's error is stored without args: nothing raises it again, and an end costs no bytes.
+    """
     return ErrorInfo(
         _cut_hiding(error.type, MAX_QUEUED_ERROR, key),
         _cut_hiding(error.message, MAX_QUEUED_ERROR, key),

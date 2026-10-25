@@ -31,6 +31,7 @@ from irimi.protocol import trace
 from irimi.protocol.control import (
     CONTROL_ANSWER,
     CONTROL_PREFIX,
+    NO_RECORDED_CALL,
     PROTOCOL_VERSION,
     RECORDED_ACTION,
     RECORDED_LOOKUP_FIELDS,
@@ -55,8 +56,6 @@ TOO_DEEP = "the body nests too deeply to read"
 OWN_RUN = "is irimi's own run, which the SDK may not start or end"
 
 HEALTH_ROUTE = "health"
-# A recorded-call miss, or any lookup outside a replay: the SDK then runs the tool for real.
-NO_RECORDED_CALL = "no recorded call"
 
 # Called with each tool call the store accepted, for the live summary.
 OnToolCall = Callable[[ToolCall], None]

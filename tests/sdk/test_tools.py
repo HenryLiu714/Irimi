@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import threading
+import typing
 from collections.abc import Callable
 from typing import Any
 
@@ -115,6 +116,56 @@ class _Klass:
     pass
 
 
+class _Desk:
+    def file(self, order: int, retries: int = 3) -> int:
+        return order
+
+
+def _noted(order: int, *, note: str) -> int:
+    return order
+
+
+def _spread(*orders: int, **notes: str) -> None:
+    pass
+
+
+class _Odd:
+    """A callable whose `__getattr__` raises for the links a fake is followed by."""
+
+    def __call__(self, order: int, retries: int = 3) -> None:
+        pass
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("__func__", "__wrapped__"):
+            raise RuntimeError(name)
+        raise AttributeError(name)
+
+
+def _with_session(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap `f`, supplying its first argument, as a session-injecting decorator does."""
+
+    @functools.wraps(f)
+    def supplied(*args: Any, **kwargs: Any) -> Any:
+        return f("session", *args, **kwargs)
+
+    return supplied
+
+
+def _declaring(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap `f` in a pass-through wrapper that declares `f`'s signature as its own."""
+
+    @functools.wraps(f)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return f(*args, **kwargs)
+
+    wrapper.__signature__ = inspect.signature(f)  # type: ignore[attr-defined]
+    return wrapper
+
+
+# A fake that would run the write: the function, a partial or wrapper of it, or what it wraps.
+_ALIAS = "is the function itself, or a partial or wrapper of it"
+
+
 MISTAKES: dict[str, tuple[Callable[[], Any], str]] = {
     "write_without_fake": (
         lambda: sdk.write_tool()(_sync),  # type: ignore[call-arg]
@@ -156,6 +207,31 @@ MISTAKES: dict[str, tuple[Callable[[], Any], str]] = {
         "@sdk.write_tool wraps",
     ),
     "class": (lambda: sdk.read_tool(_Klass), "@sdk.read_tool wraps a function or a method"),
+    "fake_is_a_partial": (lambda: sdk.write_tool(fake=functools.partial(_sync))(_sync), _ALIAS),
+    "fake_wraps_the_function": (
+        lambda: sdk.write_tool(fake=functools.wraps(_sync)(lambda order: None))(_sync),
+        _ALIAS,
+    ),
+    "fake_is_the_function_bound": (
+        lambda: sdk.write_tool(fake=_Desk.file.__get__(_Desk()))(_Desk.file),
+        _ALIAS,
+    ),
+    "fake_is_what_the_function_wraps": (
+        lambda: sdk.write_tool(fake=_sync)(functools.wraps(_sync)(lambda order: order)),
+        _ALIAS,
+    ),
+    "method_fake_without_the_instance": (
+        lambda: sdk.write_tool(fake=_sync)(_Desk.file),
+        "cannot take its arguments (too many positional arguments)",
+    ),
+    "fake_without_a_required_keyword": (
+        lambda: sdk.write_tool(fake=_sync)(_noted),
+        "cannot take its arguments (got an unexpected keyword argument 'note')",
+    ),
+    "method_fake_without_the_instance_under_a_declaring_wrapper": (
+        lambda: sdk.write_tool(fake=_sync)(_declaring(_Desk.file)),
+        "cannot take its arguments (too many positional arguments)",
+    ),
 }
 
 
@@ -180,8 +256,88 @@ def test_the_old_tool_decorator_is_gone():
 def test_a_tool_keeps_its_functions_name_signature_and_nature():
     assert mark_refunded.__name__ == "mark_refunded"
     assert list(inspect.signature(mark_refunded).parameters) == ["order", "note"]
+    assert list(inspect.signature(mark_refunded_async).parameters) == ["order", "note"]
     assert inspect.iscoroutinefunction(mark_refunded_async)
     assert not inspect.iscoroutinefunction(mark_refunded)
+
+
+@pytest.mark.parametrize(
+    ("fn", "fake"),
+    [
+        (_Desk.file, lambda self, order: None),
+        (_Desk.file, lambda *args, **kwargs: None),
+        (_Desk.file, lambda self, order, retries=1, extra=None: None),
+        (_Desk.file, functools.partial(lambda prefix, self, order: None, "p")),
+        (_Desk.file, max),  # a builtin whose signature cannot be read: the call decides
+        (_spread, lambda: None),
+        (_spread, lambda order, *, note: None),
+        (_sync, _Odd()),
+        (_with_session(_Desk.file), lambda order: None),
+        (_sync, _with_session(lambda session, order: None)),
+    ],
+    ids=[
+        "exact",
+        "variadic",
+        "more-optional",
+        "partial-of-another",
+        "unreadable",
+        "variadic-function",
+        "variadic-function-passed-more",
+        "odd-getattr",
+        "a-decorator-beneath-supplies-one",
+        "a-decorator-on-the-fake-supplies-one",
+    ],
+)
+def test_a_fake_that_takes_the_functions_required_arguments_is_accepted(fn, fake):
+    """Only the required arguments are tried, so a fake may take more, or fewer optional ones.
+
+    Each signature is the object's own: a decorator that supplies an argument changes it."""
+    sdk.write_tool(fake=fake, name="desk.file")(fn)
+
+
+def test_a_write_tool_has_no_wrapped_so_unwrapping_it_never_reaches_the_real_function(posted):
+    """A framework that unwraps a write tool and calls the result gets the tool: the fake runs.
+
+    A read tool keeps `__wrapped__`: unwrapped, it runs for real, as it does anyway."""
+    for tool in (mark_refunded, mark_refunded_async, _Ledger().mark, _Repository.save):
+        assert not hasattr(tool, "__wrapped__")
+    assert inspect.unwrap(mark_refunded)(7) == {"stood_in": 7, "note": ""}
+    assert asyncio.run(inspect.unwrap(mark_refunded_async)(8)) == {"stood_in": 8, "note": ""}
+    assert [doc["ran"] for _, _, doc in posted.posts] == ["shadow", "shadow"]
+    assert list(inspect.signature(_Ledger.mark).parameters) == ["self", "order"]
+    assert inspect.unwrap(look_up) is look_up.__wrapped__  # type: ignore[attr-defined]
+
+
+def _filed_stand_in(error: "RealWriteRan") -> "None":
+    pass
+
+
+@sdk.write_tool(fake=_filed_stand_in, name="db.filed")
+def filed(error: "RealWriteRan") -> "None":
+    raise RealWriteRan("the real write ran")
+
+
+def test_a_write_tool_s_string_annotations_resolve_where_the_function_s_do():
+    """`typing.get_type_hints` found the function's module through `__wrapped__`; it still works."""
+    assert typing.get_type_hints(filed) == {"error": RealWriteRan, "return": type(None)}
+
+
+def test_a_write_tool_annotated_with_a_type_checking_only_import_still_decorates(posted):
+    """A name imported only under `TYPE_CHECKING` is never evaluated at decoration.
+
+    On 3.14 `inspect.signature` would evaluate the lazy annotations and raise NameError. On 3.12
+    the module needs `from __future__ import annotations` to load."""
+    source = "def refund(charge: str, amount: Decimal) -> None: ...\n"
+    if sys.version_info < (3, 14):
+        source = "from __future__ import annotations\n" + source
+    namespace: dict[str, Any] = {"__name__": "agent"}
+    exec(source, namespace)
+    tool = sdk.write_tool(fake=lambda charge, amount: "stood in")(namespace["refund"])
+    assert list(inspect.signature(tool).parameters) == ["charge", "amount"]
+    assert tool("ch_1", 5) == "stood in"
+    with pytest.raises(TypeError, match="cannot take its arguments"):
+        sdk.write_tool(fake=lambda charge: None)(namespace["refund"])
+    sdk.read_tool(namespace["refund"])
 
 
 # -- active: a write runs only its fake, a read runs for real, and both are recorded ---------------
@@ -253,7 +409,7 @@ def test_a_stand_in_that_raises_re_raises_the_same_object_and_records_its_error(
     assert caught.value is raised
     reader = irimi.finish()
     [call] = _tool_calls(reader, _only_sdk_run(reader))
-    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])
     assert call.result is None
 
 
@@ -340,6 +496,79 @@ def test_args_and_result_together_stay_inside_one_capture_budget(posted):
     assert len(capture.serialized(doc)) < 2 * limits.MAX_CAPTURED_BYTES
 
 
+def _raising(exc: BaseException) -> Callable[..., Any]:
+    @sdk.read_tool(name="db.raises")
+    def raises(text: str = "") -> Any:
+        raise exc
+
+    return raises
+
+
+@pytest.mark.parametrize(
+    ("exc", "args"),
+    [
+        (KeyError("acc_1"), ["acc_1"]),
+        (OSError(2, "No such file", "f.txt"), [2, "No such file"]),
+        (ValueError(), []),
+        (LookupError(b"\xff", ("a", 1)), [{trace.REPR_KEY: "<bytes>"}, ["a", 1]]),
+        (LookupError({"body": [b"sk_live_x"]}), [{"body": [{trace.REPR_KEY: "<bytes>"}]}]),
+        (LookupError(object), [{trace.REPR_KEY: "<class 'object'>"}]),
+    ],
+    ids=["key", "os", "none", "bytes-and-a-tuple", "nested-bytes", "not-json"],
+)
+def test_a_tool_s_exception_is_recorded_with_its_args_captured(posted, exc, args):
+    """A tool call's error keeps the exception's `args`, captured as its own args are."""
+    with pytest.raises(type(exc)):
+        _raising(exc)()
+    [(_, _, doc)] = posted.posts
+    assert doc["error"]["args"] == args
+
+
+def test_a_decode_error_s_buffer_is_recorded_as_bytes_never_as_its_content(posted):
+    """Redaction cannot read base64, and the buffer a decode failed on may hold a credential."""
+    body = b'{"access_token": "sk_live_' + b"Q" * 24 + b'"}\xff'
+    with pytest.raises(UnicodeDecodeError) as raised:
+        _raising_on(body)()
+    [(_, _, doc)] = posted.posts
+    assert doc["error"]["args"] == ["utf-8", {trace.REPR_KEY: "<bytes>"}, *raised.value.args[2:]]
+
+
+def _raising_on(body: bytes) -> Callable[..., Any]:
+    @sdk.read_tool(name="db.decode")
+    def decode() -> str:
+        return body.decode()
+
+    return decode
+
+
+@pytest.mark.parametrize("full", [False, True], ids=["small-args", "args-at-the-budget"])
+def test_an_exception_whose_args_cannot_be_read_is_recorded_without_them(posted, full):
+    """No args stay absent, even beside call args that leave no room for the 4 bytes of null."""
+
+    class Unreadable(Exception):
+        @property
+        def args(self) -> Any:  # type: ignore[override]
+            raise RuntimeError("no args")
+
+    text = "x" * (limits.MAX_CAPTURED_BYTES - len(capture.serialized({"text": ""}))) if full else ""
+    with pytest.raises(Unreadable):
+        _raising(Unreadable("x"))(text)
+    [(_, _, doc)] = posted.posts
+    assert doc["args"] == {"text": text}
+    assert doc["error"] == {"type": f"{__name__}.{Unreadable.__qualname__}", "message": "x"}
+
+
+def test_args_and_an_error_s_args_together_stay_inside_one_capture_budget(posted):
+    """An error's args are bounded with the call's args, as a result is, and so is the post."""
+    half = "x" * (limits.MAX_CAPTURED_BYTES // 2 + 10)
+    with pytest.raises(KeyError):
+        _raising(KeyError(half))(half)
+    [(_, _, doc)] = posted.posts
+    assert doc["args"] == {"text": half}
+    assert doc["error"]["args"] == {trace.TRUNCATED_KEY: True, "bytes": len(half) + 4}
+    assert len(capture.serialized(doc)) < 2 * limits.MAX_CAPTURED_BYTES
+
+
 def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_ends(posted):
     async def body(order: int) -> int:
         await asyncio.sleep(0)
@@ -354,6 +583,25 @@ def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_end
     assert asyncio.run(coroutine) == 8
     [(_, _, doc)] = posted.posts
     assert (doc["args"], doc["result"]) == ({"order": 4}, 8)
+
+
+def test_a_coroutine_a_sync_tool_returned_that_nobody_awaits_is_never_recorded(posted):
+    """Nothing of it ran, so there is no call to record; Python warns it was never awaited."""
+
+    async def body(order: int) -> int:
+        return order
+
+    def stand_in(order: int) -> Any:
+        return body(order)
+
+    @sdk.write_tool(fake=stand_in, name="db.never_awaited")
+    def never_awaited(order: int) -> Any:
+        raise RealWriteRan("the real write ran")
+
+    # Closed, the coroutine the tool returned is not warned of, only the fake's inside it.
+    with pytest.warns(RuntimeWarning, match=r"<locals>\.body' was never awaited"):
+        never_awaited(4).close()
+    assert posted.posts == []
 
 
 class _Ledger:
@@ -412,7 +660,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
     [(_, _, doc)] = posted.posts
     assert (doc["result"], doc["error"]) == (
         None,
-        {"type": "builtins.ValueError", "message": "card declined"},
+        {"type": "builtins.ValueError", "message": "card declined", "args": ["card declined"]},
     )
 
 
@@ -514,6 +762,8 @@ def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(
         sdk.write_tool(fake=database_write)(database_write)
     with pytest.raises(TypeError, match="is the function itself"):
         sdk.write_tool(fake=database_write)(staticmethod(database_write))
+    with pytest.raises(TypeError, match="or a partial or wrapper of it"):
+        sdk.write_tool(fake=functools.partial(database_write))(staticmethod(database_write))
     assert posted.posts == []
 
 

@@ -33,7 +33,7 @@ and whether the invariants below held.
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks, posts that print alike |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | a `bytes` trigger, the webhooks a write would fire, a live read whose response holds a credential |
-| W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, and replayed read tools |
+| W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, a write tool a framework unwraps, and replayed read tools |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE streams recorded chunk by chunk, hang-ups and resets mid-stream, a stream that outlives its run |
 | W8 | `w08_orchestrator` | nested triggers and an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop, a target nothing listens on, a remote target refused |
 | W9 | `w09_scope_gauntlet` | none (a plain script) | every classification edge: the scope rule, unsafe verbs, odd and oversized bodies, forged irimi headers, base-URL mode and its refusals (`HEAD` included), the control endpoint by hand |

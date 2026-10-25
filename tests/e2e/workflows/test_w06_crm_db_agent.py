@@ -2,6 +2,8 @@
 
 Which body ran is read from the agent's `tool` events and state, irimi's view from its store."""
 
+import errno
+import os
 from typing import cast
 
 import pytest
@@ -11,7 +13,7 @@ from irimi.core.secret_shapes import CUT_MARK
 from irimi.protocol.trace import REPR_KEY, UNATTRIBUTED, ErrorInfo, ToolCall
 from irimi.record import redact
 from irimi.sdk._capture import MAX_REPR
-from tests.e2e.workflows.agents.agentkit import LOOKUP_REFUSED_ENV
+from tests.e2e.workflows.agents.agentkit import LOOKUP_REFUSED_ENV, LOOKUP_UNROUTED
 from tests.e2e.workflows.agents.w06_crm_db_agent.agent import (
     CONNECT_RETRIES,
     DB_NAME,
@@ -53,6 +55,37 @@ SEED_SMB = [
 
 # The CRM after `_touch_last_seen("acc_1")`, the write no label covers, which is real in every mode.
 TOUCHED = [("acc_1", "Acme", "smb", "2026-09-28", 0, None), *SEED[1:]]
+
+
+# `tool_raises`' async read tool's FileNotFoundError and validator's ValueError, as stored. The
+# first's filename is not among its args; the second's Decimal is held as its repr.
+NO_SUCH_FILE = os.strerror(errno.ENOENT)
+MISSING_EXPORT = ErrorInfo(
+    "builtins.FileNotFoundError",
+    f"[Errno {errno.ENOENT}] {NO_SUCH_FILE}: 'missing.csv'",
+    [errno.ENOENT, NO_SUCH_FILE],
+)
+SCORE_OUT_OF_RANGE = ErrorInfo(
+    "builtins.ValueError",
+    "('score out of range', Decimal('1.5'))",
+    ["score out of range", {REPR_KEY: "Decimal('1.5')"}],
+)
+# What the agent saw of each, run for real: bare, under shadow and beside serve.
+EXPORT_MISSING_SEEN = {
+    "event": "export_missing",
+    "error": "FileNotFoundError",
+    "message": MISSING_EXPORT.message,
+    "errno": errno.ENOENT,
+    "strerror": NO_SUCH_FILE,
+    "filename": "missing.csv",
+    "args": [errno.ENOENT, NO_SUCH_FILE],
+}
+SCORE_INVALID_SEEN = {
+    "event": "score_invalid",
+    "message": SCORE_OUT_OF_RANGE.message,
+    "args": ["score out of range", "Decimal('1.5')"],
+    "arg_types": ["str", "Decimal"],
+}
 
 
 def rows(result):
@@ -240,12 +273,59 @@ def test_an_unlabelled_database_write_happens_for_real_under_shadow(run_workflow
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_a_write_tool_a_framework_unwraps_still_runs_its_fake(run_workflow, mode):
+    """`inspect.unwrap` of a write tool, sync or async, gives the tool, never its real function.
+
+    A framework that calls what it unwrapped gets the fake under irimi and the real write bare, as
+    a call of the tool itself does. What it reads off the tool is the real function's signature
+    and type hints, in every mode."""
+    bare = run_workflow(W, "framework_unwraps", "bare")
+    assert bare.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "real"),
+        ("crm.notify_owner", "real"),
+    ]
+    assert bare.result()["upserted"] == {"upserted": "acc_1"}
+    assert bare.result()["notified"] == {"queued": "acc_1"}
+    assert rows(bare)[0] == ("acc_1", "Unwrapped", "smb", "2026-01-01", 0, None)
+    assert files(bare) == ["crm.sqlite3", "outbox.jsonl"]
+    shadow = run_workflow(W, "framework_unwraps", mode)
+    assert shadow.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    assert shadow.result()["upserted"] == {"stood_in": True, "id": "acc_1"}
+    assert shadow.result()["notified"] == {"stood_in": True}
+    assert rows(shadow) == SEED
+    assert files(shadow) == ["crm.sqlite3"]
+    assert [(c.name, c.ran) for c in tool_calls(shadow) if c.kind == "write"] == [
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    # The unwrap went past the corpus's own logging wrapper and stopped at the SDK's.
+    registered = {
+        "unwrapped": True,
+        "wraps_more": False,
+        "parameters": ["account"],
+        "hints": {"account": "dict[str, typing.Any]", "return": "dict[str, typing.Any]"},
+    }
+    for run in (bare, shadow):
+        assert run.events("registered", with_time=False) == [{"event": "registered", **registered}]
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mode):
     shadow = run_workflow(W, "tool_raises", mode)
     bare = run_workflow(W, "tool_raises", "bare")
     assert shadow.exit_code == bare.exit_code == 1
     for result in (shadow, bare):
-        assert [e["key"] for e in result.events("lookup_failed")] == ["'acc_1'"]
+        assert [(e["key"], e["args"]) for e in result.events("lookup_failed")] == [
+            ("'acc_1'", ["acc_1"])
+        ]
+        assert [e["args"] for e in result.events("score_failed")] == [["acc_missing"]]
+        assert result.events("export_missing", with_time=False) == [EXPORT_MISSING_SEEN]
+        assert result.events("score_invalid", with_time=False) == [SCORE_INVALID_SEEN]
     ends = shadow.events("run.end")
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
     # Stored under the exception's full name.
@@ -254,15 +334,23 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
         "error",
         ErrorInfo("builtins.KeyError", "'acc_missing'"),
     )
-    # Every tool that raised is recorded with its error and no result, caught or not.
+    # Every tool that raised is recorded with its error and its args and no result, caught or not.
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
         ("crm.connect_with", None, connect_error(shadow)),
-        ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'")),
-        ("crm.score_account", None, ErrorInfo("builtins.KeyError", "'acc_missing'")),
+        ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        ("crm.read_export", None, MISSING_EXPORT),
+        ("crm.validate_score", None, SCORE_OUT_OF_RANGE),
+        (
+            "crm.score_account",
+            None,
+            ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"]),
+        ),
     ]
     assert shadow.tool_call_lines() == [
         "tool-real     read      crm.connect_with -> raised builtins.ConnectionError",
         "tool-real     read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-real     read      crm.read_export -> raised builtins.FileNotFoundError",
+        "tool-real     read      crm.validate_score -> raised builtins.ValueError",
         "tool-real     read      crm.score_account -> raised builtins.KeyError",
     ]
     # Bare, the SDK is inactive: no run is opened at all.
@@ -272,12 +360,13 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
 def connect_error(shadow) -> ErrorInfo:
     """Return the stored error `connect_with` raised in `tool_raises`, its key a whole placeholder.
 
-    The message quotes the key across the 1000-character cut; the store redacts before it cuts."""
+    The message quotes the key across the 1000-character cut; the store redacts before it cuts.
+    The args, the message whole, are redacted and not cut."""
     key = CANARIES["STRIPE_API_KEY"]
     said = f"{CONNECT_RETRIES}could not connect with postgres://crm:{key}@{UNREACHABLE_HOST}/crm"
     assert said.index(key) < MAX_ERROR_MESSAGE < said.index(key) + len(key)
-    hidden = redact.placeholder(redact.load_key(shadow.home), key)
-    return ErrorInfo("builtins.ConnectionError", said.replace(key, hidden)[:MAX_ERROR_MESSAGE])
+    hidden = said.replace(key, redact.placeholder(redact.load_key(shadow.home), key))
+    return ErrorInfo("builtins.ConnectionError", hidden[:MAX_ERROR_MESSAGE], [hidden])
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -330,10 +419,20 @@ def test_each_decoration_time_mistake_raises_type_error(run_workflow, mode):
         "generator",
         "generator_fake",
         "fake_is_the_function",
+        "fake_is_a_partial",
+        "fake_wraps_the_function",
+        "method_fake_without_self",
     ]
     assert (
         run_workflow(W, "decoration_errors", "bare").result()["raised"]
         == (shadow.result()["raised"])
+    )
+    said = {e["case"]: e["message"] for e in shadow.events("decoration_error")}
+    for case in ("fake_is_a_partial", "fake_wraps_the_function"):
+        assert "is the function itself, or a partial or wrapper of it" in said[case]
+    assert (
+        "cannot take its arguments (too many positional arguments)"
+        in (said["method_fake_without_self"])
     )
 
 
@@ -365,7 +464,7 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
             run.run_id,
             {"keep": "acc_1", "drop": "acc_9"},
             None,
-            ErrorInfo("builtins.LookupError", "no such account: acc_9"),
+            ErrorInfo("builtins.LookupError", "no such account: acc_9", ["no such account: acc_9"]),
         ),
         (
             run.run_id,
@@ -663,13 +762,22 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     assert not (replay.state / DB_NAME).exists()
 
 
-def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed):
+# How `agentkit.lookup_gateway` refuses each lookup, and what the one warning quotes of the answer.
+LOOKUP_REFUSALS = {
+    "1": ("(rejected: HTTP 502: ", "the gateway has no such route"),
+    LOOKUP_UNROUTED: ("(rejected: HTTP 404: ", "no control route"),
+}
+
+
+@pytest.mark.parametrize("how", LOOKUP_REFUSALS)
+def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed, how):
     """A replay whose lookups cannot reach irimi runs each read tool for real and warns once.
 
-    `agentkit.lookup_gateway` refuses the lookup route and forwards every post. The agent ends as
-    recorded, and `fetch_enrichment`'s GET is answered from the recording. Replayed by its command,
-    since the gateway and the logger are set up in the agent's `main()`."""
-    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"}, command=True)
+    `agentkit.lookup_gateway` forwards every post, and answers each lookup a 502, or sends it to a
+    route irimi does not have, whose 404 is not a miss. The agent ends as recorded, and
+    `fetch_enrichment`'s GET is answered from the recording. Replayed by its command, since the
+    gateway and the logger are set up in the agent's `main()`."""
+    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: how}, command=True)
     assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.tools("read") == [(name, "real") for name, _ in recorded.tools("read")]
@@ -681,7 +789,8 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
     assert warned["message"].startswith(
         "irimi: could not look up a recorded call of tool crm.connect_with in run "
     )
-    assert "(rejected: HTTP 502: " in warned["message"]
+    status, quoted = LOOKUP_REFUSALS[how]
+    assert status in warned["message"] and quoted in warned["message"]
     assert warned["message"].endswith(
         "; the tool runs for real; further failures of this kind are not logged"
     )
@@ -740,18 +849,36 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     recorded, replay = replayed(W, "tool_raises")
     assert replay.agent_exit_code() == recorded.exit_code == 1
     assert replay.exit_code == 0
+    # Its args are the original's, so `args[0]` is the key itself, not the key quoted.
     assert replay.events("lookup_failed", with_time=False) == [
-        {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
+        {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'", "args": ["acc_1"]}
+    ]
+    assert replay.events("score_failed", with_time=False) == [
+        {"event": "score_failed", "args": ["acc_missing"]}
+    ]
+    # The async tool's FileNotFoundError gets its errno and strerror back from its args, and no
+    # filename, which an OSError keeps outside its args; its message still names the file.
+    assert replay.events("export_missing", with_time=False) == [
+        {**EXPORT_MISSING_SEEN, "filename": None}
+    ]
+    # Args holding a repr cannot be rebuilt, so the ValueError's args are its message alone; it is
+    # still a ValueError, caught as one.
+    assert replay.events("score_invalid", with_time=False) == [
+        {**SCORE_INVALID_SEEN, "args": [SCORE_OUT_OF_RANGE.message], "arg_types": ["str"]}
     ]
     assert replay.tool_call_lines() == [
         "tool-recorded read      crm.connect_with -> raised builtins.ConnectionError",
         "tool-recorded read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-recorded read      crm.read_export -> raised builtins.FileNotFoundError",
+        "tool-recorded read      crm.validate_score -> raised builtins.ValueError",
         "tool-recorded read      crm.score_account -> raised builtins.KeyError",
     ]
     assert [(c.name, c.error) for c in replayed_calls(replay)] == [
         ("crm.connect_with", connect_error(recorded)),
-        ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'")),
-        ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'")),
+        ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        ("crm.read_export", MISSING_EXPORT),
+        ("crm.validate_score", SCORE_OUT_OF_RANGE),
+        ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])),
     ]
     # The run ends on the recorded type: `irimi replay` ends it with what the child said it raised.
     assert replay.one("run.end")["error"] == recorded.one("run.end")["error"] == "KeyError"

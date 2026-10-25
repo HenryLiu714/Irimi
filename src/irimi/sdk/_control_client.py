@@ -30,6 +30,7 @@ from irimi.protocol.control import (
     TOOL_CALLS_ACTION,
     RecordedOutcome,
     RunAction,
+    is_no_recorded_call,
     recorded_outcome_from_json,
 )
 from irimi.protocol.env import CONTROL_ENV
@@ -62,11 +63,12 @@ class Reporter(Protocol):
 
 @dataclass(frozen=True)
 class _Failed:
-    """Describe a request that got no 2xx; `status` is set when there was an answer."""
+    """Describe a request that got no 2xx; `status` and its body's start, `said`, if answered."""
 
     kind: Failure
     detail: str
     status: int | None = None
+    said: str = ""
 
 
 class ControlClient:
@@ -99,14 +101,15 @@ class ControlClient:
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
         """Return the recorded outcome of read tool `name` called with `args`, or None for a miss.
 
-        A `404` is a silent miss; any other failure or undecodable answer is warned of once per
-        kind and is also a miss. Never raises (the SDK never raises).
+        The endpoint's `404` for a miss is silent; any other failure or undecodable answer,
+        including a `404` for a route this irimi does not have, is warned of once per kind and is
+        also a miss. Never raises (the SDK never raises).
         """
         lookup = dict(zip(RECORDED_LOOKUP_FIELDS, (name, args), strict=True))
         try:
             sent = self._send(f"{run_id}/{RECORDED_ACTION}", lookup)
             if isinstance(sent, _Failed):
-                if sent.status == 404 or sent.kind == "paused":
+                if sent.kind == "paused" or (sent.status == 404 and is_no_recorded_call(sent.said)):
                     return None
             else:
                 answer = json.loads(sent)
@@ -150,11 +153,12 @@ class ControlClient:
                 body: bytes = response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as exc:  # any non-2xx answer, redirects included
             with exc:
+                # A miss's answer is far shorter than MAX_DETAIL, so `said` holds it whole.
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
             if exc.code == 426:
                 theirs = exc.headers.get(PROTOCOL_HEADER) or "unknown"
                 return _Failed("mismatch", f"{base} speaks {theirs[:MAX_DETAIL]}", exc.code)
-            return _Failed("rejected", f"HTTP {exc.code}: {said}", exc.code)
+            return _Failed("rejected", f"HTTP {exc.code}: {said}", exc.code, said)
         except urllib.error.URLError as exc:  # no answer: urllib wraps the socket's error
             if isinstance(exc.reason, TimeoutError):
                 return _Failed("timeout", f"no answer in {TIMEOUT_S}s")

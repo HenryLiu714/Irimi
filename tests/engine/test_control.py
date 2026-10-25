@@ -736,6 +736,24 @@ def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_red
     assert not any(b"ghp_" in p.read_bytes() for p in store_files if p.is_file())
 
 
+def test_a_posted_tool_error_keeps_its_args_and_a_posted_end_is_stored_without_them(engine):
+    """A tool call's error keeps the args posted with it; a run's error keeps none.
+
+    Nothing raises a run's error again, and an end waits on the store's queue costing no bytes."""
+    error = {"type": "builtins.KeyError", "message": "'k'", "args": ["k", {"n": 1}]}
+    t0 = time.time()
+    _ok(engine.call("POST", _START, _start_body(t0)))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(t0), "error": error}))
+    end = {"ended_at": t0 + 1, "outcome": "error", "error": error}
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", end))
+    run = engine.finish().load_run(RUN)
+    [call] = run.events
+    assert call.error == ErrorInfo("builtins.KeyError", "'k'", ["k", {"n": 1}])
+    assert [c.error for c in engine.tool_calls] == [call.error]
+    assert run.record.end.error == ErrorInfo("builtins.KeyError", "'k'")
+    assert run.record.end.error.args is None
+
+
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):
     """A refusal quotes at most MAX_QUOTED of a word, MAX_REFUSAL of a path, and no mistyped value.
 

@@ -49,8 +49,9 @@ WORKFLOW = Workflow(
             ("tool_raises",),
             doc="a read tool raises quoting a DSN, its key across the cut a trace makes of the "
             "message, given options whose repr holds a key across the cut the SDK makes of a "
-            "repr, and is caught; another raises and is caught; a third raises and ends the run "
-            "in error",
+            "repr, and is caught; another raises and is caught; an async one raises an OSError, "
+            "and another a ValueError whose args hold a Decimal, each caught; a last raises and "
+            "ends the run in error; the agent reads each error's args",
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),
@@ -65,6 +66,12 @@ WORKFLOW = Workflow(
             ("merge_once",),
             doc="merge_retry's merge made right the first time: one call, its fake run, which "
             "`irimi compare` holds the retry against",
+        ),
+        "framework_unwraps": Scenario(
+            ("framework_unwraps",),
+            doc="a framework unwraps a sync and an async write tool with inspect.unwrap and calls "
+            "what it gets: the tool itself, so its fake runs under shadow and the real write only "
+            "bare",
         ),
         "outside_run": Scenario(
             ("outside_run",),

@@ -104,7 +104,10 @@ their `Irimi-Run`, but a run with no start is stored as a `header` run with no t
 The fields are a stored tool call's ([trace-format.md](trace-format.md#tool_call)), less `run_id`,
 which comes from the path; a body that names one is refused `400`. `ran` is `real` when the function
 ran, `shadow` when its fake ran, and `recording` when a replay answered it from the recording.
-`error` is `null` or `{"type": "module.QualName", "message": "..."}`.
+`error` is `null` or `{"type": "module.QualName", "message": "...", "args": [...]}`. Its `args`,
+which may be left out, are the exception's arguments, captured as the call's `args` are but with
+any `bytes` among them sent as `{"__irimi_repr__": "<bytes>"}`; past 1 MiB together with the call's
+`args`, they are sent as the truncation marker.
 
 ### `end`
 
@@ -112,7 +115,8 @@ ran, `shadow` when its fake ran, and `recording` when a replay answered it from 
 {"ended_at": 1792803261.737567, "outcome": "error", "error": {"type": "builtins.ValueError", "message": "no such charge"}}
 ```
 
-`ended_at` and `outcome` (`ok` or `error`) are required; `error` may be `null`.
+`ended_at` and `outcome` (`ok` or `error`) are required; `error` may be `null`. A run's error is
+stored without `args`.
 
 ### `tool-calls/recorded`
 
@@ -129,9 +133,12 @@ answers `200`:
 {"result": {"charge": "ch_demo1", "name": "Ada Lovelace"}, "error": null, "awaited": false}
 ```
 
-Return `result` to the caller, raise `error` (a recorded exception), and, when `awaited` is true,
-return them through an awaitable. A miss, or any lookup outside a replay, answers `404`: run the
-tool for real. A lookup is not recorded as a tool call; post the call afterwards with
+Return `result` to the caller, raise `error` (a recorded exception, with its `args` when it has
+them), and, when `awaited` is true, return them through an awaitable. A miss, or any lookup outside
+a replay, answers `404` with the message `no recorded call`: run the tool for real. Any other `404`
+is a route this irimi does not have, as an irimi older than the client answers; warn, and run the
+tool for real. Tell the two by the message, which every irimi speaking protocol 1 has sent, not the
+`type`, which they share. A lookup is not recorded as a tool call; post the call afterwards with
 `ran: recording` or `ran: real`.
 
 ### `health`
@@ -153,14 +160,14 @@ A refusal or failure answers with irimi's JSON error:
 | Status | When |
 | --- | --- |
 | `400` | the body is not a JSON object, is not valid JSON, nests too deeply, holds `NaN` or `Infinity`, lacks a field or holds a wrong type; the run id cannot name a run; a start or end for the process run |
-| `404` | no such route (`type` `irimi_control_refused`), or a recorded-call miss |
+| `404` | no such route, or a recorded-call miss, both `type` `irimi_control_refused`; a miss's message is `no recorded call` |
 | `405` | the wrong method; the `Allow` header names the right one |
 | `413` | the body is over 2 MiB, or decodes past irimi's limit |
 | `426` | another major protocol version |
 | `500` | irimi failed (`type` `irimi_internal_error`); the request may not have been recorded |
 
 The message is at most 200 characters and is for a person to read; its wording is not part of the
-protocol.
+protocol, except a recorded-call miss's `no recorded call`.
 
 ## Limits
 

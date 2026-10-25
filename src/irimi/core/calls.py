@@ -36,16 +36,18 @@ def receiver(fn: Callable[..., Any], sig: inspect.Signature) -> str | None:
     return None if isinstance(found, staticmethod) else first
 
 
-def signature(fn: Callable[..., Any]) -> inspect.Signature:
-    """Return `fn`'s signature with annotations left unevaluated.
+def signature(fn: Callable[..., Any], *, follow_wrapped: bool = True) -> inspect.Signature:
+    """Return `fn`'s signature with annotations left unevaluated; `follow_wrapped` as inspect's.
 
     On Python 3.14 `inspect.signature` evaluates them, and a `TYPE_CHECKING`-only name would raise.
     """
     if sys.version_info >= (3, 14):
         import annotationlib  # noqa: PLC0415  # exists from 3.14 only
 
-        return inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
-    return inspect.signature(fn)
+        return inspect.signature(
+            fn, follow_wrapped=follow_wrapped, annotation_format=annotationlib.Format.FORWARDREF
+        )
+    return inspect.signature(fn, follow_wrapped=follow_wrapped)
 
 
 _KEYWORDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)

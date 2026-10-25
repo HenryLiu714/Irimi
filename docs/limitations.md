@@ -53,6 +53,9 @@ all is listed under [known bypasses](security.md#known-bypasses).
   replaced only if it also has a secret's shape when its JSON spans several lines of a body that is
   not one document (a multi-line SSE `data:` field, a cut document), or sits inside a JSON string
   (a streamed tool call's `partial_json`).
+- **Bytes a tool captures are stored unscanned.** A `bytes` value in a tool call's args or result
+  is stored as base64, which redaction does not look inside, so a credential in it reaches disk as
+  it was. Bytes among an exception's args are stored as `<bytes>`, never their content.
 - **A secret a stream sends in pieces is stored in pieces.** Each SSE event is its own line, so a
   secret whose characters arrive across several events is never whole on any line, and each piece
   reaches disk as it was sent.
@@ -77,6 +80,9 @@ all is listed under [known bypasses](security.md#known-bypasses).
   body made, so a replay that answers the tool takes the exchanges recorded within its span as its
   body's.
 - **Redacted values stay redacted.** A recorded secret comes back as its placeholder.
+- **A recorded exception keeps its args, not its other attributes.** A replay raises it with the
+  original's `args`, so an `OSError` has its `errno` but not its `filename`, which is not among
+  them.
 - **One run, one store.** The run replayed and its replay share one store, serve mode cannot
   replay, and each `irimi replay` replays one run.
 - **Compare sees writes, not reads.** Two writes made at once can finish in either order, so a run

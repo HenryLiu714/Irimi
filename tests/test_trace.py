@@ -296,6 +296,8 @@ def test_a_schema_version_below_the_first_is_refused(version):
 
 # Values of any JSON, so not records whose keys a decoder requires.
 _FREE_JSON = frozenset({"args", "result"})
+# The one key a decoder reads as absent: an error's `args`, which only a tool call's error has.
+_OPTIONAL = frozenset({("error", "args")})
 
 _EVENTS = {
     "exchange": builders.filled(Exchange),
@@ -332,6 +334,7 @@ _REQUIRED = [
     (name, path)
     for name in ("run", "exchange", "tool_call", "telemetry")
     for path in _key_paths(_decodable(name)[0])
+    if path not in _OPTIONAL
 ] + [(f"{event} line", (key,)) for event in _EVENTS for key in ("seq", "type")]
 
 
@@ -546,6 +549,55 @@ def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
     assert recorded_outcome_from_json(d) == RecordedOutcome(None, call.error, True)
     with pytest.raises(TraceFormatError, match="'awaited'"):
         recorded_outcome_from_json(d | {"awaited": "yes"})
+    with_args = dataclasses.replace(call, error=ErrorInfo("builtins.KeyError", "'k'", ["k"]))
+    d = recorded_outcome_to_json(with_args)
+    assert d["error"] == {"type": "builtins.KeyError", "message": "'k'", "args": ["k"]}
+    assert recorded_outcome_from_json(d).error == with_args.error
+
+
+def _error_of(record):
+    if isinstance(record, RunRecord):
+        assert record.end is not None
+        return record.end.error
+    return record.error
+
+
+@pytest.mark.parametrize("name", ["run", "tool_call"])
+def test_an_error_s_args_may_be_absent_or_null_and_then_it_has_none(name):
+    """A run's error, and a tool call's stored before irimi kept args, have no `args` key."""
+    d, decode = _decodable(name)
+    for error in ({"type": "builtins.KeyError", "message": "'k'"}, {**d["error"], "args": None}):
+        assert _error_of(decode(d | {"error": error})).args is None
+    assert _error_of(decode(d | {"error": {**d["error"], "args": ["k"]}})).args == ["k"]
+    plain = trace.error_to_json(ErrorInfo("builtins.KeyError", "'k'"))
+    assert plain == {"type": "builtins.KeyError", "message": "'k'"}
+
+
+@pytest.mark.parametrize("nested", [_nested_list, _nested_object], ids=["a-list", "an-object"])
+def test_an_error_s_args_nested_too_deep_to_quote_read_back_whole(nested):
+    d, decode = _decodable("tool_call")
+    value = nested(_DEEP)
+    assert decode(d | {"error": {**d["error"], "args": value}}).error.args is value
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
+def test_an_error_s_args_holding_a_number_that_is_not_finite_is_a_trace_format_error(number):
+    d, decode = _decodable("tool_call")
+    args = json.loads(f'[1, {{"b": {number}}}]')
+    with pytest.raises(TraceFormatError, match="'args'"):
+        decode(d | {"error": {**d["error"], "args": args}})
+
+
+def test_an_error_with_args_is_hashable_and_compares_them():
+    assert hash(ErrorInfo("t", "m", ["k"])) == hash(ErrorInfo("t", "m"))
+    assert ErrorInfo("t", "m", ["k"]) != ErrorInfo("t", "m")
+
+
+def test_an_error_keeps_its_args_when_cut_to_a_label():
+    error = ErrorInfo("t" * 400, "m" * 2000, ["k"])
+    assert error.as_label() == ErrorInfo(
+        "t" * limits.MAX_ERROR_TYPE, "m" * limits.MAX_ERROR_MESSAGE, ["k"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -928,5 +980,7 @@ def test_a_description_is_found_anywhere_in_a_captured_value():
 
 
 def test_the_stopped_error_types_are_how_a_cancelled_or_closed_call_is_recorded():
-    stops = (asyncio.CancelledError(), GeneratorExit())
+    # trio names its public classes by the package, as `trio.Cancelled`; trio is not installed.
+    trio_cancelled = type("Cancelled", (BaseException,), {"__module__": "trio"})
+    stops = (asyncio.CancelledError(), trio_cancelled(), GeneratorExit())
     assert {ErrorInfo.from_exception(e).type for e in stops} == trace.STOPPED_ERROR_TYPES

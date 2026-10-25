@@ -17,7 +17,7 @@ import re
 import secrets
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, assert_never, get_args
 
 from irimi import __version__
@@ -114,6 +114,9 @@ def importable_module(module: str) -> str:
 class ErrorInfo:
     type: str  # the exception's `module.qualname`
     message: str
+    # A tool call's: the exception's `args`, captured; None when not recorded. Not hashed, so an
+    # error stays hashable.
+    args: JSONValue = field(default=None, hash=False)
 
     @classmethod
     def from_exception(cls, exc: BaseException) -> "ErrorInfo":
@@ -140,7 +143,7 @@ class ErrorInfo:
 
         Call only on redacted text: a cut first can keep half a key that redaction misses.
         """
-        return ErrorInfo(self.type[:MAX_ERROR_TYPE], self.message[:MAX_ERROR_MESSAGE])
+        return ErrorInfo(self.type[:MAX_ERROR_TYPE], self.message[:MAX_ERROR_MESSAGE], self.args)
 
 
 @dataclass(frozen=True)
@@ -300,9 +303,11 @@ REPR_KEY = "__irimi_repr__"
 TRUNCATED_KEY = "__irimi_truncated__"
 DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
 
-# Error types of a tool call stopped from outside (cancelled, or closed unawaited). They hold no
-# outcome of the tool's own, so a replay never answers with them.
-STOPPED_ERROR_TYPES = frozenset({"asyncio.exceptions.CancelledError", "builtins.GeneratorExit"})
+# Error types of a tool call stopped from outside (cancelled under asyncio or trio, or closed
+# unawaited). They hold no outcome of the tool's own, so a replay never answers with them.
+STOPPED_ERROR_TYPES = frozenset(
+    {"asyncio.exceptions.CancelledError", "trio.Cancelled", "builtins.GeneratorExit"}
+)
 
 
 def holds_description(value: JSONValue) -> bool:
@@ -459,8 +464,16 @@ def trigger_to_json(trigger: Trigger) -> dict[str, JSONValue]:
 
 
 def error_to_json(error: ErrorInfo | None) -> dict[str, JSONValue] | None:
-    """Return `error` as a run or tool call holds it and as the SDK posts it in a run's end."""
-    return None if error is None else {"type": error.type, "message": error.message}
+    """Return `error` as a run or tool call holds it and as the SDK posts it in a run's end.
+
+    `args` is written only when the error has them.
+    """
+    if error is None:
+        return None
+    d: dict[str, JSONValue] = {"type": error.type, "message": error.message}
+    if error.args is not None:
+        d["args"] = error.args
+    return d
 
 
 def _request_to_json(request: Request, put_body: PutBody) -> dict[str, JSONValue]:
@@ -649,11 +662,15 @@ def trigger_from_json(d: Mapping[str, Any]) -> Trigger:
 
 
 def read_error(d: Mapping[str, Any], key: str) -> ErrorInfo | None:
-    """Return the error `error_to_json` wrote under `key`, or None for `null`."""
+    """Return the error `error_to_json` wrote under `key`, or None for `null`.
+
+    `args` may be absent; absent and `null` both read as None.
+    """
     error = read_optional(d, key, read_object)
     if error is None:
         return None
-    return ErrorInfo(type=read_str(error, "type"), message=read_str(error, "message"))
+    args = read_json(error, "args") if "args" in error else None
+    return ErrorInfo(type=read_str(error, "type"), message=read_str(error, "message"), args=args)
 
 
 def _request_from_json(d: Mapping[str, Any], get_body: GetBody) -> Request:
