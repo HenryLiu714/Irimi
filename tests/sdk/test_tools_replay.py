@@ -22,7 +22,7 @@ import pytest
 from irimi import sdk
 from irimi.cli import runner
 from irimi.decide.policy import ShadowPolicy
-from irimi.protocol.control import RECORDED_ACTION, RecordedOutcome
+from irimi.protocol.control import NO_RECORDED_CALL, RECORDED_ACTION, RecordedOutcome
 from irimi.protocol.env import (
     AGENT_VERSION_ENV,
     CONTROL_ENV,
@@ -628,8 +628,9 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
     assert (call.ran, call.error) == ("real", recorded.error)
 
 
-def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
-    """A recorded `GeneratorExit` is a miss: it is no outcome of the tool's own."""
+@pytest.mark.parametrize("stopped", ["builtins.GeneratorExit", "trio.Cancelled"])
+def test_a_recorded_call_closed_unawaited_or_cancelled_under_trio_is_a_miss(monkeypatch, stopped):
+    """A recorded `GeneratorExit` or trio cancellation is a miss: no outcome of the tool's own."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
@@ -640,7 +641,7 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
             posted.append(doc)
 
         def recorded(self, *args: Any) -> RecordedOutcome:
-            return RecordedOutcome(None, ErrorInfo("builtins.GeneratorExit", ""), awaited=False)
+            return RecordedOutcome(None, ErrorInfo(stopped, ""), awaited=False)
 
     monkeypatch.setattr(state, "reporter", _Closed())
     assert balance("acc_1") == {"account": "acc_1", "balance": 100}
@@ -716,6 +717,45 @@ def test_an_answer_the_sdk_cannot_read_is_a_miss_warned_once(monkeypatch, warnin
         assert [balance("acc_1"), balance("acc_1")] == [{"account": "acc_1", "balance": 100}] * 2
     said = [w.getMessage() for w in warnings()]
     assert len([w for w in said if "look up a recorded call of tool db.balance" in w]) == 1
+
+
+def _refused(message: str) -> bytes:
+    return json.dumps({"error": {"type": "irimi_control_refused", "message": message}}).encode()
+
+
+def _lookup_warnings(warnings: Callable[[], Any]) -> list[str]:
+    return [w.getMessage() for w in warnings() if "look up a recorded call" in w.getMessage()]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _refused("no control route '/_irimi/runs/abcd1234abcd1234/tool-calls/recorded'"),
+        b"<html>Not Found</html>",
+        b'{"error": "no recorded call"}',
+        b"[]",
+        b"",
+    ],
+    ids=["no-route", "not-json", "not-irimi-s-error", "not-an-object", "empty"],
+)
+def test_a_404_that_is_not_the_endpoint_s_miss_runs_the_tool_and_is_warned_once(
+    monkeypatch, warnings, body
+):
+    """A 404 for a route this irimi does not have, as an SDK newer than it gets, is no miss.
+
+    Taken for one, every read tool of every replay would run for real with nothing said."""
+    with _answering(monkeypatch, 404, body):
+        assert [balance("acc_1"), balance("acc_1")] == [{"account": "acc_1", "balance": 100}] * 2
+    [said] = _lookup_warnings(warnings)
+    assert "(rejected: HTTP 404: " in said and said.endswith(
+        "; the tool runs for real; further failures of this kind are not logged"
+    )
+
+
+def test_the_endpoint_s_404_for_a_miss_is_silent_whoever_sends_it(monkeypatch, warnings):
+    with _answering(monkeypatch, 404, _refused(NO_RECORDED_CALL)):
+        assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    assert _lookup_warnings(warnings) == []
 
 
 def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):

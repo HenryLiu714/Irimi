@@ -40,6 +40,15 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   private, so imports such as `irimi.sdk.capture.revive` no longer work.
 - **Breaking:** a tool's default name is `module:qualname`, as a trigger's is (it was
   `module.function`).
+- **Breaking:** `@sdk.write_tool` refuses, when the module loads, a fake that is a
+  `functools.partial` of the function or a wrapper made with `functools.wraps` of it, and a fake
+  that cannot take the function's required arguments, such as a method's fake without the
+  instance. Each ran the real write, or failed only under irimi. Write the fake as a function of
+  its own.
+- **Breaking:** a write tool has no `__wrapped__`, so unwrapping it never reaches the real
+  function. `inspect.signature` still shows the real function's signature, and its string
+  annotations are resolved when the tool is decorated; one naming something defined later needs
+  the module's globals passed to `typing.get_type_hints`.
 - **Breaking:** service map keys are renamed, and the loader refuses the old names, naming the new
   one: `volatile:` is `compare_ignores:`, `verbs: honest | post-only` is `style: rest | rpc`, and
   `persists: false` with `comment:` is one `live_because: "<why>"`. This matters for an overrides
@@ -136,6 +145,10 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
+- In a replay, the SDK warns once when the control endpoint answers a read tool's lookup with a
+  `404` for a route it does not have, rather than taking it for a miss in silence.
+- A read tool call cancelled under trio is a miss in a replay, as one cancelled under asyncio is,
+  instead of being raised again as a `RecordedToolError`.
 
 ## [0.1.0] - 2026-10-20
 

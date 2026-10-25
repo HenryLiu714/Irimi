@@ -300,9 +300,11 @@ REPR_KEY = "__irimi_repr__"
 TRUNCATED_KEY = "__irimi_truncated__"
 DESCRIPTION_KEYS = frozenset({REPR_KEY, TRUNCATED_KEY})
 
-# Error types of a tool call stopped from outside (cancelled, or closed unawaited). They hold no
-# outcome of the tool's own, so a replay never answers with them.
-STOPPED_ERROR_TYPES = frozenset({"asyncio.exceptions.CancelledError", "builtins.GeneratorExit"})
+# Error types of a tool call stopped from outside (cancelled under asyncio or trio, or closed
+# unawaited). They hold no outcome of the tool's own, so a replay never answers with them.
+STOPPED_ERROR_TYPES = frozenset(
+    {"asyncio.exceptions.CancelledError", "trio.Cancelled", "builtins.GeneratorExit"}
+)
 
 
 def holds_description(value: JSONValue) -> bool:

@@ -248,6 +248,8 @@ REPLAYS = [
     ("w01_ticket_triage", "late_lookup", {"PROMPT": "verify"}, True),
     ("w02_nightly_reconcile", "refund_then_page", {}, True),
     ("w06_crm_db_agent", "enrich", {"WORKFLOW_LOOKUP_REFUSED": "1"}, False),
+    # By its command, since the gateway that sends its lookups astray is set up in `main()`.
+    ("w06_crm_db_agent", "enrich", {"WORKFLOW_LOOKUP_REFUSED": "unrouted"}, True),
     ("w07_streaming_assistant", "normal", {}, True),
     ("w07_streaming_assistant", "secret_in_stream", {}, True),
     ("w07_streaming_assistant", "secret_split_across_writes", {}, True),

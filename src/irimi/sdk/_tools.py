@@ -1,13 +1,17 @@
 """Label tools the proxy cannot see (database or file writes, library calls) as reads or writes."""
 
+import contextlib
 import functools
 import inspect
 import os
+import sys
 import time
+import typing
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, overload
 
+from irimi.core.calls import signature
 from irimi.core.limits import MAX_CAPTURED_BYTES
 from irimi.protocol import trace
 from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
@@ -19,6 +23,7 @@ from irimi.sdk._runs import check_name, label, off_the_loop
 from irimi.sdk._state import state
 
 PROXY_HINTS = tuple(name for name in PROXY_ENVS if name.upper() == "HTTPS_PROXY")
+_VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
 
 
 @overload
@@ -66,11 +71,13 @@ def write_tool[F: Callable[..., Any]](
 
     Returns:
         A decorator that wraps the function, keeping its signature and its sync or async nature.
+        The wrapper has no `__wrapped__`, so nothing that unwraps it reaches the real function.
 
     Raises:
         TypeError: At decoration, for a fake that is not callable, is a generator function, is
-            the decorated function itself or differs from it in sync or async nature; for a
-            decorated generator function or a callable with no importable `module:qualname`;
+            the decorated function itself or a partial or `functools.wraps` wrapper of it,
+            differs from it in sync or async nature, or cannot take its required arguments; for
+            a decorated generator function or a callable with no importable `module:qualname`;
             or for a `name` that is not a string.
 
     Example:
@@ -104,36 +111,47 @@ def _decorator(
                 f"{api} cannot wrap the generator function {fn.__qualname__}: a call is "
                 "recorded when it returns, before a generator's body has run"
             )
-        if fake is fn:
-            # Reading `fake=` as "the function to fake" would run the write for real.
-            raise TypeError(
-                f"{api}: the fake for {fn.__qualname__} is the function itself: fake= names "
-                "the function that runs in its place under irimi"
-            )
-        is_async = inspect.iscoroutinefunction(fn)
-        if fake is not None and _is_async(fake) != is_async:
-            nature = "an async def" if is_async else "a sync function"
-            raise TypeError(
-                f"{api}: the fake for {fn.__qualname__} must be {nature}, as the function it "
-                "replaces is"
-            )
+        if fake is not None:
+            _check_fake(fake, fn, api)
         spec = _Tool(tool_name, kind, fn, fake)
 
-        if is_async:
+        if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await _call_async(spec, args, kwargs)
 
-            return async_wrapper
+            return _sealed(async_wrapper, fn) if kind == "write" else async_wrapper
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return _call(spec, args, kwargs)
 
-        return wrapper
+        return _sealed(wrapper, fn) if kind == "write" else wrapper
 
     return decorate
+
+
+def _check_fake(fake: Callable[..., Any], fn: Callable[..., Any], api: str) -> None:
+    """Raise TypeError at decoration if `fake` cannot run in `fn`'s place under irimi."""
+    if _reaches(fake, fn):
+        # Reading `fake=` as "the function to fake" would run the write for real.
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} is the function itself, or a partial or "
+            "wrapper of it: fake= names the function that runs in its place under irimi"
+        )
+    is_async = inspect.iscoroutinefunction(fn)
+    if _is_async(fake) != is_async:
+        nature = "an async def" if is_async else "a sync function"
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} must be {nature}, as the function it "
+            "replaces is"
+        )
+    if (refusal := _refused_call(fake, fn)) is not None:
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} cannot take its arguments ({refusal}): "
+            "it is called as the function is, a method's instance first"
+        )
 
 
 @dataclass(frozen=True)
@@ -144,6 +162,75 @@ class _Tool:
     kind: trace.ToolKind
     fn: Callable[..., Any]
     fake: Callable[..., Any] | None
+
+
+def _links(f: object) -> list[object]:
+    """Return `f`, then what each object partially applies, is a method of or wraps, once each."""
+    chain: list[object] = []
+    # Bounded as `inspect.unwrap` is, against a `__wrapped__` that makes a new object each time.
+    while f is not None and len(chain) < sys.getrecursionlimit():
+        if any(f is seen for seen in chain):
+            break
+        chain.append(f)
+        f = _link(f)
+    return chain
+
+
+def _link(f: object) -> object:
+    """Return what `f` partially applies, is a bound method of, or wraps; None if nothing."""
+    if isinstance(f, functools.partial):
+        return f.func
+    try:
+        method_of = getattr(f, "__func__", None)
+        return method_of if method_of is not None else getattr(f, "__wrapped__", None)
+    except Exception:  # an object's own `__getattr__` raised: the chain ends at it
+        return None
+
+
+def _reaches(fake: Callable[..., Any], fn: Callable[..., Any]) -> bool:
+    """Return whether `fake`, or what it partially applies or wraps, is `fn` or what `fn` wraps.
+
+    Such a fake would run the real write under irimi; a deliberate wrapper that never calls it
+    looks the same, and is refused too.
+    """
+    real = _links(fn)
+    return any(any(f is r for r in real) for f in _links(fake))
+
+
+def _refused_call(fake: Callable[..., Any], fn: Callable[..., Any]) -> str | None:
+    """Return why `fake` cannot take `fn`'s required arguments, passed as `fn` declares them.
+
+    None when it can, or when either signature cannot be read. Only required parameters are
+    passed, so a fake taking `*args, **kwargs`, or fewer optional ones, is never refused.
+    """
+    try:
+        params = signature(fn).parameters.values()
+        taking = signature(fake)
+    except Exception:  # no signature to read, as for many builtins: the call decides
+        return None
+    required = [p for p in params if p.default is p.empty and p.kind not in _VARIADIC]
+    args = [None for p in required if p.kind is not p.KEYWORD_ONLY]
+    kwargs = {p.name: None for p in required if p.kind is p.KEYWORD_ONLY}
+    try:
+        taking.bind(*args, **kwargs)
+    except TypeError as exc:
+        return str(exc)
+    return None
+
+
+def _sealed[W: Callable[..., Any]](wrapper: W, fn: Callable[..., Any]) -> W:
+    """Return a write tool's `wrapper` without `__wrapped__`, which names the real function.
+
+    `inspect.unwrap`, and a framework that calls what it returns, would run the write for real
+    under irimi. `typing.get_type_hints` looked up string annotations' names through it, so they
+    are resolved here, where they can be; `__signature__` keeps the real function's signature.
+    """
+    del wrapper.__wrapped__  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):  # no signature to read: none to show
+        wrapper.__signature__ = signature(fn)  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):  # a name not defined yet: left as written
+        wrapper.__annotations__ = typing.get_type_hints(fn, include_extras=True)
+    return wrapper
 
 
 def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:

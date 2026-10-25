@@ -1092,9 +1092,10 @@ def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_it
         ({"invoices": [{"due": 1, "amount": {"__irimi_repr__": "Decimal('49.00')"}}]}, None),
         ({"__irimi_truncated__": True, "bytes": 2_000_000}, None),
         (None, ErrorInfo("asyncio.exceptions.CancelledError", "")),
+        (None, ErrorInfo("trio.Cancelled", "")),
         (None, ErrorInfo("builtins.GeneratorExit", "")),
     ],
-    ids=["a-description", "truncated", "cancelled", "closed"],
+    ids=["a-description", "truncated", "cancelled", "cancelled-under-trio", "closed"],
 )
 def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answer_it(result, error):
     """A tool with no outcome to give is a miss whose body's HTTP the recording answers.

@@ -66,6 +66,11 @@ WORKFLOW = Workflow(
             doc="merge_retry's merge made right the first time: one call, its fake run, which "
             "`irimi compare` holds the retry against",
         ),
+        "framework_unwraps": Scenario(
+            ("framework_unwraps",),
+            doc="a framework unwraps a write tool with inspect.unwrap and calls what it gets: the "
+            "tool itself, so its fake runs under shadow and the real write only bare",
+        ),
         "outside_run": Scenario(
             ("outside_run",),
             doc="tools called before the trigger, in no run: recorded in the process run "

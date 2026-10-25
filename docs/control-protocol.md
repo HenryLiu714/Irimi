@@ -130,9 +130,12 @@ answers `200`:
 ```
 
 Return `result` to the caller, raise `error` (a recorded exception), and, when `awaited` is true,
-return them through an awaitable. A miss, or any lookup outside a replay, answers `404`: run the
-tool for real. A lookup is not recorded as a tool call; post the call afterwards with
-`ran: recording` or `ran: real`.
+return them through an awaitable. A miss, or any lookup outside a replay, answers `404` with the
+message `no recorded call`: run the tool for real. Any other `404` is a route this irimi does not
+have, as an irimi older than the client answers; warn, and run the tool for real. Tell the two by
+the message, which every irimi speaking protocol 1 has sent, not the `type`, which they share. A
+lookup is not recorded as a tool call; post the call afterwards with `ran: recording` or
+`ran: real`.
 
 ### `health`
 
@@ -153,14 +156,14 @@ A refusal or failure answers with irimi's JSON error:
 | Status | When |
 | --- | --- |
 | `400` | the body is not a JSON object, is not valid JSON, nests too deeply, holds `NaN` or `Infinity`, lacks a field or holds a wrong type; the run id cannot name a run; a start or end for the process run |
-| `404` | no such route (`type` `irimi_control_refused`), or a recorded-call miss |
+| `404` | no such route, or a recorded-call miss, both `type` `irimi_control_refused`; a miss's message is `no recorded call` |
 | `405` | the wrong method; the `Allow` header names the right one |
 | `413` | the body is over 2 MiB, or decodes past irimi's limit |
 | `426` | another major protocol version |
 | `500` | irimi failed (`type` `irimi_internal_error`); the request may not have been recorded |
 
 The message is at most 200 characters and is for a person to read; its wording is not part of the
-protocol.
+protocol, except a recorded-call miss's `no recorded call`.
 
 ## Limits
 
