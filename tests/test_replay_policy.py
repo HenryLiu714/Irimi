@@ -3,6 +3,7 @@
 `_stored` redacts with the live side's key, as the store does. The engine is in `tests/engine`."""
 
 import json
+import re
 from dataclasses import replace
 
 import pytest
@@ -15,7 +16,7 @@ from irimi.core.exchange import (
     Precondition,
     Response,
 )
-from irimi.decide.policy import ShadowPolicy
+from irimi.decide.policy import Respond, ShadowPolicy
 from irimi.decide.reader import NoReader, UpstreamReader, answered_as
 from irimi.protocol.trace import ErrorInfo, TelemetrySeen, ToolCall
 from irimi.record import redact
@@ -832,6 +833,38 @@ def test_a_missed_reused_key_leaves_the_replay_answering_from_the_recording():
     assert reused.flags[-2:] == (Flag.IDEMPOTENCY_CONFLICT, Flag.REPLAY_MISS)
     assert not policy.recording.diverged
     assert _answer(policy, _req()).answered_by == "overlay"
+
+
+def _every_unsafe_request():
+    """Each unsafe method on each shipped route's path, and on a host no map names."""
+    for service_map in servicemaps.loader.load_shipped():
+        host = min(service_map.hosts).replace("*.", "a.")
+        for route in service_map.routes:
+            path = re.sub(r"\{[^}]*\}", "x1", route.path)
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                yield _req(method, host, path, b"a=1", FORM_CONTENT_TYPE)
+    yield _req("POST", "internal.example", "/jobs", b"a=1", FORM_CONTENT_TYPE)
+
+
+@pytest.mark.parametrize("state", ["fresh", "diverged", "unsearchable"])
+def test_a_replay_answers_every_write_itself_whatever_the_recording_holds(state, monkeypatch):
+    """No write or unknown request is forwarded, before or after the replay diverges."""
+    recording = _recording(_recorded_refund(), _stored(_req()))
+    if state == "diverged":
+        recording.diverge()
+    elif state == "unsearchable":
+        monkeypatch.setattr(recording, "answer_for", lambda *args: 1 / 0)
+    policy = ReplayPolicy(recording, SHIPPED)
+    asked = 0
+    for request in _every_unsafe_request():
+        cls = classify(request, SHIPPED)
+        if cls.kind in LIVE_KINDS:
+            continue
+        decision = policy.decide(request, cls, (), "rep").decision
+        assert isinstance(decision, Respond), (request.method, request.host, request.path)
+        assert decision.answered_by != "live"
+        asked += 1
+    assert asked > 50
 
 
 def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():
