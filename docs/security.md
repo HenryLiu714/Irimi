@@ -126,7 +126,11 @@ agent never see a placeholder.
 - **How a body is read.** A body that is one JSON document is walked as JSON, whatever its content
   type says. Otherwise a form content type is read as a form, and anything else line by line: a
   line that is one JSON document (NDJSON), or an SSE `data:` field holding one, is walked as JSON,
-  and every other line is scanned for shapes. A body nothing matched keeps its bytes.
+  and every other line is scanned for shapes. An SSE event's `data:` lines are first joined with
+  LF, as a client joins them, and walked as JSON when the join is one JSON object or array. If
+  that changes it, the redacted document goes on the event's first `data:` line and the other
+  `data:` lines are left empty: the event keeps its lines, and a client's join reads the redacted
+  document and blank lines. A body nothing matched keeps its bytes.
 - **Streams.** A streamed body is redacted joined, never chunk by chunk, so a secret split across
   two chunks is still found on its line.
 - **Cuts never split a secret.** A body is redacted whole and only then cut to its stored size.

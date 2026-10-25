@@ -20,6 +20,7 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     CHANNEL,
     LONG_ANSWER,
     SECRET,
+    SSE_CLIENT_SECRET,
     pair_answer,
     pair_decision,
 )
@@ -67,6 +68,13 @@ def text_deltas(body: bytes) -> str:
     return "".join(
         d["delta"]["text"] for d in data_lines(body) if d["type"] == "content_block_delta"
     )
+
+
+def first_event(body: bytes) -> tuple[list[str], dict]:
+    """A stream's first event's lines, and the document its `data:` lines join into."""
+    lines = body.decode().split("\n\n", 1)[0].split("\n")
+    data = [line.removeprefix("data:") for line in lines if line.startswith("data:")]
+    return lines, json.loads("\n".join(data))
 
 
 def boundaries(chunks: tuple[int, ...]) -> list[int]:
@@ -384,6 +392,52 @@ def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workf
         if path.is_file() and SECRET.encode() in path.read_bytes()
     ]
     assert written == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_events_json_over_several_data_lines_is_stored_redacted_in_as_many_lines(
+    run_workflow, mode
+):
+    """An event's JSON over several `data:` lines is redacted as the document the agent reads.
+
+    The served `client_secret` has no secret's shape. The stored event holds the walked document
+    on its first `data:` line and leaves the others empty, so the stream keeps its lines, and the
+    chunk boundary inside the secret's line moves to that line's end."""
+    bare = run_workflow(W, "secret_in_multi_line_event", "bare")
+    shadow = run_workflow(W, "secret_in_multi_line_event", mode)
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    # Before redaction: the event as sent, the secret on a line that is not JSON alone.
+    [handed] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
+    assert handed.response is not None
+    sent, sent_cuts = handed.response.body, boundaries(handed.stream_chunks)
+    sent_lines, started = first_event(sent)
+    assert started["message"]["client_secret"] == SSE_CLIENT_SECRET
+    [held] = [n for n, line in enumerate(sent_lines) if SSE_CLIENT_SECRET in line]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(sent_lines[held].removeprefix("data:"))
+    at, event_end = sent.index(SSE_CLIENT_SECRET.encode()), sent.index(b"\n\n") + 2
+    assert [cut for cut in sent_cuts if cut < event_end] == [at + len(SSE_CLIENT_SECRET) // 2]
+    # What the store holds.
+    stored = stored_exchanges(shadow)["/v1/messages"]
+    assert stored.response is not None and stored.flags == ()
+    body = stored.response.body
+    lines, document = first_event(body)
+    hidden = redact.placeholder(redact.load_key(shadow.home), SSE_CLIENT_SECRET)
+    assert document == {**started, "message": {**started["message"], "client_secret": hidden}}
+    compact = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    assert lines == [sent_lines[0], f"data: {compact}", *["data:"] * (len(sent_lines) - 2)]
+    # The rest of the stream is stored as it was sent, and its chunks still split it.
+    moved = len(body) - len(sent)
+    assert body[event_end + moved :] == sent[event_end:]
+    assert text_deltas(body) == ANSWER and body.endswith(MESSAGE_STOP)
+    held_end = sum(len(line) + 1 for line in lines[: held + 1])
+    assert boundaries(stored.stream_chunks) == [
+        held_end,
+        *(cut + moved for cut in sent_cuts if cut >= event_end),
+    ]
 
 
 @pytest.mark.parametrize("mode", MODES)

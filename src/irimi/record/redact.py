@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from functools import partial
 from itertools import pairwise
@@ -491,7 +491,7 @@ def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
 
 
 def _redact_document(text: str, content_type: str, key: bytes) -> str:
-    """Redact a body's text as JSON, else as a declared form, else line by line.
+    """Redact a body's text as JSON, else as a declared form, else line by line, event by event.
 
     The text is tried as JSON whatever its content type. JSON refused for another reason (an
     integer past the digit limit, a repeated key) raises to the guard and fails closed: a text
@@ -503,15 +503,58 @@ def _redact_document(text: str, content_type: str, key: bytes) -> str:
     if content_type == FORM_CT:
         return _redact_urlencoded(text, key)
     lines = _LINE.findall(text)
-    redacted = [_redact_line(line, key) for line in lines]
+    redacted = [line for event in _events(lines) for line in _redact_event(event, key)]
     if all(new is old for new, old in zip(redacted, lines, strict=True)):
         return text
     return "".join(redacted)
 
 
+def _events(lines: list[str]) -> Iterator[list[str]]:
+    """Yield `lines` in runs that each end at a blank line, as an SSE event does, or at the end."""
+    start = 0
+    for end, line in enumerate(lines, start=1):
+        if end == len(lines) or not _content(line):
+            yield lines[start:end]
+            start = end
+
+
+def _redact_event(lines: list[str], key: bytes) -> list[str]:
+    """Redact an SSE event's lines, its `data:` lines as one JSON document if they join into one.
+
+    A client joins an event's `data:` lines with LF. A join the walk changes goes on the first
+    `data:` line and the others are left empty, which the join reads as whitespace, so the event
+    keeps its line count for `_rechunk`. Any other event is redacted line by line.
+    """
+    data = [i for i, line in enumerate(lines) if line.startswith(_SSE_DATA)]
+    values = [_content(lines[i])[len(_SSE_DATA) :] for i in data]
+    document = "\n".join(values)
+    walked = None
+    if len(data) > 1 and document.lstrip().startswith(("{", "[")):
+        walked = _redact_json_text(document, key)
+    if walked is None or walked is document:
+        return [_redact_line(line, key) for line in lines]
+    redacted = [
+        _SSE_DATA + _ending(line) if line.startswith(_SSE_DATA) else _redact_line(line, key)
+        for line in lines
+    ]
+    indent = values[0][: len(values[0]) - len(values[0].lstrip())]
+    redacted[data[0]] = _SSE_DATA + indent + walked + _ending(lines[data[0]])
+    return redacted
+
+
+def _content(line: str) -> str:
+    """Return `line` without its line ending."""
+    return line.rstrip("\r\n")
+
+
+def _ending(line: str) -> str:
+    """Return `line`'s line ending, empty for a last line that has none."""
+    return line[len(_content(line)) :]
+
+
 def _redact_line(line: str, key: bytes) -> str:
     """Redact one line: an NDJSON line or SSE `data:` JSON as JSON, any other for shapes."""
-    content = line.rstrip("\r\n")
+    content = _content(line)
     field = _SSE_DATA if content.startswith(_SSE_DATA) else ""
     value = content[len(field) :]
     document = value.lstrip()
@@ -520,7 +563,7 @@ def _redact_line(line: str, key: bytes) -> str:
         if walked is document:
             return line
         if walked is not None:
-            return field + value[: len(value) - len(document)] + walked + line[len(content) :]
+            return field + value[: len(value) - len(document)] + walked + _ending(line)
     return _redact_text(line, key)
 
 

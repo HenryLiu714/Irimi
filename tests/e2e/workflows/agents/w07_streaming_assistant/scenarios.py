@@ -21,6 +21,8 @@ from tests.e2e.workflows.harness.services import (
 CHANNEL = "C0CHAT"
 # Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
 SECRET = credentials.STREAM_SECRET
+# No secret's shape: only its `client_secret` key marks it, on a `data:` line of its own.
+SSE_CLIENT_SECRET = credentials.SSE_CLIENT_SECRET
 ANSWER = (
     "Refunds return money to the original payment method. A partial refund leaves the rest "
     "of the charge in place, and a charge can be refunded until nothing is left."
@@ -159,6 +161,26 @@ class MidLineWritesLLM(ScriptedLLM):
         return resp
 
 
+class MultiLineDataLLM(ScriptedLLM):
+    """Streams Anthropic's `message_start` as indented JSON, one `data:` line per line of it.
+
+    A client joins an event's `data:` lines with LF, so the agent reads one document. Its message
+    carries a `client_secret`, which no line holds as JSON of its own. The event is written in
+    two pieces cut inside the secret, so a chunk boundary falls in a line redaction rewrites."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        start = json.loads(resp.chunks[0].decode().split("\ndata: ", 1)[1])
+        start["message"]["client_secret"] = SSE_CLIENT_SECRET
+        lines = json.dumps(start, indent=2).splitlines()
+        event = "event: message_start\n" + "".join(f"data: {line}\n" for line in lines) + "\n"
+        cut = event.index(SSE_CLIENT_SECRET) + len(SSE_CLIENT_SECRET) // 2
+        resp.chunks = [event[:cut].encode(), event[cut:].encode(), *resp.chunks[1:]]
+        return resp
+
+
 class LockstepLLM(ScriptedLLM):
     """Holds each provider's two calls until both arrive, so the two streams interleave."""
 
@@ -266,6 +288,10 @@ def _mid_line(world: World) -> None:
     world.llm = MidLineWritesLLM(long_script)
 
 
+def _multi_line(world: World) -> None:
+    world.llm = MultiLineDataLLM(chat_script)
+
+
 def _lockstep(world: World) -> None:
     world.llm = LockstepLLM(pair_script)
 
@@ -332,6 +358,12 @@ WORKFLOW = Workflow(
             ("What is the test key?", "read_all"),
             setup=_mid_line,
             doc="a 16 KB stream written in pieces that end mid-line, one of them mid-secret",
+        ),
+        "secret_in_multi_line_event": Scenario(
+            (QUESTION, "read_all"),
+            setup=_multi_line,
+            doc="Anthropic's first event spreads its JSON over several `data:` lines, a "
+            "`client_secret` on one of them: the agent joins them, irimi stores the placeholder",
         ),
         "gzip_bomb_stream": Scenario(
             ("What is the test key?", "read_all"),
