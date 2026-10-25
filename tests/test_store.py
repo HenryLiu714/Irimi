@@ -1494,6 +1494,10 @@ def test_every_refusal_names_its_file_and_its_line(root, key):
     with pytest.raises(TraceFormatError) as refused:
         reader.load_run("r1")
     assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
+    events.write_text(first + "\n" + second.replace('"seq": 2', '"seq": "2"'))  # no newline
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
     events.write_text(first + "\n" + second + "\n")
     blob = root / "blobs" / trace.body_ref(b"a body").sha256
     blob.unlink()
@@ -1605,6 +1609,16 @@ def test_json_nested_past_the_parsers_depth_is_damage_not_a_recursion_error(root
     for run_id in ("good", "deep"):
         with pytest.raises(TraceFormatError):
             reader.load_run(run_id)
+
+
+def test_a_last_line_nested_past_the_parsers_depth_is_read_as_cut_off(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/a"))
+    s.close()
+    with open(root / "runs/r1/events.jsonl", "a") as f:
+        f.write("[" * 1_000_000)
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == (["/a"], True)
 
 
 def test_a_missing_blob_is_a_trace_format_error(root, key):
