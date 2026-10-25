@@ -136,6 +136,11 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
+- A run the SDK has ended is current nowhere, though a context may still hold it. A pool worker
+  started inside a run (every thread copies its creator's context on free-threaded Python 3.14),
+  or a task a sync trigger returns, no longer files the requests it sends and the tool calls it
+  starts after the run's end in that run, and a trigger called there starts its own run instead
+  of joining the ended one. `sdk.current_run_id()` there returns `None`.
 
 ## [0.1.0] - 2026-10-20
 

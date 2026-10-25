@@ -125,5 +125,12 @@ WORKFLOW = Workflow(
             setup=_charges,
             doc="a sync trigger returns a Task: its run ends first, and the task's calls follow",
         ),
+        "inherited_worker": Scenario(
+            ("inherited_worker",),
+            setup=_charges,
+            doc="a pool worker keeps the run it started in, as on a free-threaded build: the "
+            "second message's refund there, after that run ended, is in no run, and a trigger "
+            "called there from outside any run starts its own",
+        ),
     },
 )

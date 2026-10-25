@@ -87,6 +87,10 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - Requests from clients the SDK does not patch (`httpx2`, which the Anthropic SDK 2.x uses,
   `aiohttp`, raw sockets, subprocesses) carry no run unless the agent sets `Irimi-Run` itself
   ([sdk.md](sdk.md#which-http-clients-carry-the-run)).
+- Work that outlives its run, such as a task a sync trigger returns, is in no run once the run has
+  ended: the requests it sends and the tool calls it starts from then on are stored in the process
+  run, or as `unattributed` under serve, and its failure does not change how the run ended
+  ([sdk.md](sdk.md#threads-and-asyncio)).
 - A trigger in a script run by path (`python agent.py`) records as `__main__:…`, which replay cannot
   import; start the agent with `python -m`.
 - Captured values that are not plain data (a `Decimal`, a `datetime`, an object irimi cannot
