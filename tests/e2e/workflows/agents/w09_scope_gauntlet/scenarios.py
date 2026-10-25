@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from irimi import services
 from tests.e2e.workflows.agents import agentkit
 from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     ALLOWED_BASE_URL_HOST,
@@ -13,7 +14,7 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     INTENT,
 )
 from tests.e2e.workflows.harness.internet import PADDED_BYTES, PADDED_LINE, Req, Resp
-from tests.e2e.workflows.harness.scenario import Scenario, Workflow
+from tests.e2e.workflows.harness.scenario import Scenario, Workflow, raising
 from tests.e2e.workflows.harness.services import JsonService, World
 
 # Past `irimi.core.limits.MAX_BODY_BYTES` (2 MiB), the most irimi parses of a response it reads.
@@ -93,11 +94,22 @@ WORKFLOW = Workflow(
             doc="DELETE/PATCH/PUT/unrouted POST are faked; a fixture-less write gets an echo",
         ),
         "idempotency": Scenario(("idempotency",), setup=_stripe, doc="one key, three uses"),
+        "idempotency_conflict_fails": Scenario(
+            ("idempotency",),
+            setup=_stripe,
+            doc="idempotency, with building Stripe's idempotency error made to raise inside "
+            "irimi: the reused key is answered with irimi's 502, not faked afresh as a refund",
+            inside_irimi=raising(services, "fake_rejection", "the refusal could not be built"),
+        ),
         "bodies": Scenario(("bodies",), setup=_stripe, doc="gzip, chunked, and a 3 MB body"),
         "big_reads": Scenario(
             ("big_reads",), setup=_big, doc="a 3 MB charge: the check read and the overlay give up"
         ),
-        "headers": Scenario(("headers",), setup=_stripe, doc="Irimi-Rewrote and Irimi-Run forged"),
+        "headers": Scenario(
+            ("headers",),
+            setup=_stripe,
+            doc="Irimi-Rewrote forged, and Irimi-Run as a path and with a key's shape",
+        ),
         "self_addressed": Scenario(
             ("self_addressed",),
             setup=_stripe,

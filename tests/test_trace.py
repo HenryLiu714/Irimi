@@ -700,7 +700,8 @@ def test_an_unknown_event_type_is_refused():
 
 
 @pytest.mark.parametrize(
-    "run_id", ["t3st", "4f1c9a2b7d3e8a60", "a" * 64, "run_1-A", trace.UNATTRIBUTED]
+    "run_id",
+    ["t3st", "4f1c9a2b7d3e8a60", "a" * 64, "run_1-A", trace.UNATTRIBUTED, "task_test_runner"],
 )
 def test_a_valid_run_id_is_accepted(run_id):
     assert trace.is_valid_run_id(run_id)
@@ -709,6 +710,28 @@ def test_a_valid_run_id_is_accepted(run_id):
 @pytest.mark.parametrize("run_id", ["", "../x", "a" * 65, "a b", "a/b", "a.b", "..", "a\n", "é"])
 def test_an_invalid_run_id_is_refused(run_id):
     assert not trace.is_valid_run_id(run_id)
+    assert not trace.is_stored_run_id(run_id)
+
+
+@pytest.mark.parametrize(
+    "run_id", ["sk_live_x", "run_sk_test_x", "rk_live_a", "whsec_abc", "xoxb-1", "ghp_" + "a" * 36]
+)
+def test_a_run_id_with_a_secrets_shape_is_refused_but_a_stored_one_is_still_read(run_id):
+    """A run id names a directory, which redaction never sees, so a key there reaches disk whole.
+
+    A run an older irimi stored so is still read, as is a `replay_of` naming it."""
+    assert not trace.is_valid_run_id(run_id)
+    assert trace.is_stored_run_id(run_id)
+    record = _run_record(mode="replay", replay_of=run_id)
+    assert trace.run_from_json(trace.run_to_json(record)) == record
+
+
+def test_a_minted_run_id_is_lower_case_hex_so_no_secrets_shape_can_match_it():
+    """Every shape opens with a letter outside hex, so `new_run_id` never mints one refused."""
+    run_id = trace.new_run_id()
+    assert re.fullmatch(r"[0-9a-f]{16}", run_id) and trace.is_valid_run_id(run_id)
+    opening = [pattern[0] for pattern in secret_shapes.SECRET_PATTERNS]
+    assert [c for c in opening if not c.isalpha() or c in "abcdef"] == []
 
 
 def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_message_whole():

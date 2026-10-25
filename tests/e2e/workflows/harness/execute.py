@@ -8,6 +8,7 @@ import contextlib
 import functools
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -193,6 +194,7 @@ def _execute(
     internet.start()
     irimi_out: list[str] = []
     irimi_errors: list[str] = []
+    irimi_logs: list[str] = []
     reported: list[Exchange] = []
     handed: list[Exchange] = []
     handed_events: list[Exchange | ToolCall] = []
@@ -215,7 +217,7 @@ def _execute(
                     irimi_main, argv, engine_factory=build
                 )
                 code, irimi_out, irimi_errors = _run_irimi(
-                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
+                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir, irimi_logs
                 )
         elif mode == "replay":
             assert replay_of is not None and how is not None
@@ -228,12 +230,12 @@ def _execute(
                 else:
                     run_irimi = _calling_sdk_replay(replay_of, how.call, store, result_file, build)
                 code, irimi_out, irimi_errors = _run_irimi(
-                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir
+                    run_irimi, agent_env, cwd, tmp, internet, scenario, workdir, irimi_logs
                 )
         else:
             with _watching_the_store(reported, handed, handed_events, write_logs) as build:
                 code, irimi_out, irimi_errors = _run_serve(
-                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, build, flags
+                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, build, irimi_logs, flags
                 )
     finally:
         internet.stop()
@@ -258,6 +260,7 @@ def _execute(
         _replay_result(result_file) if mode == "replay" else None,
         irimi_errors,
         write_logs[0] if write_logs else None,
+        irimi_logs,
     )
 
 
@@ -338,11 +341,12 @@ def _run_irimi(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
+    logs: list[str],
 ) -> tuple[int, list[str], list[str]]:
     """Call `run`, which runs irimi in this process, as a user would from `cwd`."""
     buf, err = io.StringIO(), _Tee(sys.stderr)
     with (
-        _as_irimi(env, cwd, tmp, internet, scenario, workdir),
+        _as_irimi(env, cwd, tmp, internet, scenario, workdir, logs),
         contextlib.redirect_stdout(buf),
         contextlib.redirect_stderr(err),
     ):
@@ -358,11 +362,13 @@ def _as_irimi(
     internet: FakeInternet,
     scenario: Scenario,
     workdir: Path,
+    logs: list[str],
 ) -> Iterator[None]:
-    """Set this process up for irimi: environment, `cwd`, TMPDIR, maps, fake resolver and a CA.
+    """Set this process up for irimi: environment, `cwd`, TMPDIR, maps, resolver, CA, patches.
 
     irimi's check read is urllib in this process, and urllib on macOS falls back to the system
-    proxy, so `no_proxy=*` keeps it direct. The agent still gets irimi's own `NO_PROXY`."""
+    proxy, so `no_proxy=*` keeps it direct. The agent still gets irimi's own `NO_PROXY`. What
+    irimi logs meanwhile goes to `logs`."""
     harness_env = {**env, "NO_PROXY": "*", "no_proxy": "*"}
     with (
         environ(harness_env),
@@ -370,6 +376,8 @@ def _as_irimi(
         _tempdir(tmp),
         scenario_maps(scenario, workdir),
         internet.resolving(),
+        _keeping_logs(logs),
+        scenario.inside_irimi(),
     ):
         ca.generate_ca(ca.ca_paths())
         yield
@@ -384,6 +392,7 @@ def _run_serve(
     scenario: Scenario,
     workdir: Path,
     build: EngineFactory,
+    logs: list[str],
     flags: tuple[str, ...] = (),
 ) -> tuple[int, list[str], list[str]]:
     """Run `irimi serve` on a thread, the agent beside it as its own process, until it exits.
@@ -398,7 +407,7 @@ def _run_serve(
     args = parse_args(argv)
     before = set(threading.enumerate())
     with (
-        _as_irimi(env, cwd, tmp, internet, scenario, workdir),
+        _as_irimi(env, cwd, tmp, internet, scenario, workdir, logs),
         contextlib.redirect_stdout(buf),
         contextlib.redirect_stderr(err),
     ):
@@ -434,6 +443,35 @@ def _run_serve(
     if left:
         raise AssertionError(f"irimi serve left threads running: {left}")
     return code, buf.getvalue().splitlines(), err.getvalue().splitlines()
+
+
+class _Kept(logging.Handler):
+    """Keep each record a user's terminal shows, as it shows it: Python's last-resort handler's."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__(logging.WARNING)
+        self.lines = lines
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+@contextlib.contextmanager
+def _keeping_logs(lines: list[str]) -> Iterator[None]:
+    """Keep in `lines` what any logger, mitmproxy's too, emits in the block.
+
+    irimi configures no logging, so a user sees what Python's last-resort handler prints. Under
+    pytest none of it reaches stderr: pytest's own handlers take every record."""
+    handler = _Kept(lines)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield
+    finally:
+        root.removeHandler(handler)
 
 
 class _Tee(io.StringIO):

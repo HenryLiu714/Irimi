@@ -108,6 +108,36 @@ def test_a_refund_larger_than_the_charge_is_refused_the_way_stripe_refuses_it(ru
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_a_decision_that_fails_after_its_check_read_still_records_the_read(run_workflow, mode):
+    """A refund whose rejection cannot be built gets irimi's 502, and irimi's check read is kept.
+
+    Stripe saw two reads of the charge, the agent's and irimi's, so the trace holds both. The agent
+    hands the 502 to the model and exits as it did bare."""
+    bare = run_workflow(W, "too_large", "bare")
+    shadow = run_workflow(W, "too_large_decision_fails", mode)
+    assert shadow.exit_code == bare.exit_code
+    assert shadow.result()["refund_statuses"] == [502]
+    assert shadow.by_label()[REFUND] == (502, "irimi")
+    assert [line for line in shadow.exchange_lines() if "api.stripe.com" in line] == [
+        "real          read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200",
+        "irimi         unknown   POST api.stripe.com/v1/refunds -> 502  "
+        "[unclassified, decision-failed]",
+        "irimi-check   read      GET api.stripe.com/v1/charges/ch_TICKET1 -> 200",
+    ]
+    reads = shadow.internet.requests("api.stripe.com")
+    assert [(r.method, r.path) for r in reads] == [("GET", "/v1/charges/ch_TICKET1")] * 2
+    stored = [ex for ex in shadow.handed if ex.request.host == "api.stripe.com"]
+    assert [(ex.issued_by, ex.request.method, ex.answered_by) for ex in stored] == [
+        ("agent", "GET", "live"),
+        ("agent", "POST", "irimi"),
+        ("engine", "GET", "live"),
+    ]
+    assert "  api.stripe.com     1 read  1 irimi check read  1 write refused by irimi" in (
+        shadow.summaries()
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_a_second_refund_is_refused_because_the_overlay_shows_the_first(run_workflow, mode):
     bare = run_workflow(W, "double_refund", "bare")
     shadow = run_workflow(W, "double_refund", mode)

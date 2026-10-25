@@ -50,7 +50,9 @@ object, and so is every answer that has one.
 
 A `run_id` is 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`, chosen by the client. Use
 something unique, such as 16 random hex characters. Two ids that differ only in case may share a
-directory on a case-insensitive filesystem, and the second is then stored as unattributed.
+directory on a case-insensitive filesystem, and the second is then stored as unattributed. An id
+with a credential's shape, such as `sk_live_…`, is refused `400`: it would name a directory, and
+redaction never sees a directory name. Hex never has one.
 
 - `unattributed` may receive tool calls and lookups, not a start or an end: it is where calls made
   outside any run go.

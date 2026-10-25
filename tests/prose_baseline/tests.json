@@ -8,9 +8,6 @@
   "tests/e2e/workflows/test_w03_queue_worker.py": {
     "issue_ref": 3
   },
-  "tests/e2e/workflows/test_w04_slack_ops_bot.py": {
-    "issue_ref": 1
-  },
   "tests/e2e/workflows/test_w07_streaming_assistant.py": {
     "issue_ref": 3
   },

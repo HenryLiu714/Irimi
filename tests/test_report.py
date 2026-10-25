@@ -12,10 +12,17 @@ from irimi.cli.compose import maps_for_stored_runs
 from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.core.netaddr import Target
 from irimi.protocol.trace import ErrorInfo, RunRecord
+from irimi.record import redact
 from irimi.report import model, summary
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import Live
-from irimi.report.terminal import banner_lines, exchange_line, target_lines, tool_call_line
+from irimi.report.terminal import (
+    banner_lines,
+    exchange_line,
+    target_lines,
+    tool_call_line,
+    with_stored_path,
+)
 from tests.support import builders
 from tests.support.builders import FORM_CONTENT_TYPE
 
@@ -191,6 +198,56 @@ def test_exchange_line_columns_line_up_for_the_nine_character_values():
 
 def test_exchange_line_names_a_delegated_answer():
     assert exchange_line(_exchange(answered_by="delegated")).startswith("target ")
+
+
+KEY = bytes(range(32))
+WEBHOOK_SECRET = "XXXXwebhooksecret"
+
+
+def _webhook(path, operation=None):
+    """A faked post to a Slack incoming webhook, its secret in its path, as the engine sees it."""
+    ex = _exchange(
+        method="POST",
+        kind="write",
+        answered_by="fake-L0",
+        host="hooks.slack.com",
+        service="slack",
+        path=path,
+        body=b'{"text": "deploy finished"}',
+        content_type="application/json",
+    )
+    return ex if operation is None else replace(ex, operation=operation)
+
+
+def test_a_live_webhook_prints_its_secret_path_as_the_placeholder_it_is_stored_under():
+    """A live exchange prints as `irimi runs show` prints it stored; only its path changes."""
+    path = f"/services/T0/B0/{WEBHOOK_SECRET}"
+    live = _webhook(path)
+    shown = with_stored_path(live, KEY)
+    hidden = "/" + redact.placeholder(KEY, path)
+    assert exchange_line(shown) == f"faked         write     POST hooks.slack.com{hidden} -> 200"
+    assert exchange_line(shown) == exchange_line(redact.redact_exchange(live, KEY))
+    assert replace(shown, request=replace(shown.request, path=path)) == live
+    plain = _exchange()
+    assert with_stored_path(plain, KEY) is plain
+
+
+def test_the_live_summary_of_a_webhook_post_never_spells_its_secret_path():
+    """A post no route matches is spelled as its request, so its path is the stored one too.
+
+    The route a matched post's sentence comes from is found by its operation, as for a stored
+    run."""
+    unmatched = f"/triggers/T0/1/{WEBHOOK_SECRET}"
+    posts = [
+        _webhook(f"/services/T0/B0/{WEBHOOK_SECRET}", "incoming_webhook"),
+        _webhook(unmatched),
+    ]
+    lines = summary_lines("7f3a", [with_stored_path(post, KEY) for post in posts], 0.0, _maps())
+    assert _write_block(lines) == [
+        '  ○ slack  post via webhook: "deploy finished"  faked; not checked',
+        f"  ○ slack  POST hooks.slack.com/{redact.placeholder(KEY, unmatched)}  faked; not checked",
+    ]
+    assert not any(WEBHOOK_SECRET in line for line in lines)
 
 
 def _service(**kwargs):

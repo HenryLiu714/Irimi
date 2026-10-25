@@ -111,13 +111,8 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
     assert seen[-1].flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
 
 
-def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
-    """A raise recording irimi's check read leaves the faked write answered and pending its record.
-
-    `Decided.issued` is recorded after the answer is on the flow, and mitmproxy forwards a flow
-    only when it has no response."""
-    from irimi.engine.mitm import META_KEY
-
+def _engine_read() -> Exchange:
+    """An exchange irimi's check read made, as a policy hands it back on `Decided.issued`."""
     probe = Request(
         method="GET",
         scheme="http",
@@ -128,7 +123,7 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         headers=(),
         body=b"",
     )
-    issued = Exchange(
+    return Exchange(
         request=probe,
         response=Response(status=200, headers=(), body=b"{}"),
         service="demo",
@@ -138,6 +133,16 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
         run_id="",
         issued_by="engine",
     )
+
+
+def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
+    """A raise recording irimi's check read leaves the faked write answered and pending its record.
+
+    `Decided.issued` is recorded after the answer is on the flow, and mitmproxy forwards a flow
+    only when it has no response."""
+    from irimi.engine.mitm import META_KEY
+
+    issued = _engine_read()
 
     class _Checking:
         name = "checking"
@@ -163,6 +168,34 @@ def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, mo
 
     assert flow.response is not None and flow.response.status_code == 200
     assert flow.metadata[META_KEY].decision.outcome.precondition.outcome == "passed"
+
+
+def test_a_raise_planning_a_decision_still_records_the_reads_it_made(tmp_path, monkeypatch):
+    """A decision the session cannot plan answers irimi's 502, and irimi's check read is kept.
+
+    The read already reached the service. Here the policy's answer cannot be stamped."""
+    issued = _engine_read()
+
+    class _Unstampable(Response):
+        def without_header(self, name: str) -> Response:
+            raise RuntimeError("the answer could not be stamped")
+
+    class _Unplannable:
+        name = "unplannable"
+
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
+            return Decided(Respond(_Unstampable(200, (), b"{}"), "fake-L0"), issued=(issued,))
+
+    seen: list[Exchange] = []
+    addon = bare_addon(tmp_path, monkeypatch, _Unplannable(), on_exchange=seen.append)
+    flow = bare_flow(b"POST", b"/things")
+    asyncio.run(addon.request(flow))
+
+    assert flow.response is not None and flow.response.status_code == 502
+    assert json.loads(flow.response.content)["error"]["type"] == "irimi_decision_failed"
+    write, read = seen
+    assert read is issued
+    assert write.flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
 
 
 class _Raising(RuntimeError):

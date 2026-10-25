@@ -77,6 +77,14 @@ class Decided:
     issued: tuple[Exchange, ...] = ()
 
 
+class DecisionFailed(Exception):
+    """A decision that raised once irimi's own reads had gone out; `issued` are those reads."""
+
+    def __init__(self, message: str, issued: tuple[Exchange, ...]) -> None:
+        super().__init__(message)
+        self.issued = issued
+
+
 class AnswerPolicy(Protocol):
     name: str
 
@@ -88,7 +96,11 @@ class AnswerPolicy(Protocol):
         run_id: str = "",
         target: ForwardTo | None = None,
     ) -> Decided:
-        """Return how this request is answered; `target` comes from `targets.resolve`."""
+        """Return how this request is answered; `target` comes from `targets.resolve`.
+
+        Raises:
+            DecisionFailed: the decision raised after irimi's own reads, which it carries.
+        """
         ...
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
@@ -153,29 +165,46 @@ class ShadowPolicy:
         checked = preconditions.check(
             request, classification, write_log, run_id, self.reader, self.maps, self.observe_read
         )
+        try:
+            decided = self._answered(request, classification, checked)
+        except Exception as exc:
+            # The check read reached the service, so the trace must still hold it.
+            raise DecisionFailed(_said(exc), checked.issued) from exc
+        _remember(self.idempotency, slot, decided)
+        return decided
+
+    def _answered(
+        self, request: Request, classification: Classification, checked: preconditions.Checked
+    ) -> Decided:
+        """Return the service's own error for a write the check rejected, else the faked write."""
         if checked.rejection is not None:
             fake = services.fake_rejection(classification, checked.rejection.body)
             outcome = WriteOutcome(checked.precondition)
-            decided = _local(fake, checked.rejection.status, outcome, issued=checked.issued)
-            _remember(self.idempotency, slot, decided)
-            return decided
+            return _local(fake, checked.rejection.status, outcome, issued=checked.issued)
         try:
             fake = services.fake_response(request, classification, self.slack_ts)
         except Exception:
             # Fail-closed hook rule: a fake that fails is answered with an empty object.
             logger.exception("irimi: the local answer failed; answering with an empty object")
             fake = services.Fake(b"{}", bodies.JSON_CT)
+        route = classification.route
         fires = route.fires if route is not None else ()
         outcome = WriteOutcome(checked.precondition, fires)
-        decided = _local(fake, 200, outcome, issued=checked.issued)
-        _remember(self.idempotency, slot, decided)
-        return decided
+        return _local(fake, 200, outcome, issued=checked.issued)
 
     def _delegated(self, route: Route | None, target: ForwardTo) -> Delegate:
         """Return the `Delegate`; `not_evaluable` if a check was declared and a reader exists."""
         declared = route is not None and bool(route.precondition)
         asked = declared and not isinstance(self.reader, NoReader)
         return Delegate(target, preconditions.NOT_EVALUABLE if asked else Precondition())
+
+
+def _said(exc: Exception) -> str:
+    """Return `str(exc)`, or its type's name when that raises: the reads must still be carried."""
+    try:
+        return str(exc)
+    except Exception:
+        return type(exc).__name__
 
 
 def _local(
@@ -206,24 +235,36 @@ def _recall(
 ) -> tuple[idempotency.Slot | None, Decided | None]:
     """Return `(slot, answer already given)` for this write, before any check or mint.
 
-    A retry gets the first answer's bytes, no precondition read and no write-log entry. Never
-    raises: a failed store falls through to the ordinary answer.
+    A retry gets the first answer's bytes, no precondition read and no write-log entry. A failed
+    store falls through to the ordinary answer, but an answer the key calls for that cannot be
+    built raises: faking the write afresh would turn the service's refusal into a success.
     """
-    slot: idempotency.Slot | None = None
+    slot, first, conflicted = _standing(store, request, classification, run_id)
+    if slot is not None and conflicted:
+        refusal = idempotency.conflict(classification.service, slot.idempotency_key)
+        if refusal is not None:
+            return slot, _conflict_answer(classification, refusal)
+    elif first is not None:
+        return slot, _retry_answer(first, classification.service)
+    return slot, None
+
+
+def _standing(
+    store: idempotency.Store, request: Request, classification: Classification, run_id: str
+) -> tuple[idempotency.Slot | None, idempotency.FirstAnswer | None, bool]:
+    """Return this write's slot, its key's first answer, and whether the key was reused.
+
+    Never raises: a failed store gives `(None, None, False)`, so the write is answered afresh.
+    """
     try:
         slot = idempotency.slot_for(request, classification, run_id)
-        if slot is not None:
-            first, conflicted = store.get(slot.id, slot.params)
-            if conflicted:
-                refusal = idempotency.conflict(classification.service, slot.idempotency_key)
-                if refusal is not None:
-                    return slot, _conflict_answer(classification, refusal)
-            elif first is not None:
-                return slot, _retry_answer(first, classification.service)
+        if slot is None:
+            return None, None, False
+        first, conflicted = store.get(slot.id, slot.params)
+        return slot, first, conflicted
     except Exception:
         logger.exception("irimi: the idempotency store failed; answering this write afresh")
-        slot = None
-    return slot, None
+        return None, None, False
 
 
 def idempotency_standing(
@@ -234,12 +275,13 @@ def idempotency_standing(
     `idempotent-replay` for a retry, `idempotency-conflict` for a reused key. A replay matches a
     recorded write only with the same flag. Never raises.
     """
-    _, known = _recall(store, request, classification, run_id)
-    if known is None:
-        return ""
-    if Flag.IDEMPOTENCY_CONFLICT in known.flags:
+    # A slot means the service has an idempotency spec, so a reused key is always refused.
+    _, first, conflicted = _standing(store, request, classification, run_id)
+    if conflicted:
         return Flag.IDEMPOTENCY_CONFLICT
-    return Flag.IDEMPOTENT_REPLAY
+    if first is not None:
+        return Flag.IDEMPOTENT_REPLAY
+    return ""
 
 
 def remember_answer(

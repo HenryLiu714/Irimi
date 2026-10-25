@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+from irimi import services
+from irimi.core.exchange import Flag
 from irimi.decide.policy import ShadowPolicy
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from tests.support.engine import (
@@ -33,6 +35,8 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
     (write,) = writes_in(seen)
     assert write.precondition.outcome == "rejected"
     assert write.precondition.rejection_code == "charge_already_refunded"
+    (issued,) = [ex for ex in seen if ex.issued_by == "engine"]
+    assert (issued.request.method, issued.request.path) == ("GET", "/v1/charges/ch_FULL1")
 
 
 def test_a_rejected_refund_records_no_webhooks(precondition_stub):
@@ -167,6 +171,36 @@ def test_the_stub_never_saw_a_post(precondition_stub):
         ("GET", "/v1/charges/ch_REAL1"),
         ("GET", "/v1/charges/ch_FULL1"),
     ]
+
+
+def test_a_decision_that_fails_after_its_check_read_still_records_the_read(
+    precondition_stub, monkeypatch
+):
+    """A refund whose rejection cannot be built gets irimi's 502, and its check read is recorded.
+
+    The read reached the service, so the trace holds it, recorded after the 502."""
+    proxy, stub, seen = precondition_stub
+
+    def fails(classification, body):
+        raise RuntimeError("the rejection could not be built")
+
+    monkeypatch.setattr(services, "fake_rejection", fails)
+    status, headers, data = post_refund(proxy, stub, "ch_FULL1")
+    assert status == 502
+    assert headers[ANSWERED_BY_HEADER] == "irimi"
+    error = json.loads(data)["error"]
+    assert error == {
+        "type": "irimi_decision_failed",
+        "message": "irimi could not decide how to answer this request: "
+        "the rejection could not be built",
+    }
+    assert stub.seen == [("GET", "/v1/charges/ch_FULL1")]
+    refund, read = seen
+    assert (read.issued_by, read.kind, read.answered_by) == ("engine", "read", "live")
+    assert (read.request.method, read.request.path) == ("GET", "/v1/charges/ch_FULL1")
+    assert read.response is not None and read.response.status == 200
+    assert (refund.issued_by, refund.answered_by) == ("agent", "irimi")
+    assert refund.flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
 
 
 def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):

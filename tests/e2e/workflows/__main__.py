@@ -66,19 +66,24 @@ def main(argv: list[str] | None = None) -> int:
             if result.irimi:
                 print("  --- irimi")
                 print("\n".join(f"  {line}" for line in result.irimi))
+            # Kept by the harness, so they reach no stderr of their own.
+            if result.irimi_logs:
+                print("  --- irimi's log")
+                print("\n".join(f"  {line}" for line in result.irimi_logs))
             writes = result.internet.writes()
             print(f"  --- writes that reached the fake services: {len(writes)}")
             for req in writes:
                 print(f"  {req.method} {req.host}{req.path}")
-    broken = False
-    for mode in ("shadow", "serve"):
-        if mode not in results:
-            continue
-        problems = check_invariants(results[mode], results.get("bare"))
-        print(f"\ninvariants ({mode}): {f'{len(problems)} broken' if problems else 'all hold'}")
-        for problem in problems:
-            print(f"  BROKEN {problem}")
-        broken = broken or bool(problems)
+        # Inside the block: invariant 4 reads the run's files, which leaving it deletes.
+        broken = False
+        for mode in ("shadow", "serve"):
+            if mode not in results:
+                continue
+            problems = check_invariants(results[mode], results.get("bare"))
+            print(f"\ninvariants ({mode}): {f'{len(problems)} broken' if problems else 'all hold'}")
+            for problem in problems:
+                print(f"  BROKEN {problem}")
+            broken = broken or bool(problems)
     return 1 if broken else 0
 
 

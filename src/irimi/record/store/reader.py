@@ -75,7 +75,7 @@ class StoreReader:
         if run_id == UNATTRIBUTED:
             events = self.layout.unattributed_events
             return StoredRun(RunRecord.header(UNATTRIBUTED), self._events(events, get_body))
-        if not trace.is_valid_run_id(run_id):
+        if not trace.is_stored_run_id(run_id):
             raise RunNotFound(run_id)
         directory = self.layout.run_dir(run_id)
         if not _holds_run_file(directory):

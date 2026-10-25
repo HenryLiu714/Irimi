@@ -66,6 +66,8 @@ class _ServeOutput:
         self.quiet = quiet
         self._printing = threading.Lock()
         self.unattributed = 0  # counted for the stop line, since no summary shows them
+        # The run's redaction key, set before its engine starts, for `terminal.with_stored_path`.
+        self.key = b""
         # No run's summary shows a failed handshake, so serve warns once per host itself.
         self.ca_cert: Path | None = None
         self._tls_warned: set[str] = set()
@@ -79,7 +81,7 @@ class _ServeOutput:
         if ex.run_id == UNATTRIBUTED:
             self.unattributed += 1
         if not self.quiet:
-            self.say([terminal.exchange_line(ex)])
+            self.say([terminal.exchange_line(terminal.with_stored_path(ex, self.key))])
 
     def tool_call(self, call: ToolCall) -> None:
         """Print the tool's name and error, never its args or result, which would print raw."""
@@ -122,7 +124,7 @@ def _run_serve(
     if run is None:
         return exitcodes.ERROR
     with run:
-        output.ca_cert = run.ca.cert
+        output.ca_cert, output.key = run.ca.cert, run.key
         engine = engine_factory(run, output.exchange, output.tool_call, output.tls_failure)
         if signalled:  # stopped before it served: no engine to start, no banner to print
             return exitcodes.OK

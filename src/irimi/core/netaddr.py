@@ -99,5 +99,10 @@ class Target:
         return is_loopback(self.host)
 
     @property
+    def origin(self) -> str:
+        """Return `scheme://host[:port]`, which names a target in messages: a path can be secret."""
+        return f"{self.scheme}://{self.authority}"
+
+    @property
     def url(self) -> str:
-        return f"{self.scheme}://{self.authority}{self.path}"
+        return f"{self.origin}{self.path}"

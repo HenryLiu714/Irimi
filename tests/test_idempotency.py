@@ -6,13 +6,14 @@ from dataclasses import replace
 
 import pytest
 
-from irimi import servicemaps
+from irimi import servicemaps, services
 from irimi.core.exchange import Flag, Request
 from irimi.decide import idempotency
 from irimi.decide.idempotency import Store
-from irimi.decide.policy import ShadowPolicy
+from irimi.decide.policy import ShadowPolicy, idempotency_standing
 from irimi.engine import wire
 from irimi.servicemaps import Route
+from irimi.servicemaps.classify import classify
 from tests.support import builders
 from tests.support.builders import FORM_CONTENT_TYPE, FORM_HEADER
 from tests.support.decisions import (
@@ -362,6 +363,28 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
     assert first.answered_by == second.answered_by == "fake-L1"
     assert json.loads(first.response.body)["id"] != json.loads(second.response.body)["id"]
     assert Flag.IDEMPOTENT_REPLAY not in second.flags
+
+
+@pytest.mark.parametrize(
+    ("owner", "name"), [(services, "fake_rejection"), (idempotency, "conflict")]
+)
+def test_a_reused_key_whose_refusal_cannot_be_built_fails_the_decision(monkeypatch, owner, name):
+    """A reused key whose `idempotency_error` cannot be built raises, so irimi answers its 502.
+
+    Faked afresh, the write would succeed where Stripe refuses it. The key still reads as a
+    conflict, as `idempotency_standing` builds no answer."""
+    policy = ShadowPolicy()
+    ask(policy, refund_request(b"charge=ch_REAL&amount=100"))
+    reused = refund_request(b"charge=ch_REAL&amount=250")
+
+    def fails(*args):
+        raise RuntimeError("the refusal could not be built")
+
+    monkeypatch.setattr(owner, name, fails)
+    with pytest.raises(RuntimeError, match="the refusal could not be built"):
+        ask(policy, reused)
+    standing = idempotency_standing(policy.idempotency, reused, classify(reused, SHIPPED), "t3st")
+    assert standing == Flag.IDEMPOTENCY_CONFLICT
 
 
 def test_a_key_reused_on_another_object_of_one_route_is_refused():

@@ -27,6 +27,7 @@ from irimi.record import redact
 from irimi.record.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.report.runs import MAX_TRIGGER_SHOWN, RUN_LIST_HEADER, event_line
 from irimi.report.terminal import WIDE_BIND_NOTICE, exchange_line
+from tests.e2e.workflows.agents.credentials import RUN_ID_KEY
 from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     AGENT_VERSION,
     ALLOWED_BASE_URL_HOST,
@@ -39,10 +40,11 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     LONG_MESSAGE_CHARS,
     OVERSIZED_BODY_BYTES,
     REFUSED_BASE_URL_HOST,
+    WEBHOOK_HOST,
 )
 from tests.e2e.workflows.agents.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from tests.e2e.workflows.harness.compare import rows_not_shown
-from tests.e2e.workflows.harness.invariants import check_invariants
+from tests.e2e.workflows.harness.invariants import CANARIES, check_invariants
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -122,6 +124,34 @@ REUSED_KEY = (
     "✗ stripe  refund 200 (minor units, currency unknown) on ch_GAUNTLET  faked; would fail: "
     "idempotency_error"
 )
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_reused_key_whose_error_cannot_be_built_is_irimis_502_not_a_refund(run_workflow, mode):
+    """A reused key whose `idempotency_error` cannot be built is refused with irimi's 502.
+
+    Faked afresh it would be a refund Stripe refuses, answered 200 after a check read of its own.
+    Every other call is answered as in `idempotency`."""
+    shadow = run_workflow(W, "idempotency_conflict_fails", mode)
+    plain = run_workflow(W, "idempotency", mode)
+    assert shadow.exit_code == plain.exit_code
+    assert shadow.by_label() == {**plain.by_label(), "refund_key_reused": (502, "irimi")}
+    refund = "POST api.stripe.com/v1/refunds"
+    assert [line for line in shadow.exchange_lines() if refund in line] == [
+        f"faked         write     {refund} -> 200",
+        f"faked         write     {refund} -> 200  [idempotent-replay]",
+        f"irimi         unknown   {refund} -> 502  [unclassified, decision-failed]",
+        f"faked         write     {refund} -> 200",
+        f"faked         write     {refund} -> 200",
+    ]
+    engine_reads = [r for r in shadow.internet.requests() if r.path == "/v1/charges/ch_GAUNTLET"]
+    assert len(engine_reads) == 3
+    summary = "\n".join(summary_of(shadow))
+    assert REUSED_KEY not in summary
+    assert (
+        "refund 200 (minor units, currency unknown) on ch_GAUNTLET  refused by irimi: "
+        "irimi could not decide how to answer it"
+    ) in summary
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -206,6 +236,8 @@ def test_the_big_charge_is_past_irimis_body_limit():
 
 # The scenarios that send one write whose body decodes past irimi's cap.
 CUT_WRITES = ("bombs", "cut_refund", "cut_update")
+# Scenarios that make irimi's own answer raise, so one write is irimi's 502 and nothing else.
+RAISES_INSIDE_IRIMI = ("idempotency_conflict_fails",)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -214,12 +246,16 @@ def test_no_decision_ever_fails(run_workflow, scenario, mode):
     """No gauntlet edge makes a decision fail, except a write cut at the cap, refused by design.
 
     A failed decision answers 502 `decision-failed` (fail-closed hook rule). Each `CUT_WRITES`
-    scenario reaches that path once, and every agent call gets an HTTP answer."""
+    and `RAISES_INSIDE_IRIMI` scenario reaches that path once, and every agent call gets an HTTP
+    answer."""
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exchange_lines()
     failed = [line for line in shadow.exchange_lines() if "decision-failed" in line]
-    assert [line for line in failed if not line.endswith("decision-failed, body-truncated]")] == []
-    assert len(failed) == (scenario in CUT_WRITES)
+    end = "[unclassified, decision-failed]"
+    if scenario not in RAISES_INSIDE_IRIMI:
+        end = "decision-failed, body-truncated]"
+    assert [line for line in failed if not line.endswith(end)] == []
+    assert len(failed) == (scenario in CUT_WRITES + RAISES_INSIDE_IRIMI)
     assert all(isinstance(c.get("status"), int) for c in shadow.calls())
 
 
@@ -232,16 +268,27 @@ def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow, mode):
     ] == [
         ["irimi-rewrote"],
         ["irimi-run"],
+        ["irimi-run"],
     ]
     shadow = run_workflow(W, "headers", mode)
-    assert shadow.by_label() == {"forged_rewrote": (200, None), "bad_run_id": (200, None)}
+    assert shadow.by_label() == {
+        "forged_rewrote": (200, None),
+        "bad_run_id": (200, None),
+        "key_run_id": (200, None),
+    }
     assert [r.path for r in shadow.internet.requests()] == [
         "/v1/refunds",
+        "/v1/charges/ch_GAUNTLET",
         "/v1/charges/ch_GAUNTLET",
     ]
     for req in shadow.internet.requests():
         assert "irimi-rewrote" not in req.headers
         assert "irimi-run" not in req.headers
+    # A path and a key name no run, so both reads are the engine's own; invariant 4 finds a key
+    # that names a directory.
+    assert {e.run_id for e in shadow.stored_events()} == {shadow.engine_run_id()}
+    process = [shadow.process_run_id()] if mode == "shadow" else []
+    assert [r.run_id for r in shadow.stored().list_runs()] == process
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -317,17 +364,22 @@ BASE_URL_REFUSALS = {
     "no_host_post": NO_HOST,
     "empty_host_post": NO_HOST,
     "bad_port_post": f"bad port in base-URL host '{ALLOWED_BASE_URL_HOST}:99999'",
+    "webhook_bad_port_post": f"bad port in base-URL host '{WEBHOOK_HOST}:99999'",
     "head_unknown_host": f"base-URL host {HEAD_HOST!r} is not in a loaded map or --base-url-host",
     "get_after_head": UNKNOWN_HOST,
 }
+# The refused webhook post's path as sent: it names the webhook's host, then its secret path.
+WEBHOOK_BAD_PORT = f"/{WEBHOOK_HOST}:99999{CANARIES['SLACK_WEBHOOK_PATH']}"
 # Each request `base_url_hosts` sends that irimi refuses, as stored: method, path, kind, and
-# whether it is unclassified. Its host is the listener's: a refused request is never rewritten.
+# whether it is unclassified. Its host is the listener's: a refused request is never rewritten,
+# so the webhook's path is stored as the one placeholder `hidden` gives it.
 REFUSED_AS_STORED = [
     ("POST", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown", True),
     ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
     ("POST", "/", "unknown", True),
     ("POST", "//v1/entries", "unknown", True),
     ("POST", f"/{ALLOWED_BASE_URL_HOST}:99999/v1/invoices", "unknown", True),
+    ("POST", WEBHOOK_BAD_PORT, "unknown", True),
     ("HEAD", f"/{HEAD_HOST}/x", "read", False),
     ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
 ]
@@ -344,8 +396,12 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     """Only `--base-url-host`'s host is relayed; every other base-URL request is refused, 403.
 
     A refusal is stamped `irimi`, says why in JSON, is stored `refused` with its classification
-    (GET and HEAD are reads), and never reaches the fake internet, which bare calls do reach."""
+    (GET and HEAD are reads), and never reaches the fake internet, which bare calls do reach.
+    The webhook's secret path is hidden in the store and the line alike."""
     shadow = run_workflow(W, "base_url_hosts", mode)
+    hidden = {
+        WEBHOOK_BAD_PORT: "/" + redact.placeholder(redact.load_key(shadow.home), WEBHOOK_BAD_PORT)
+    }
     assert shadow.by_label() == {
         "allowed_post": (200, "fake-L0"),
         **dict.fromkeys(BASE_URL_REFUSALS, (403, "irimi")),
@@ -367,10 +423,19 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     ] == [
         ("POST", ALLOWED_BASE_URL_HOST, "/v1/invoices", "unknown", "fake-L0", unclassified),
         *(
-            (method, "127.0.0.1", path, kind, "irimi", unclassified * odd + (Flag.REFUSED,))
+            (
+                method,
+                "127.0.0.1",
+                hidden.get(path, path),
+                kind,
+                "irimi",
+                unclassified * odd + (Flag.REFUSED,),
+            )
             for method, path, kind, odd in REFUSED_AS_STORED
         ),
     ]
+    [webhook] = [e for e in stored if e.request.path == hidden[WEBHOOK_BAD_PORT]]
+    assert webhook.request.header("x-note") == f"sent as {hidden[WEBHOOK_BAD_PORT]}"
     for e, why in zip(stored[1:], BASE_URL_REFUSALS.values(), strict=True):
         assert e.response is not None and e.response.status == 403
         if e.request.method != "HEAD":
@@ -378,7 +443,7 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     assert shadow.exchange_lines() == [
         f"faked         unknown   POST {ALLOWED_BASE_URL_HOST}/v1/invoices -> 200  [unclassified]",
         *(
-            f"irimi         {kind:<9} {method} 127.0.0.1{path} -> 403  "
+            f"irimi         {kind:<9} {method} 127.0.0.1{hidden.get(path, path)} -> 403  "
             f"[{'unclassified, ' if odd else ''}refused]"
             for method, path, kind, odd in REFUSED_AS_STORED
         ),
@@ -390,22 +455,23 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
             f"  ○ {ALLOWED_BASE_URL_HOST}  POST {ALLOWED_BASE_URL_HOST}/v1/invoices  faked; not "
             "checked (unclassified)",
             *(
-                f"  ✗ 127.0.0.1  POST 127.0.0.1{path}  refused by irimi"
+                f"  ✗ 127.0.0.1  POST 127.0.0.1{hidden.get(path, path)}  refused by irimi"
                 for method, path, _, _ in REFUSED_AS_STORED
                 if method == "POST"
             ),
             "",
-            "  127.0.0.1             3 reads refused by irimi  4 writes refused by irimi",
+            "  127.0.0.1             3 reads refused by irimi  5 writes refused by irimi",
             f"  {ALLOWED_BASE_URL_HOST}  1 faked write (1 unclassified)",
             "",
-            "  8 exchanges · 0 real · 8 answered by irimi (1 faked write) · 0 sent to targets",
+            "  9 exchanges · 0 real · 9 answered by irimi (1 faked write) · 0 sent to targets",
         ]
     else:
-        stopped = "stopped · 8 exchanges not in any run: irimi runs show unattributed"
+        stopped = "stopped · 9 exchanges not in any run: irimi runs show unattributed"
         assert shadow.irimi[-1] == stopped
     bare = run_workflow(W, "base_url_hosts", "bare")
     assert bare.by_label() == dict.fromkeys(shadow.by_label(), (502, None))
     assert bare.exit_code == shadow.exit_code == 0
+    assert check_invariants(shadow, bare) == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -451,6 +517,7 @@ REFUSALS = {
     "refuse_get": (405, "/_irimi/runs/ctl-refused-get/start takes POST, not GET"),
     "refuse_route": (404, "no control route '/_irimi/runs/ctl-refused-route/nope'"),
     "refuse_dotdot": (400, "'../x' cannot name a run"),
+    "refuse_key_shaped": (400, f"{RUN_ID_KEY!r} cannot name a run"),
     "refuse_unattributed": (400, "'unattributed' cannot name a run"),
     "refuse_nan": (400, "the body is not JSON: NaN is not a finite number"),
     "refuse_missing": (400, "missing required field 'trigger'"),

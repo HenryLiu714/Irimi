@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tests.e2e.workflows.harness.scenario import Scenario, Workflow
+from irimi import services
+from tests.e2e.workflows.harness.scenario import Scenario, Workflow, raising
 from tests.e2e.workflows.harness.services import LlmCall, LlmTurn, World
 
 CHARGE = "ch_TICKET1"
@@ -88,6 +89,13 @@ WORKFLOW = Workflow(
         "full_refund": _scenario("full", "refund the whole charge, reply, stop"),
         "half_refund": _scenario("half", "the prompt edit: refund half instead"),
         "too_large": _scenario("too_large", "the model asks for twice the charge"),
+        "too_large_decision_fails": _scenario(
+            "too_large",
+            "too_large, with building Stripe's rejection made to raise inside irimi: the refund "
+            "is answered with irimi's 502, and irimi's check read of the charge is still recorded",
+            # irimi builds the rejection once its check read is back.
+            inside_irimi=raising(services, "fake_rejection", "the rejection could not be built"),
+        ),
         "double_refund": _scenario("double", "the model refunds twice with different keys"),
         "double_refund_quiet": _scenario(
             "double",

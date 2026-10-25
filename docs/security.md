@@ -77,6 +77,9 @@ Rules that follow from these, each also held by a test:
   before it is forwarded, sent to a target or used for a check read, so a run id never reaches a
   service. When irimi stamps an answer, it replaces any `Irimi-Answered-By` the target or service
   sent.
+- **A run id is never a key.** A run id names a directory, which redaction never sees, so one with
+  a credential's shape is no run id (`protocol/trace.is_valid_run_id`): the control endpoint
+  refuses it `400`, and an `Irimi-Run` header holding one is treated as absent.
 - **A store failure never affects traffic.** The store only enqueues; one writer thread does the
   I/O. A full queue or a failed write drops the event and counts it on the run
   (`dropped_events`), never blocking or failing the agent's request.
@@ -122,7 +125,12 @@ agent never see a placeholder.
   character ends an escape such as `\n` or `%20`.
 - **Credential-path hosts.** On `hooks.slack.com`, and any host a map lists under
   `credential_path_hosts:`, the URL path is the secret, so the whole path is replaced wherever the
-  exchange carries it.
+  exchange carries it. So is a path whose first segment names such a host
+  (`/hooks.slack.com/...`), which is how a base-URL request irimi refuses is kept. The lines irimi
+  prints as a run goes show a request's path as it is stored, so a webhook prints as its
+  placeholder, and irimi's errors and warnings name a target by its origin alone
+  (`target 'http://127.0.0.1:9' could not be reached`), since a target that is a bare origin
+  takes the request's path.
 - **How a body is read.** A body that is one JSON document is walked as JSON, whatever its content
   type says. Otherwise a form content type is read as a form, and anything else line by line: a
   line that is one JSON document (NDJSON), or an SSE `data:` field holding one, is walked as JSON,

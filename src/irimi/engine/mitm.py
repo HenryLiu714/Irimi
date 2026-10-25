@@ -343,8 +343,8 @@ class IrimiAddon:
             try:
                 self._to_target(flow, decision.target)
             except Exception as exc:  # an unpointed flow would reach the real service
-                message = f"target {plan.target!r} could not be applied: {exc}"
-                self._answer_now(flow, self.session.target_failed(plan, message))
+                unapplied = targets.not_applied(decision.target.target, exc)
+                self._answer_now(flow, self.session.target_failed(plan, str(unapplied)))
                 return
         elif isinstance(decision, Respond):
             # A replayed response comes off disk, and mitmproxy may refuse to encode its headers.

@@ -32,7 +32,15 @@ from irimi.core.limits import MAX_DECODED_BODY
 from irimi.core.netaddr import Target
 from irimi.decide import targets
 from irimi.decide.overlay import Overlaid, Overlay
-from irimi.decide.policy import AnswerPolicy, Decided, Decision, Delegate, Forward, Respond
+from irimi.decide.policy import (
+    AnswerPolicy,
+    Decided,
+    Decision,
+    DecisionFailed,
+    Delegate,
+    Forward,
+    Respond,
+)
 from irimi.decide.writelog import Translation, WriteLog
 from irimi.engine import ingress, wire
 from irimi.engine.ingress import Admitted, Refusal
@@ -127,9 +135,10 @@ class ShadowSession:
         """Return how to answer `admitted`, without touching a flow.
 
         Never raises (fail-closed hook rule): any exception becomes irimi's 502 flagged
-        `decision-failed`.
+        `decision-failed`, which carries any read irimi already made for it.
         """
         request = admitted.request
+        issued: tuple[Exchange, ...] = ()
         try:
             cls = classify(request, self.maps)
             # A body cut at the cap reaches the decision empty, and a faked write built from it
@@ -150,9 +159,12 @@ class ShadowSession:
                 translation = self._translate(writes, cls, request)
             asked = request if translation is None else translation.request
             decided = self.policy.decide(asked, cls, writes, admitted.run_id, target)
+            issued = decided.issued
             return self._planned(admitted, asked, cls, decided, translation)
+        except DecisionFailed as exc:
+            return self.decision_failed(admitted, exc, issued=exc.issued)
         except Exception as exc:
-            return self.decision_failed(admitted, exc)
+            return self.decision_failed(admitted, exc, issued=issued)
 
     def _planned(
         self,
@@ -470,7 +482,7 @@ def _probe_target(target: Target) -> None:
         socket.create_connection((target.host, target.port), TARGET_PROBE_TIMEOUT_S).close()
     except OSError as exc:
         raise targets.TargetUnreachable(
-            f"target {target.url!r} could not be reached: {exc}"
+            f"target {target.origin!r} could not be reached: {exc}"
         ) from None
 
 
@@ -487,5 +499,5 @@ def _target_refusal(
     except targets.TargetRefused as exc:
         return exc
     except Exception as exc:
-        return targets.TargetRefused(f"target {forward.url!r} could not be applied: {exc}")
+        return targets.not_applied(forward.target, exc)
     return None

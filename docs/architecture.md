@@ -21,8 +21,10 @@ irimi's `Request` and `Response` and carries plans onto them. What irimi decides
    `classify.classify` gives the kind; `targets.resolve` finds the target once; a read the
    overlay can translate (a cursor naming a minted id) is translated; the `AnswerPolicy` returns a
    `Decision`: `Forward`, `Delegate` or `Respond`. The policy runs the precondition check
-   (`decide/preconditions.py`), whose check read is carried on the plan. A `Respond` is stamped
-   `Irimi-Answered-By` as it is planned, and a target is probed and, if unreachable, refused here.
+   (`decide/preconditions.py`), whose check read is carried on the plan, or on `DecisionFailed`
+   when the decision raises after it, so irimi's `502` still records the read. A `Respond` is
+   stamped `Irimi-Answered-By` as it is planned, and a target is probed and, if unreachable,
+   refused here.
 3. **Back in the hook**, the addon carries the plan onto the flow: a `Respond` becomes the flow's
    response, a `Delegate` points the flow at its target with credential headers removed, and a
    `Forward` goes upstream. The whole hook runs under one guard: if anything raises, the flow gets
@@ -89,7 +91,7 @@ order, and holds this table to its own. It also holds that `mitmproxy` is import
 | 2 | `config/`, `sdk/` | `paths`, `files`, `ca`; `sdk/`'s private modules | Side by side: `config` is irimi's state on this machine (paths, owner-only files, the CA); `sdk` is what an agent imports, its surface `irimi.sdk.__all__`, its imports held by `tests/sdk/test_surface.py`. |
 | 3 | `servicemaps/` | `model`, `rules`, `loader`, `__init__`, `classify` | The service maps as code: dataclasses and matching, load-time rules (the scope rule), the loader, and classification. |
 | 4 | `services/` | `model`, `generic`, `stripe/`, `slack/`, `__init__` | What irimi knows about each service: one `Service` spec each in `REGISTRY`, the generic echo and fixture answers, each service's answers, effects and checks. |
-| 5 | `record/` | `redact`, `store/` | What a run leaves on disk: the redacted copy of each event, and the store that writes and reads it. |
+| 5 | `record/` | `redact`, `store/` | What a run leaves on disk: the redacted copy of each event, and the store that writes and reads it. `redact` also says what a line printed live shows of a request's path. |
 | 6 | `decide/` | `targets`, `reader`, `writelog`, `idempotency`, `preconditions`, `overlay`, `policy` | How irimi answers: targets, irimi's check read, each run's write log, retries, the precondition check, the overlay and the policy. |
 | 7 | `engine/` | `__init__`, `wire`, `ingress`, `decoding`, `capture`, `control`, `session`, `mitm` | The proxy: the `Engine` protocol, stamping, admission, bounded decoding, stream capture, the control endpoint, `ShadowSession`, and `MitmEngine`. |
 | 8 | `report/` | `terminal`, `model`, `summary`, `runs`, `maps` | Everything a run prints, as pure functions: banner and stream lines, the summary model and its rendering, the stored-run listings, `irimi maps list`. |
@@ -112,7 +114,7 @@ The interfaces a test or another mode substitutes. Each is a `Protocol`.
 | Seam | What it does | Implementations |
 | --- | --- | --- |
 | `engine.Engine` | run, shut down, wait for the listener, report its port | `MitmEngine`; the CLI never touches mitmproxy |
-| `decide.policy.AnswerPolicy` | decide one request: `Forward`, `Delegate` or `Respond`; synchronous, called on a worker thread | `ShadowPolicy`, `replay.policy.ReplayPolicy` |
+| `decide.policy.AnswerPolicy` | decide one request: `Forward`, `Delegate` or `Respond`; synchronous, called on a worker thread; raises `DecisionFailed` with any read it made | `ShadowPolicy`, `replay.policy.ReplayPolicy` |
 | `decide.overlay.Overlay` | apply a run's faked writes to a live read, and translate a read before it is forwarded; pure | `ServiceOverlay`; `NoOverlay` for tests |
 | `decide.reader.Reader` | make irimi's check read | `UpstreamReader`, `NoReader` (no check), `replay.index.RecordingReader` |
 | `record.store.RunStore` | take run starts, exchanges, tool calls and run ends; never raises or blocks | `DirectoryStore`; `NullStore` in `tests/support` |

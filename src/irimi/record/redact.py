@@ -8,7 +8,8 @@ Guarantees:
   The key is per install, so a recording does not match on another machine.
 - Fails closed: a value that cannot be redacted is stored as `<redaction-failed>` and the exchange
   is flagged `redaction-failed`. No public function raises.
-- `is_credential_header` also says which headers a target may not receive.
+- `is_credential_header` also says which headers a target may not receive, and `stored_path`
+  what a line irimi prints shows of a path.
 """
 
 import hmac
@@ -62,6 +63,7 @@ CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", 
 KEY_BYTES = 32
 
 REDACTION_FAILED = "<redaction-failed>"
+_PATH_FAILED = "/" + REDACTION_FAILED
 
 # Names whose value is a secret as a query parameter, a form field's last bracket segment
 # (`card[token]`) or a JSON key at any depth. Matched whole, so `max_tokens` is not one.
@@ -197,6 +199,15 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     )
 
 
+def stored_path(request: Request, key: bytes) -> str:
+    """Return the request's path as `redact_request` stores it, for printing. Never raises."""
+    try:
+        return _redact_path(request.host, request.path, key)
+    except Exception:
+        # Not logged: the store warns when it fails on the same path.
+        return _PATH_FAILED
+
+
 def redact_request(request: Request, key: bytes) -> Request:
     """Return `request` as `redact_exchange` stores it, for replay matching. Never raises."""
     return _redact_request(request, key, _Guard(), _secret_path(request))
@@ -286,9 +297,7 @@ def _redact_request(
     return replace(
         request,
         path=guard(
-            "the request path",
-            "/" + REDACTION_FAILED,
-            partial(_redact_path, request.host, request.path, key),
+            "the request path", _PATH_FAILED, partial(_redact_path, request.host, request.path, key)
         ),
         query=guard("the query", REDACTION_FAILED, partial(_redact_urlencoded, request.query, key)),
         headers=_redact_headers(request.headers, key, guard, secret_path, is_response=False),
@@ -391,9 +400,19 @@ def _is_credential_path_host(host: str) -> bool:
     return host.lower().rstrip(".") in shipped_credential_hosts()
 
 
+def _is_credential_path(host: str, path: str) -> bool:
+    """Return True for a path on a credential-path host, or one that names such a host first.
+
+    A base-URL request irimi refuses is kept as it reached the listener: `/hooks.slack.com/...`."""
+    if _is_credential_path_host(host):
+        return True
+    named = path.removeprefix("/").partition("/")[0].partition(":")[0]
+    return _is_credential_path_host(named)
+
+
 def _secret_path(request: Request) -> str | None:
-    """Return a credential-path host's non-root path, a secret wherever it reappears, else None."""
-    if _is_credential_path_host(request.host) and request.path.strip("/"):
+    """Return a credential path that is not the root, a secret wherever it reappears, else None."""
+    if _is_credential_path(request.host, request.path) and request.path.strip("/"):
         return request.path
     return None
 
@@ -415,7 +434,7 @@ def _secret_path_swaps(secret_path: str | None, key: bytes) -> list[tuple[str, s
 
 def _redact_path(host: str, path: str, key: bytes) -> str:
     """Redact a path; on a credential-path host (`hooks.slack.com`) the whole path is the secret."""
-    if _is_credential_path_host(host):
+    if _is_credential_path(host, path):
         return _hidden_path(path, key)
     return _redact_text(path, key)
 
