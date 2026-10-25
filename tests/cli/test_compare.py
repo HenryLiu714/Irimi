@@ -820,15 +820,26 @@ def _best(a: list[compare.Action], b: list[compare.Action]) -> tuple[int, int, i
     return best(0, 0)
 
 
-def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_the_soonest():
-    """Property test against an exhaustive search over seeded random runs of few writes."""
+def _laid_out(rows: tuple[compare.Row, ...]) -> list[tuple[str, int, int]]:
+    return [(row.mark, id(row.a), id(row.b)) for row in rows]
+
+
+@pytest.mark.parametrize("amounts", [3, 20])
+def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_the_soonest(
+    monkeypatch, amounts
+):
+    """Property test against an exhaustive search over seeded random runs of few writes.
+
+    With many amounts most actions are made once, so the shared end is often paired before the
+    table; the rows are those the whole table lays out."""
     rng = random.Random(11)
 
     def action() -> compare.Action:
         key = (compare.EXCHANGE_KEY, "stripe", rng.choice(["refunds.create", "customers.update"]))
-        fields = (("body.amount", rng.choice(["1", "2", "3"])),)
+        fields = (("body.amount", str(rng.randrange(amounts))),)
         return compare.Action(key, "", cut=rng.random() < 0.1, fields=fields)
 
+    shared_end = compare._shared_end
     for _ in range(2000):
         a = [action() for _ in range(rng.randrange(9))]
         b = [action() for _ in range(rng.randrange(9))]
@@ -839,6 +850,9 @@ def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_th
         ]
         same = sum(row.mark == "same" for row in rows)
         assert (same, len(pairs), -sum(i + j for i, j in pairs)) == _best(a, b), (a, b)
+        monkeypatch.setattr(compare, "_shared_end", lambda a, b: 0)
+        assert _laid_out(rows) == _laid_out(compare.align(a, b)), (a, b)
+        monkeypatch.setattr(compare, "_shared_end", shared_end)
 
 
 def _refunded(amount: str) -> compare.Action:
@@ -887,10 +901,11 @@ def test_of_pairings_as_good_align_takes_the_soonest_pairs_so_a_repeat_is_the_ex
     ]
 
 
-def test_the_identical_actions_both_runs_start_with_pair_before_the_table_is_built(monkeypatch):
-    """Only what follows a shared start is scored, so a replay that matches its recording is cheap.
+@pytest.fixture
+def table_sizes(monkeypatch) -> list[tuple[int, int]]:
+    """Return the sizes of the runs each table `align` builds is scored over, as it builds them.
 
-    The table `align` scores pairings in costs the product of the two runs' lengths."""
+    The table costs the product of the two runs' lengths."""
     sizes: list[tuple[int, int]] = []
     steps = compare._steps
 
@@ -899,10 +914,35 @@ def test_the_identical_actions_both_runs_start_with_pair_before_the_table_is_bui
         return steps(a, b)
 
     monkeypatch.setattr(compare, "_steps", spy)
+    return sizes
+
+
+def test_the_identical_actions_both_runs_start_with_pair_before_the_table_is_built(table_sizes):
+    """Only what follows a shared start is scored, so a replay matching its recording is cheap."""
     shared = [_refunded("49") for _ in range(300)]
-    a, b = [*shared, _refunded("24")], [*shared, _tool_action("b"), _refunded("24")]
-    assert [row.mark for row in compare.align(a, b)] == ["same"] * 300 + ["only_b", "same"]
-    assert sizes == [(1, 2)]
+    a = [*shared, _refunded("24")]
+    b = [*shared, _tool_action("b"), _refunded("24"), _tool_action("b")]
+    marks = ["only_b", "same", "only_b"]
+    assert [row.mark for row in compare.align(a, b)] == ["same"] * 300 + marks
+    assert table_sizes == [(1, 3)]
+
+
+def test_the_identical_actions_made_once_both_runs_end_with_pair_before_the_table_too(table_sizes):
+    """A replay that differs at its first write and then matches its recording is cheap too.
+
+    An action at the end that either run also made earlier is scored, since the soonest pairing
+    may pair the earlier copy."""
+    shared = [_refunded(str(n)) for n in range(300)]
+    a, b = [_refunded("x"), *shared], [_tool_action("b"), *shared]
+    assert [row.mark for row in compare.align(a, b)] == ["only_a", "only_b"] + ["same"] * 300
+    assert table_sizes == [(1, 1)]
+    table_sizes.clear()
+    assert [row.mark for row in compare.align(shared, b)] == ["only_b"] + ["same"] * 300
+    assert table_sizes == [(0, 1)]
+    table_sizes.clear()
+    b = [_refunded("299"), *shared]
+    assert [row.mark for row in compare.align(a, b)] == ["changed"] + ["same"] * 300
+    assert table_sizes == [(301, 301)]
 
 
 def test_a_cut_pair_whose_lines_print_alike_though_they_differ_is_told_apart_too():

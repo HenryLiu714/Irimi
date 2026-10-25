@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -268,17 +269,19 @@ def _pairs(a: Sequence[Action], b: Sequence[Action]) -> list[tuple[int, int]]:
 
     One identical pair outweighs all the other pairs the runs could make, so a repeated action
     pairs with the copy that leaves its neighbours a pair. Of pairings as good, the one whose
-    pairs come soonest wins, so a repeat beside its copy is the extra one. Past the identical
-    actions both runs start with, the cost is the product of what is left of each, in time and
-    bytes."""
+    pairs come soonest wins, so a repeat beside its copy is the extra one. Between the identical
+    actions both runs start with and the ones `_shared_end` counts, the cost is the product of
+    what is left of each, in time and bytes."""
     # Every best pairing pairs the identical actions both runs start with.
     start = 0
     while start < min(len(a), len(b)) and a[start].data == b[start].data:
         start += 1
+    end = _shared_end(a[start:], b[start:])
+    stop_a, stop_b = len(a) - end, len(b) - end
     pairs = [(n, n) for n in range(start)]
-    steps = _steps(a[start:], b[start:])
+    steps = _steps(a[start:stop_a], b[start:stop_b])
     i = j = start
-    while i < len(a) and j < len(b):
+    while i < stop_a and j < stop_b:
         step = steps[i - start][j - start]
         if step == _PAIR:
             pairs.append((i, j))
@@ -287,7 +290,24 @@ def _pairs(a: Sequence[Action], b: Sequence[Action]) -> list[tuple[int, int]]:
             j += 1
         else:
             i += 1
-    return pairs
+    return [*pairs, *((stop_a + n, stop_b + n) for n in range(end))]
+
+
+def _shared_end(a: Sequence[Action], b: Sequence[Action]) -> int:
+    """Return how many identical actions both runs end with, each equal to no other action.
+
+    Every best pairing pairs such an action with its copy: either one's other partner, if it had
+    one, would not be identical. A repeated action ends the count, since the soonest pairing may
+    pair it with an earlier copy."""
+    data_a, data_b = [x.data for x in a], [y.data for y in b]
+    made = Counter([*data_a, *data_b])
+    end = 0
+    while end < min(len(a), len(b)):
+        data = data_a[-1 - end]
+        if data != data_b[-1 - end] or made[data] != 2:
+            break
+        end += 1
+    return end
 
 
 def _steps(a: Sequence[Action], b: Sequence[Action]) -> list[bytearray]:
