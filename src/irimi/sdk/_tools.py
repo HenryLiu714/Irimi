@@ -369,8 +369,9 @@ class _Call:
             if exc is None:
                 captured = _bounded(self.args, capture(result)[0])
             else:
-                raised = tool_error_info(exc)
-                error = replace(raised, args=_bounded(self.args, raised.args))
+                error = tool_error_info(exc)
+                if error.args is not None:  # none recorded stays absent, never the marker
+                    error = replace(error, args=_bounded(self.args, error.args))
             call = trace.ToolCall(
                 tool_call_id=trace.new_tool_call_id(),
                 run_id=self.run_id,

@@ -541,15 +541,20 @@ def _raising_on(body: bytes) -> Callable[..., Any]:
     return decode
 
 
-def test_an_exception_whose_args_cannot_be_read_is_recorded_without_them(posted):
+@pytest.mark.parametrize("full", [False, True], ids=["small-args", "args-at-the-budget"])
+def test_an_exception_whose_args_cannot_be_read_is_recorded_without_them(posted, full):
+    """No args stay absent, even beside call args that leave no room for the 4 bytes of null."""
+
     class Unreadable(Exception):
         @property
         def args(self) -> Any:  # type: ignore[override]
             raise RuntimeError("no args")
 
+    text = "x" * (limits.MAX_CAPTURED_BYTES - len(capture.serialized({"text": ""}))) if full else ""
     with pytest.raises(Unreadable):
-        _raising(Unreadable("x"))()
+        _raising(Unreadable("x"))(text)
     [(_, _, doc)] = posted.posts
+    assert doc["args"] == {"text": text}
     assert doc["error"] == {"type": f"{__name__}.{Unreadable.__qualname__}", "message": "x"}
 
 
