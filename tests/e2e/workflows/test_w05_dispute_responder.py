@@ -251,3 +251,39 @@ def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replay
         "  no divergence: every call was answered from the recording",
     ]
     assert replay.internet.requests() == []
+
+
+def test_a_replay_that_sends_the_recorded_client_secret_live_flags_its_placeholder(replayed):
+    """A replayed agent gets the intent's `client_secret` as its placeholder, never the secret.
+
+    With `CHECK_INTENT` it sends it back to retrieve the intent, a read the recording lacks, so the
+    read goes live with the placeholder, Stripe refuses it, and the replay flags and counts it."""
+    recorded, replay = replayed(W, "over_threshold", {"CHECK_INTENT": "1"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("dispute", 200, "recording"),
+        ("charge", 200, "recording"),
+        ("payment_intent", 200, "recording"),
+        ("intent_check", 400, None),
+        ("customer", 200, "recording"),
+        ("llm", 200, "recording"),
+        ("tag_customer", 200, "fake-L1"),
+        ("slack.com/api/chat.postMessage", 200, "fake-L1"),
+    ]
+    path = "/v1/payment_intents/pi_BIG"
+    hidden = redact.placeholder(redact.load_key(replay.home), client_secret("pi_BIG"))
+    handed, checked = (ex for ex in replay.reported if ex.request.path == path)
+    assert handed.response is not None and handed.flags == ("from-recording",)
+    assert json.loads(handed.response.body)["client_secret"] == hidden
+    assert (checked.answered_by, checked.flags) == ("live", ("replay-miss", "placeholder-sent"))
+    [sent] = replay.internet.requests()
+    assert (sent.method, sent.path, sent.query) == ("GET", path, {"client_secret": hidden})
+    assert [e["status"] for e in replay.events("intent_check")] == [400]
+    shown = f"real          read      GET api.stripe.com{path} -> 400"
+    assert replay.replay_result()[2:5] == [
+        f"  diverged at the agent's 4th call: {shown}  [replay-miss, placeholder-sent]",
+        "  7 from the recording · 1 missed",
+        "  1 request sent live carried a recorded secret's placeholder, not the secret "
+        "(placeholder-sent)",
+    ]
+    assert replay.exit_code == recorded.exit_code == 0

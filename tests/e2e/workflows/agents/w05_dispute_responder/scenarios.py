@@ -40,7 +40,9 @@ WORKFLOW = Workflow(
     scenarios={
         name: Scenario((name,), setup=_world, doc=doc)
         for name, doc in {
-            "over_threshold": "a $50 dispute: tag, alert, fight; no refund",
+            "over_threshold": "a $50 dispute: tag, alert, fight; no refund; replayed with "
+            "`CHECK_INTENT=1`, the agent sends the recorded `client_secret`'s placeholder to "
+            "Stripe, which refuses it",
             "under_threshold": "a $15 dispute: tag, alert, refund; the refund would have fired "
             "refund.created and charge.refunded",
             "cascade": "the refund's own charge.refunded delivered back: a second run, no writes",

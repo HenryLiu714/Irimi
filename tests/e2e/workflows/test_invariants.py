@@ -250,6 +250,7 @@ REPLAYS = [
     ("w01_ticket_triage", "checked_charge", {"PROMPT": "verify"}, False),
     ("w01_ticket_triage", "late_lookup", {"PROMPT": "verify"}, True),
     ("w02_nightly_reconcile", "refund_then_page", {}, True),
+    ("w05_dispute_responder", "over_threshold", {"CHECK_INTENT": "1"}, False),
     ("w06_crm_db_agent", "enrich", {"WORKFLOW_LOOKUP_REFUSED": "1"}, False),
     ("w07_streaming_assistant", "normal", {}, True),
     ("w07_streaming_assistant", "secret_in_stream", {}, True),
