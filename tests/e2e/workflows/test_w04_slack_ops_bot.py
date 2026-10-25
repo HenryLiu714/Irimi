@@ -5,8 +5,9 @@ Its calls carry no labels, so `Result.answered()` names each by host and path.
 
 import pytest
 
-from irimi.core.exchange import Exchange
+from irimi.core.exchange import Exchange, Flag
 from irimi.record import redact
+from tests.e2e.workflows.agents.w04_slack_ops_bot.scenarios import DOWN_TARGET
 from tests.e2e.workflows.harness.compare import compare, rows_not_shown
 from tests.e2e.workflows.harness.invariants import CANARIES, check_invariants
 
@@ -65,23 +66,61 @@ def test_a_mention_is_one_run_and_its_reply_is_read_back_through_the_overlay(run
     ]
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_the_incoming_webhooks_secret_path_is_printed_until_87_lands(run_workflow, mode):
-    shadow = run_workflow(W, "mention_in_thread", mode)
-    # The exchange line prints the webhook's secret path; this flips once it names the route.
-    # See #87.
-    assert (
-        f"faked         write     POST hooks.slack.com{WEBHOOK_PATH} -> 200"
-        in shadow.exchange_lines()
-    )
-    # The store hides it: the whole path is one placeholder.
+def stored_hook(result) -> Exchange:
+    """Return the one exchange `result` stored for the incoming webhook."""
     [hook] = [
         e
-        for e in shadow.stored_events()
+        for e in result.stored_events()
         if isinstance(e, Exchange) and e.request.host.startswith("hooks.")
     ]
+    return hook
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_the_incoming_webhooks_secret_path_prints_as_the_placeholder_it_is_stored_under(
+    run_workflow, mode
+):
+    shadow = run_workflow(W, "mention_in_thread", mode)
     placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)
+    assert (
+        f"faked         write     POST hooks.slack.com/{placeholder} -> 200"
+        in shadow.exchange_lines()
+    )
+    assert not any(WEBHOOK_PATH in line for line in shadow.irimi)
+    # The store hides it the same way: the whole path is one placeholder.
+    hook = stored_hook(shadow)
     assert (hook.request.path, hook.answered_by) == ("/" + placeholder, "fake-L0")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_webhook_whose_target_is_down_names_the_target_by_its_origin_alone(run_workflow, mode):
+    """The target is a bare origin, so the URL irimi could not reach ends in the secret path.
+
+    irimi answers the post 502, and the line, the summary, the warning and the store name the
+    target without it. The rest of the run is mention_in_thread's."""
+    shadow = run_workflow(W, "webhook_target_down", mode)
+    assert shadow.answered() == [
+        (url, 502, "irimi") if url.startswith("hooks.") else (url, status, answered_by)
+        for url, status, answered_by in MENTION_SHADOW
+    ]
+    placeholder = redact.placeholder(redact.load_key(shadow.home), WEBHOOK_PATH)
+    assert (
+        f"irimi         write     POST hooks.slack.com/{placeholder} -> 502  [target-failed]"
+        in shadow.exchange_lines()
+    )
+    unreached = f"could not reach target {DOWN_TARGET.removeprefix('http://')}"
+    assert f'  ✗ slack  post via webhook: "ops bot answered alice"  {unreached}' in (
+        shadow.summaries()
+    )
+    (warning,) = shadow.irimi_logs
+    assert warning.startswith(f"irimi: target {DOWN_TARGET!r} could not be reached: ")
+    hook = stored_hook(shadow)
+    assert (hook.request.path, hook.target, hook.flags) == (
+        "/" + placeholder,
+        f"{DOWN_TARGET}/{placeholder}",
+        (Flag.TARGET_FAILED,),
+    )
+    assert check_invariants(shadow, run_workflow(W, "webhook_target_down", "bare")) == []
 
 
 @pytest.mark.parametrize("mode", MODES)

@@ -61,6 +61,11 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   runs that 0.1.0 stored.
 - **Breaking:** a control-protocol client posting a tool call must send `awaited`. The SDK does;
   a client in another language must add it.
+- **Breaking:** a run id with a credential's shape, such as `sk_live_…`, is refused: the control
+  endpoint answers `400`, and an `Irimi-Run` header holding one is treated as absent. A run id
+  names a directory in the store, which redaction never sees. Choose ids with no such shape; the
+  SDK's, 16 hex characters, never have one. A run an older irimi stored under such an id is still
+  shown, and `irimi runs rm` deletes it.
 - **Breaking:** the CA `irimi init` generates is valid for 825 days, not ten years. A CA already
   generated keeps its dates; `irimi init --force` replaces it.
 - In serve mode, each run has its own write log, dropped when the run ends: one run's reads and
@@ -117,6 +122,12 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 
 ### Fixed
 
+- A Slack incoming webhook's secret path is no longer printed. The line irimi prints per exchange,
+  and the summary, show a request's path as the store keeps it, the placeholder `irimi runs show`
+  prints, and irimi's errors and warnings about a target name it by its origin,
+  `target 'http://127.0.0.1:9' could not be reached`, not by the URL that holds the path. A
+  base-URL request to the webhook that irimi refuses (`/hooks.slack.com:99999/services/...`) is
+  stored and printed with its whole path hidden too.
 - `irimi runs show unattributed` on a store with no unattributed events says so, instead of
   printing an invented run.
 - A run's or tool's name, a captured repr and a posted error are cut outside any secret they

@@ -470,7 +470,7 @@ def _probe_target(target: Target) -> None:
         socket.create_connection((target.host, target.port), TARGET_PROBE_TIMEOUT_S).close()
     except OSError as exc:
         raise targets.TargetUnreachable(
-            f"target {target.url!r} could not be reached: {exc}"
+            f"target {target.origin!r} could not be reached: {exc}"
         ) from None
 
 
@@ -487,5 +487,5 @@ def _target_refusal(
     except targets.TargetRefused as exc:
         return exc
     except Exception as exc:
-        return targets.TargetRefused(f"target {forward.url!r} could not be applied: {exc}")
+        return targets.not_applied(forward.target, exc)
     return None

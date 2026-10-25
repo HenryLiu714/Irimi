@@ -21,6 +21,7 @@ from urllib.parse import urlencode, urlsplit
 from irimi.protocol.env import CONTROL_ENV, RUN_ENV
 from tests.e2e.workflows.agents import agentkit
 from tests.e2e.workflows.agents.agentkit import Response, base, http, slack, stripe
+from tests.e2e.workflows.agents.credentials import RUN_ID_KEY
 
 CHARGE = "ch_GAUNTLET"
 CUSTOMER = "cus_GAUNTLET"
@@ -114,7 +115,9 @@ def big_reads() -> None:
 
 
 def headers() -> None:
-    """Send irimi's own headers from the agent; both must be stripped before anything leaves."""
+    """Send irimi's own headers from the agent; both must be stripped before anything leaves.
+
+    Neither run id names a run: one is a path, and one has a key's shape."""
     stripe(
         "GET",
         f"/v1/refunds?charge={CHARGE}",
@@ -122,6 +125,7 @@ def headers() -> None:
         label="forged_rewrote",
     )
     stripe("GET", f"/v1/charges/{CHARGE}", headers={"Irimi-Run": "../../etc"}, label="bad_run_id")
+    stripe("GET", f"/v1/charges/{CHARGE}", headers={"Irimi-Run": RUN_ID_KEY}, label="key_run_id")
 
 
 def self_addressed() -> None:
@@ -148,6 +152,8 @@ def self_addressed() -> None:
 # The host `base_url_hosts` names with `--base-url-host`, and one no map or flag names.
 ALLOWED_BASE_URL_HOST = "billing.example.test"
 REFUSED_BASE_URL_HOST = "ledger.example.test"
+# A credential-path host: its webhook's path is the secret, refused here before any rewrite.
+WEBHOOK_HOST = "hooks.slack.com"
 
 
 def base_url_hosts() -> None:
@@ -155,9 +161,11 @@ def base_url_hosts() -> None:
 
     A write to a host `--base-url-host` names is relayed and faked. Every other one is answered by
     irimi itself, 403 with its JSON error: a host no map or flag names, a path that names no host
-    or an empty one, and a port that is no port. Each answer's body is logged, so a test reads
-    what irimi said."""
+    or an empty one, and a port that is no port, once on Slack's incoming webhook, whose path is
+    its secret and is echoed in a header. Each answer's body is logged, so a test reads what irimi
+    said."""
     listener = f"http://127.0.0.1:{urlsplit(agentkit.proxy() or '').port}"
+    webhook = agentkit.key("SLACK_WEBHOOK_PATH")
     calls = (
         ("POST", f"/{ALLOWED_BASE_URL_HOST}/v1/invoices", "allowed_post"),
         ("POST", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown_host_post"),
@@ -165,10 +173,12 @@ def base_url_hosts() -> None:
         ("POST", "/", "no_host_post"),
         ("POST", "//v1/entries", "empty_host_post"),
         ("POST", f"/{ALLOWED_BASE_URL_HOST}:99999/v1/invoices", "bad_port_post"),
+        ("POST", f"/{WEBHOOK_HOST}:99999{webhook}", "webhook_bad_port_post"),
     )
     for method, path, label in calls:
         form = {"amount": "700"} if method == "POST" else None
-        resp = http(method, listener + path, form=form, label=label)
+        note = {"x-note": f"sent as {path}"} if path.startswith(f"/{WEBHOOK_HOST}") else None
+        resp = http(method, listener + path, form=form, headers=note, label=label)
         agentkit.obs("answer", label=label, status=resp.status, body=resp.json())
     _head_then_get(listener)
 
@@ -437,6 +447,7 @@ def _refusals(control: str) -> None:
         ("refuse_get", "GET", "/runs/ctl-refused-get/start", None, None),
         ("refuse_route", "POST", "/runs/ctl-refused-route/nope", ended, None),
         ("refuse_dotdot", "POST", "/runs/../x/start", started, None),
+        ("refuse_key_shaped", "POST", f"/runs/{RUN_ID_KEY}/start", _start_doc("key"), None),
         ("refuse_unattributed", "POST", "/runs/unattributed/end", ended, None),
         ("refuse_nan", "POST", "/runs/ctl-refused-nan/end", {**ended, "ended_at": math.nan}, None),
         ("refuse_missing", "POST", "/runs/ctl-refused-missing/start", started, None),

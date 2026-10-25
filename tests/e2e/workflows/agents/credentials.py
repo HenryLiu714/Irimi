@@ -19,6 +19,11 @@ LONG_ERROR_KEY = "sk_live_" + "CANARYlongerror" + "0" * 4000
 CLIENT_SECRET = "CANARY" + "clientsecret000000000000"
 BOMB_SECRET = "CANARY" + "bombsecret00000000000000"
 
+# A run id with a live key's shape, which W9's agent sends as `Irimi-Run` and in a control path. A
+# run id names a directory, and redaction never sees a name. `rk_` keeps its first 12 characters
+# apart from LONG_ERROR_KEY's.
+RUN_ID_KEY = "rk_live_" + "CANARYrunid" + "0" * 16
+
 # A live key W7's user pastes into a question, which the stream must carry redacted.
 STREAM_SECRET = "sk_live_" + "CANARYstreamsecret0000000000"
 

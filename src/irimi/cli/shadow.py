@@ -184,9 +184,10 @@ def run_child(
     ran = ChildResult(exitcodes.SIGINT, status="interrupted")
 
     def on_exchange(ex: Exchange) -> None:
-        ran.events.append(for_summary(ex))
+        shown = terminal.with_stored_path(ex, run.key)
+        ran.events.append(for_summary(shown))
         if not args.quiet:
-            print(terminal.exchange_line(ex), flush=True)
+            print(terminal.exchange_line(shown), flush=True)
 
     def on_tool_call(call: ToolCall) -> None:
         # Runs on the proxy's event loop. The line never shows args or results, which would

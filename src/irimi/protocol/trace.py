@@ -36,7 +36,7 @@ from irimi.core.exchange import (
     Response,
 )
 from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_POSTED_MESSAGE, MAX_POSTED_TYPE
-from irimi.core.secret_shapes import cut_marking_secrets
+from irimi.core.secret_shapes import SECRET_SHAPE, cut_marking_secrets
 
 # On-disk trace format version, written to each run.json. Bump it when a closed vocabulary gains a
 # value or a field changes meaning; a new optional field that decodes to its default needs no bump.
@@ -47,7 +47,7 @@ SCHEMA_VERSION = 3
 UNATTRIBUTED = "unattributed"
 
 # A run id becomes a directory name, so this is the path-traversal guard. Test with
-# `is_valid_run_id` (`fullmatch`): `.match` lets `$` accept a trailing newline.
+# `is_stored_run_id` (`fullmatch`): `.match` lets `$` accept a trailing newline.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # A `BodyRef` read from disk is checked against this before it is joined onto a blob path.
@@ -76,7 +76,20 @@ def mode_for(replay_of: str | None) -> Mode:
 
 
 def is_valid_run_id(run_id: str) -> bool:
-    """Return True when `run_id` may name a run, and so a directory."""
+    """Return True when `run_id` may name a new run, and so a directory.
+
+    Not one with a secret's shape: redaction never sees a directory name, so a key would reach
+    disk whole.
+    """
+    return is_stored_run_id(run_id) and SECRET_SHAPE.search(run_id) is None
+
+
+def is_stored_run_id(run_id: str) -> bool:
+    """Return True when a stored run may be named `run_id`: it is safe to join onto `runs/`.
+
+    Looser than `is_valid_run_id`, so a run an older irimi stored under a key is still read and
+    can be deleted.
+    """
     return RUN_ID_PATTERN.fullmatch(run_id) is not None
 
 
@@ -758,9 +771,9 @@ def read_str(d: Mapping[str, Any], key: str) -> str:
 
 
 def _run_id(d: Mapping[str, Any], key: str) -> str:
-    """Return a run id that names another run (`replay_of`), held to `is_valid_run_id`."""
+    """Return a run id that names another run (`replay_of`), held to `is_stored_run_id`."""
     value = read_str(d, key)
-    if not is_valid_run_id(value):
+    if not is_stored_run_id(value):
         raise TraceFormatError(f"{key!r} is not a run id ({len(value)} characters)")
     return value
 

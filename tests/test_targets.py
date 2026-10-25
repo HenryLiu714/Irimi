@@ -125,10 +125,11 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
             assert forward is None, f"an unmatched {kind} request was delegated"
 
 
-def test_a_credential_path_host_is_never_delegated_off_the_machine():
+def test_a_credential_path_host_is_never_delegated_off_the_machine(caplog):
     """A credential-path host is never sent to an off-machine target (the scope rule, at decision).
 
-    The loader refuses this map, so it is built by hand to test `resolve` itself."""
+    The loader refuses this map, so it is built by hand to test `resolve` itself. The error names
+    the host and the target, never the path, which is the secret."""
     slack = next(sm for sm in servicemaps.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target=Target.parse("http://stub.internal:9000"))
@@ -138,6 +139,10 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
         request = make_request("POST", host="hooks.slack.com", path=path)
         forward = targets.resolve(request, classify(request, index))
         assert forward is None, f"{path} was delegated to {forward and forward.url}"
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("irimi")] == [
+        "irimi: refusing to send a request on hooks.slack.com to target http://stub.internal:9000: "
+        "every path on that host is a credential, so its target must be loopback"
+    ] * 3
 
     # The same service's other hosts are not credential-path hosts, so they still delegate.
     request = make_request("POST", host="slack.com", path="/api/chat.postMessage")

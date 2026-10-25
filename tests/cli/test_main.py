@@ -34,7 +34,8 @@ def test_shadow_mode_is_never_built_without_a_reader(tmp_path, monkeypatch):
     index = servicemaps.MapIndex(tuple(servicemaps.loader.load_shipped()))
     args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
+    config = compose._engine_config(args, index, "t3st", p)
+    run = compose.Run(index, p, "t3st", config, NullStore(), b"k" * 32)
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine, MitmEngine)
     assert isinstance(engine.policy, ShadowPolicy)
@@ -280,7 +281,8 @@ def test_the_composition_root_builds_the_service_overlay_and_records_into_the_ru
     index = _shipped_index()
     args = argparse.Namespace(base_url_host=[], port=4321, bind=options.LISTEN_HOST)
     p = ca.ca_paths()
-    run = compose.Run(index, p, "t3st", compose._engine_config(args, index, "t3st", p), NullStore())
+    config = compose._engine_config(args, index, "t3st", p)
+    run = compose.Run(index, p, "t3st", config, NullStore(), b"k" * 32)
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine, MitmEngine)
     assert isinstance(engine.overlay, ServiceOverlay)
@@ -304,9 +306,8 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     p = ca.ca_paths()
     config = compose._engine_config(args, index, "t3st", p)
     recording = ReplayIndex.from_events([], b"k" * 32, index)
-    run = compose.Run(
-        index, p, "t3st", replace(config, mode=Replay("rec1")), NullStore(), None, recording
-    )
+    replaying = replace(config, mode=Replay("rec1"))
+    run = compose.Run(index, p, "t3st", replaying, NullStore(), b"k" * 32, recording=recording)
     engine = compose.build_engine(run, on_exchange=lambda ex: None)
     assert isinstance(engine, MitmEngine)
     assert isinstance(engine.policy, ReplayPolicy)
@@ -314,7 +315,7 @@ def test_the_composition_root_builds_a_replay_policy_over_the_run_s_recording():
     assert engine.policy.maps is index
     assert isinstance(engine.policy.shadow.reader, RecordingReader)
     shadow = compose.build_engine(
-        compose.Run(index, p, "t3st", config, NullStore()), lambda ex: None
+        compose.Run(index, p, "t3st", config, NullStore(), b"k" * 32), lambda ex: None
     )
     assert isinstance(shadow, MitmEngine)
     assert isinstance(shadow.policy, ShadowPolicy)

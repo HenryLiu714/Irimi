@@ -65,6 +65,14 @@ NO_POST_FIXTURE_MAP = (
     .replace("fixture: message", "fixture: no_such_message")
 )
 
+# The incoming webhook's route sent to a target nothing listens on (the discard port). The target
+# is a bare origin, so the URL irimi could not reach ends in the webhook's secret path.
+DOWN_TARGET = "http://127.0.0.1:9"
+WEBHOOK_TARGET_DOWN = (
+    "--target",
+    f"hooks.slack.com/services/{{team}}/{{bot}}/{{token}}={DOWN_TARGET}",
+)
+
 
 WORKFLOW = Workflow(
     name="w04_slack_ops_bot",
@@ -127,6 +135,14 @@ WORKFLOW = Workflow(
             setup=_answering(TYPED_ESCAPE),
             doc="typed_escape_answer, then two_line_answer's text as a follow-up in the same run: "
             "beside two_line_answer, one post both made and one that prints alike only B made",
+        ),
+        "webhook_target_down": Scenario(
+            ("mention_in_thread",),
+            setup=_workspace,
+            shadow_flags=WEBHOOK_TARGET_DOWN,
+            serve_flags=WEBHOOK_TARGET_DOWN,
+            doc="mention_in_thread with the webhook sent to a target nothing listens on: irimi "
+            "answers 502, and names the target without the webhook's secret path",
         ),
         "duplicate_delivery": Scenario(
             ("duplicate_delivery",),
