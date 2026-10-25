@@ -80,7 +80,10 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - **Redacted values stay redacted.** A recorded secret comes back as its placeholder, and a
   request sent live with it fails as a wrong credential would. irimi flags it `placeholder-sent`
   when the placeholder is written as is, URL-encoded or JSON-escaped, not inside a Basic
-  credential's base64 or another encoding, and not when a tool sends it outside the proxy.
+  credential's base64 or another encoding, and not when a tool sends it outside the proxy. A
+  placeholder sent back in a field redaction hides whole (`client_secret`, `access_token` and the
+  like) is stored as a placeholder of its own, so that request misses even where the recording
+  made it, and goes live.
 - **One run, one store.** The run replayed and its replay share one store, serve mode cannot
   replay, and each `irimi replay` replays one run.
 - **Compare sees writes, not reads.** Two writes made at once can finish in either order, so a run
