@@ -20,7 +20,7 @@ from tests.e2e.workflows.agents.w06_crm_db_agent.agent import (
     DriverOptions,
 )
 from tests.e2e.workflows.agents.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
-from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.compare import SENT_ALIKE, compare, rows_not_shown
 from tests.e2e.workflows.harness.invariants import CANARIES, check_invariants
 
 W = "w06_crm_db_agent"
@@ -790,3 +790,34 @@ def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed
         (c.name, c.args, c.result) for c in recorded_calls
     ]
     assert replay.returned() == recorded.returned()
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_merge_once_replayed_alone_says_its_merge_sent_the_same_and_only_raised_otherwise(
+    replayed, mode
+):
+    """Called alone, the trigger finds no accounts table, so the merge's fake raises.
+
+    The agent made the recorded call with the recorded args, so `irimi replay` says the two merges
+    sent the same and names what their fakes did, rather than reading as a change the agent made.
+    The recording ran under shadow or serve."""
+    recorded, replay = replayed(W, "merge_once", mode=mode)
+    assert check_invariants(replay) == []
+    assert (recorded.exit_code, replay.agent_exit_code(), replay.exit_code) == (0, 1, 1)
+    [merge] = replayed_calls(replay)
+    assert (merge.name, merge.args) == ("crm.merge_accounts", {"keep": "acc_1", "drop": "acc_2"})
+    assert merge.error == ErrorInfo("sqlite3.OperationalError", "no such table: accounts")
+    source = recorded.one("run.start")["run"]
+    assert replay.replay_result() == [
+        f"irimi replay · {source} -> {replay.process_run_id()}",
+        "  agent exited 1",
+        "  no divergence: every call was answered from the recording",
+        "  0 from the recording · 0 missed",
+        "",
+        "  ~ A ○ tool  crm.merge_accounts  fake ran instead",
+        "    B ○ tool  crm.merge_accounts  fake raised sqlite3.OperationalError",
+        SENT_ALIKE,
+        '      raised: (absent) -> "sqlite3.OperationalError"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
