@@ -145,7 +145,8 @@ def prepare_run(
     keys = idempotency.Store()
 
     def ended(run_id: str, last_seq: int | None, late: bool) -> None:
-        # An ended run's writes and keys are never read again.
+        # An ended run's writes and keys are never read again. A late call ends them for a run an
+        # earlier process ended, which this one did not know had ended.
         write_log.end_run(run_id)
         keys.end_run(run_id)
         if on_run_ended is not None:
