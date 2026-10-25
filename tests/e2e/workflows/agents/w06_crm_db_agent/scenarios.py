@@ -89,6 +89,12 @@ WORKFLOW = Workflow(
             "whose class is in a module its body imports, so a replay cannot rebuild it before "
             "the body runs again; the agent reads again after it",
         ),
+        "lazy_profile_async": Scenario(
+            ("lazy_profile_async",),
+            setup=_enrichment,
+            doc="lazy_profile with an async read tool, whose replay asks the recording, and gives "
+            "back the answer it cannot rebuild, in a worker thread off the event loop",
+        ),
         "outside_run": Scenario(
             ("outside_run",),
             doc="tools called before the trigger, in no run: recorded in the process run "

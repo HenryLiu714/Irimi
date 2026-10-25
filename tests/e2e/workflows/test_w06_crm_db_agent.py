@@ -52,6 +52,11 @@ LAZY_PROFILE_REPLAYED = [
     "[unclassified, from-recording]",
     "recorded      read      GET enrich.internal/v1/companies/acc_2 -> 200  [from-recording]",
 ]
+# The profile `lazy_profile_async`'s tool stores, which it and `lazy_profile`'s print alike.
+LAZY_PROFILE_STORED = {
+    "__irimi_type__": "tests.e2e.workflows.agents.w06_crm_db_agent.profiles:Profile",
+    "value": {"id": "acc_1", "industry": "manufacturing", "views": None},
+}
 # The seeded `smb` accounts, as `find_accounts` returns them.
 SEED_SMB = [
     {
@@ -633,6 +638,32 @@ def test_a_read_tool_s_result_is_stored_by_its_class_and_its_http_as_the_run_s(r
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_an_async_read_tool_s_result_is_stored_by_its_class_and_its_http_as_the_run_s(
+    run_workflow, mode
+):
+    """The async profile tool is stored and printed as the sync one is; its HTTP is the run's.
+
+    Bare, the view's POST reaches the fake service; under irimi it is faked."""
+    shadow = run_workflow(W, "lazy_profile_async", mode)
+    bare = run_workflow(W, "lazy_profile_async", "bare")
+    assert shadow.exchange_lines() == LAZY_PROFILE_LINES
+    assert shadow.tool_call_lines() == ["tool-real     read      crm.account_profile_async -> ok"]
+    [run] = shadow.sdk_runs()
+    [call] = [e for e in shadow.stored().load_run(run.run_id).events if isinstance(e, ToolCall)]
+    assert (call.name, call.ran, call.awaited) == ("crm.account_profile_async", "real", False)
+    assert call.result == LAZY_PROFILE_STORED
+    assert shadow.returned() == {
+        "profile": ["Profile", "acc_1", "manufacturing", None],
+        "after": {"id": "acc_2", "industry": "manufacturing"},
+    }
+    assert bare.result(with_time=False)["profile"] == ["Profile", "acc_1", "manufacturing", 1]
+    assert [f"{r.method} {r.path}" for r in bare.internet.writes()] == [
+        "POST /v1/companies/acc_1/views"
+    ]
+    assert shadow.internet.writes() == []
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_a_sync_tool_that_returns_a_coroutine_is_recorded_when_the_coroutine_ends(
     run_workflow, mode
 ):
@@ -947,6 +978,36 @@ def test_a_read_tool_whose_result_cannot_be_rebuilt_runs_again_answered_by_the_r
     assert replay.replay_result()[1:4] == [
         "  agent exited 0",
         "  diverged at the agent's 3rd call: tool-real     read      crm.account_profile -> ok",
+        "  3 from the recording · 1 missed",
+    ]
+
+
+def test_an_async_read_tool_whose_result_cannot_be_rebuilt_runs_again_answered_by_the_recording(
+    replayed,
+):
+    """An async read tool whose result cannot be rebuilt gives the answer back from its thread.
+
+    The lookup runs in a worker thread off the event loop, which gives back the answer it cannot
+    rebuild before the body runs: the body's read and write and the agent's read after them are
+    answered from the recording."""
+    recorded, replay = replayed(W, "lazy_profile_async")
+    assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
+    assert replay.tools() == [("crm.account_profile_async", "real")]
+    [call] = replayed_calls(replay)
+    assert (call.name, call.ran, call.result) == (
+        "crm.account_profile_async",
+        "real",
+        LAZY_PROFILE_STORED,
+    )
+    assert replay.exchange_lines() == LAZY_PROFILE_REPLAYED
+    assert replay.internet.requests() == []
+    assert replay.returned() == recorded.returned()
+    assert not [ex for ex in replay.reported if Flag.REPLAY_MISS in ex.flags]
+    # The tool, run for real, is the one miss; its three requests are answered.
+    assert replay.replay_result()[1:4] == [
+        "  agent exited 0",
+        "  diverged at the agent's 3rd call: tool-real     read      crm.account_profile_async "
+        "-> ok",
         "  3 from the recording · 1 missed",
     ]
 

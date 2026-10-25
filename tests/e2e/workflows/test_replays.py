@@ -220,6 +220,7 @@ _NOT_IMPORTED = "its recorded result's class is in a module its body imports, no
 TOOLS_RUN_FOR_REAL: dict[tuple[str, str], dict[str, str]] = {
     (W6, "enrich"): {"crm.score_account": _NOT_REVIVED},
     (W6, "lazy_profile"): {"crm.account_profile": _NOT_IMPORTED},
+    (W6, "lazy_profile_async"): {"crm.account_profile_async": _NOT_IMPORTED},
 }
 
 
