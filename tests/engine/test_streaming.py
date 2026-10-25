@@ -19,7 +19,13 @@ from tests.support.engine import (
 )
 from tests.support.maps import READ_STREAM_MAP, STREAM_MAP, map_index
 from tests.support.servers import stop_server
-from tests.support.upstreams import SSE_FIRST, SSE_SECOND, StreamUpstream, serve
+from tests.support.upstreams import (
+    SSE_FIRST,
+    SSE_SECOND,
+    StreamUpstream,
+    refusing_port,
+    serve,
+)
 
 # STREAM_MAP's route as a read: `style: rpc` lets a POST be one.
 RPC_READ_STREAM_MAP = STREAM_MAP.replace("hosts:", "style: rpc\nhosts:").replace(
@@ -218,6 +224,26 @@ def test_a_streamed_read_that_breaks_is_recorded_partial_when_it_would_show_a_wr
     assert (ex.kind, ex.answered_by, ex.overlay) == ("read", "live", recorded)
     assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
     assert ex.response is not None and ex.response.body == THREE_CHUNKS[0]
+
+
+def test_a_read_that_gets_no_answer_after_a_faked_write_is_not_judged(tmp_path, monkeypatch):
+    """A read whose upstream refuses the connection has no answer to judge: its overlay is null."""
+    port = refusing_port()
+    cfg = engine_config(
+        tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, READ_STREAM_MAP)
+    )
+    overlay = _RewritingOverlay("full")
+    eng, seen, stop = start_engine(cfg, overlay=overlay)
+    try:
+        via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{port}/w", body=b"{}")
+        via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{port}/v1/chat/completions")
+    finally:
+        stop()
+    assert overlay.shown == []
+    write, ex = seen
+    assert write.answered_by.startswith("fake-")
+    assert (ex.kind, ex.answered_by, ex.overlay, ex.response) == ("read", "live", None, None)
+    assert ex.flags == (Flag.UPSTREAM_ERROR,)
 
 
 def test_an_llm_stream_after_a_faked_write_is_never_shown_to_the_overlay(tmp_path, monkeypatch):
