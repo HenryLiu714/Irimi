@@ -173,7 +173,7 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
         raise CliError(str(exc), exitcodes.ERROR) from None
     run = compose.load_stored_run(root, run_id)
     # The unattributed pool is not a run: with nothing in it there is no record to show.
-    if run_id == UNATTRIBUTED and not run.events:
+    if run_id == UNATTRIBUTED and not run.events and not run.cut_tail:
         print(f"no unattributed events in {root}")
         return exitcodes.OK
     for line in runs.run_show_lines(run, compose.maps_for_stored_runs()):

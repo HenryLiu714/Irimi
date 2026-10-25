@@ -647,6 +647,29 @@ def test_runs_show_unattributed_reads_the_events_no_run_claimed(home, capfd):
     assert "irimi shadow · run unattributed · 1 exchange · 0.0s" in lines
 
 
+def test_runs_show_unattributed_holding_only_a_cut_off_line_says_so_not_that_it_is_empty(
+    home, capfd
+):
+    (home / "store" / "unattributed").mkdir(parents=True)
+    (home / "store" / "unattributed" / "events.jsonl").write_text('{"seq": 1, "ty')
+    """A pool whose one line was cut off is not empty: `runs show` says what it skipped."""
+    assert main(["runs", "show", "unattributed"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        "run: unattributed",
+        "attribution: header",
+        "trigger: -",
+        "entrypoint: -",
+        "args: -",
+        "agent version: -",
+        "outcome: incomplete",
+        "last event: cut off when stored, not shown",
+        "",
+        "irimi shadow · run unattributed · 0 exchanges · 0.0s",
+        "",
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
+    ]
+
+
 def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, capfd):
     """With broken maps, `runs show` prints writes as requests, warns once and succeeds."""
     _hand_built_incomplete_run(home / "store", redact.load_key(home))
