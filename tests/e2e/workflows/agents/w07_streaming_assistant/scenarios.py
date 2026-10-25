@@ -36,6 +36,11 @@ _RULES = " ".join(f"Rule {i}: a refund goes back to the card it came from." for 
 LONG_ANSWER = f"{_RULES[:8000]} The test key is {SECRET}. {_RULES[8000:]}"
 # How many characters of text each `text_delta` of that answer carries.
 LONG_DELTA = 256
+# `secret_after_escapes`: each model's answer in the pieces it streams it in. Each sends the key
+# right after an escape the shape rule reads as a separator, and sends that escape in the piece
+# before: Anthropic a `%20` cut after its `%`, OpenAI a letter its JSON spells `\u0041`.
+ESCAPES_ANSWER = ["The test key is %", f"20{SECRET}", ". Keep it out of logs."]
+ESCAPES_DECISION = ["No summary: A", SECRET[:9], f"{SECRET[9:]} stays private."]
 # How many bytes of a gzip stream `GzipLLM` writes at a time: several writes for one short stream.
 GZIP_CHUNK = 64
 # How many bytes of a gzip stream `BombingLLM` writes at a time.
@@ -58,6 +63,12 @@ def secret_script(call: LlmCall) -> LlmTurn:
     if call.provider == "openai":
         return LlmTurn(text=SECRET_DECISION)
     return chat_script(call)
+
+
+def escapes_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "openai":
+        return LlmTurn(text="".join(ESCAPES_DECISION))
+    return LlmTurn(text="".join(ESCAPES_ANSWER))
 
 
 def summarize_script(call: LlmCall) -> LlmTurn:
@@ -193,6 +204,43 @@ class MultiLineDataLLM(ScriptedLLM):
         return resp
 
 
+class EscapedPiecesLLM(ScriptedLLM):
+    """Streams each model's answer in the pieces `ESCAPES_ANSWER` and `ESCAPES_DECISION` name.
+
+    OpenAI's first piece spells its last letter as a JSON escape, as a server may spell any."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        events = [chunk for chunk in resp.chunks if b'"text_delta"' not in chunk]
+        deltas = [
+            _event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": piece},
+                },
+            )
+            for piece in ESCAPES_ANSWER
+        ]
+        resp.chunks = [*events[:2], *deltas, *events[2:]]
+        return resp
+
+    def _openai(self, body: dict[str, Any]) -> Resp:
+        resp = super()._openai(body)
+        if resp.chunks is None:
+            return resp
+        deltas = [
+            _sse({"choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]})
+            for piece in ESCAPES_DECISION
+        ]
+        deltas[0] = deltas[0].replace(b'A"', b'\\u0041"')
+        resp.chunks = [*deltas, *(chunk for chunk in resp.chunks if b'"content"' not in chunk)]
+        return resp
+
+
 class LockstepLLM(ScriptedLLM):
     """Holds each provider's two calls until both arrive, so the two streams interleave."""
 
@@ -308,6 +356,10 @@ def _multi_line(world: World) -> None:
     world.llm = MultiLineDataLLM(chat_script)
 
 
+def _escapes(world: World) -> None:
+    world.llm = EscapedPiecesLLM(escapes_script)
+
+
 def _lockstep(world: World) -> None:
     world.llm = LockstepLLM(pair_script)
 
@@ -382,6 +434,13 @@ WORKFLOW = Workflow(
             doc="Anthropic's first event spreads its JSON over several `data:` lines, a "
             "`client_secret` on one of them and a key after an escaped letter on another: the "
             "agent joins them, irimi stores the placeholders",
+        ),
+        "secret_after_escapes": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_escapes,
+            doc="both streams send the key in pieces right after an escape sent in the piece "
+            "before (a `%20` cut after its `%`, a JSON-escaped letter): the agent reads it "
+            "intact, irimi stores its placeholder",
         ),
         "gzip_bomb_stream": Scenario(
             ("What is the test key?", "read_all"),

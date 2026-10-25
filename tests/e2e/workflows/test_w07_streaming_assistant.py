@@ -19,6 +19,8 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.agent import HUNG_UP
 from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     ANSWER,
     CHANNEL,
+    ESCAPES_ANSWER,
+    ESCAPES_DECISION,
     LONG_ANSWER,
     SECRET,
     SECRET_DECISION,
@@ -294,6 +296,57 @@ def test_a_secret_a_stream_sends_in_pieces_is_stored_as_one_placeholder_in_the_f
             sent, body, boundaries(handed[path].stream_chunks)
         )
     pieces = [b"CANARYstream", b"secret000000", b"sk_live_C", b"ANARYstreams", b"ecret0000000"]
+    written = [
+        (path, piece)
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file()
+        for piece in pieces
+        if piece in path.read_bytes()
+    ]
+    assert written == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_key_sent_in_pieces_after_an_escape_in_the_piece_before_is_stored_as_its_placeholder(
+    run_workflow, mode
+):
+    """A key that only the escape before it, sent in the piece before, lets start is still a key.
+
+    Anthropic sends `%`, then `20` and the whole key, which alone reads glued to the `20`; OpenAI
+    sends a letter its JSON escapes, then the key across two pieces. The agent reads both intact
+    and irimi stores each key as its placeholder, in the piece it starts in."""
+    bare = run_workflow(W, "secret_after_escapes", "bare")
+    shadow = run_workflow(W, "secret_after_escapes", mode)
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["answer"] == "".join(ESCAPES_ANSWER)
+    assert shadow.result()["decision"] == "".join(ESCAPES_DECISION)
+    assert shadow.exchange_lines() == LLM_LINES
+    handed = {e.request.path: e for e in shadow.handed if e.response is not None}
+    sent_anthropic, sent_openai = (
+        handed[path].response.body for path in ("/v1/messages", "/v1/chat/completions")
+    )
+    assert [d["delta"]["text"] for d in data_lines(sent_anthropic)[2:-3]] == ESCAPES_ANSWER
+    assert chat_deltas(sent_openai) == ESCAPES_DECISION
+    assert b'"No summary: \\u0041"' in sent_openai
+    # What the store holds.
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    stored = stored_exchanges(shadow)
+    anthropic, openai = (stored[path] for path in ("/v1/messages", "/v1/chat/completions"))
+    assert anthropic.response is not None and anthropic.flags == ()
+    assert openai.response is not None and openai.flags == ()
+    deltas = [d["delta"]["text"] for d in data_lines(anthropic.response.body)[2:-3]]
+    assert deltas == [ESCAPES_ANSWER[0], f"20{hidden}", ESCAPES_ANSWER[2]]
+    assert chat_deltas(openai.response.body) == [ESCAPES_DECISION[0], hidden, " stays private."]
+    for ex, body in ((anthropic, anthropic.response.body), (openai, openai.response.body)):
+        sent = handed[ex.request.path]
+        assert boundaries(ex.stream_chunks) == carried(
+            sent.response.body, body, boundaries(sent.stream_chunks)
+        )
+    # The agent passes Anthropic's answer on to OpenAI, whose stored request holds the placeholder.
+    assert f"%20{hidden}".encode() in openai.request.body
+    pieces = [SECRET[9:].encode(), b"CANARYstream", b"streamsecret"]
     written = [
         (path, piece)
         for root in (shadow.home, shadow.cwd, shadow.tmp)
