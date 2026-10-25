@@ -142,6 +142,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   empty.
 - A key shape right after a JSON `\u` escape of a letter or digit (`"\u0041sk_live_…"`) is
   redacted in a JSON body or line, as it is in other text, instead of stored decoded as sent.
+- A secret a model streams across several deltas (the text and tool-call arguments of Anthropic,
+  OpenAI chat and OpenAI Responses streams) is stored as one placeholder, in the first delta that
+  holds part of it, instead of in pieces that join back into the secret.
 
 ## [0.1.0] - 2026-10-20
 

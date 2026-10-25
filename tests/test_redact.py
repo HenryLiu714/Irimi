@@ -13,12 +13,14 @@ import stat
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
+from itertools import pairwise
 from typing import Any
 
 import pytest
 
 from irimi.config import files, paths
-from irimi.core import secret_shapes
+from irimi.core import secret_shapes, stream_deltas
 from irimi.core.exchange import Exchange, Flag, Request, Response
 from irimi.decide import targets
 from irimi.protocol.trace import JSONValue
@@ -523,10 +525,11 @@ def test_an_events_data_lines_keep_their_bytes_unless_joined_they_are_json_holdi
         assert _response_body(sse, ("content-type", "text/event-stream")) == sse
 
 
-def test_an_event_of_one_data_line_is_parsed_once(monkeypatch):
+def test_an_event_of_one_data_line_is_not_parsed_joined(monkeypatch):
     """Only an event of several `data:` lines is parsed joined too.
 
-    A stream of one-line events, as model APIs send, is not parsed twice."""
+    An event of one is parsed by its line's walk, and once more if it is an object, which can
+    hold a piece of a model's streamed text (`stream_deltas`)."""
     parsed: list[str] = []
     loads = json.loads
 
@@ -537,7 +540,7 @@ def test_an_event_of_one_data_line_is_parsed_once(monkeypatch):
     monkeypatch.setattr(json, "loads", counted)
     sse = b'event: e\ndata: {"a": 1}\n\ndata: [1]\n\n'
     assert _response_body(sse, ("content-type", "text/event-stream")) == sse
-    assert parsed == [sse.decode(), '{"a": 1}', "[1]"]
+    assert parsed == [sse.decode(), '{"a": 1}', '{"a": 1}', "[1]"]
 
 
 def test_an_sse_line_ended_by_a_lone_carriage_return_is_walked_as_its_own_line():
@@ -854,6 +857,9 @@ def _random_stream(rng) -> bytes:
                 f"event: {odd}",
                 # an event of its own whose JSON spans lines: only joined is it one document
                 f'\r\ndata: {{\ndata: "token": "hunter2",\rdata: "text": "{secret}"\r\ndata: }}\n',
+                # two of a model's deltas, each an event of its own, that send a key in pieces
+                f'\r\ndata: {{"choices":[{{"delta":{{"content":" {secret[:5]}"}}}}]}}\n\n'
+                f'data: {{"choices":[{{"delta":{{"content":"{secret[5:]} "}}}}]}}\n',
                 "",
             )
         )
@@ -879,6 +885,7 @@ def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
         case = (sent, chunks, body, got)
         assert all(length > 0 for length in got) and sum(got) == len(body), case
         assert not any(secret.encode() in body for secret in _STREAM_SECRETS), case
+        assert not any(secret[5:].encode() in body for secret in _STREAM_SECRETS), case
         assert b"hunter2" not in body, case
         old, new = sent.splitlines(keepends=True), body.splitlines(keepends=True)
         assert len(old) == len(new), case
@@ -904,6 +911,280 @@ def test_a_streamed_body_redaction_leaves_alone_keeps_its_chunks_whatever_its_co
         loud = Response(status=200, headers=(("content-type", content_type),), body=LOUD + LAST)
         ex = _exchange(response=loud, stream_chunks=(3, len(LOUD) + len(LAST) - 3))
         assert redact_exchange(ex, KEY).stream_chunks == (len(LOUD_STORED), len(LAST))
+
+
+# ------------------------------------------------------------------------------ a secret in pieces
+
+
+def _text_delta(text: str, index: int = 0) -> dict[str, Any]:
+    """An Anthropic event carrying a piece of content block `index`'s text."""
+    delta = {"type": "text_delta", "text": text}
+    return {"type": "content_block_delta", "index": index, "delta": delta}
+
+
+def _chat_delta(text: str, choice: int = 0) -> dict[str, Any]:
+    """An OpenAI chat event carrying a piece of choice `choice`'s content."""
+    return {"choices": [{"index": choice, "delta": {"content": text}}]}
+
+
+def _tool_call_delta(text: str, call: int = 0) -> dict[str, Any]:
+    """An OpenAI chat event carrying a piece of tool call `call`'s arguments."""
+    piece = {"index": call, "function": {"arguments": text}}
+    return {"choices": [{"index": 0, "delta": {"tool_calls": [piece]}}]}
+
+
+def _responses_delta(text: str, item: str = "msg_1", kind: str = "output_text") -> dict[str, Any]:
+    """An OpenAI Responses event carrying a piece of item `item`'s text or arguments."""
+    return {"type": f"response.{kind}.delta", "item_id": item, "output_index": 0, "delta": text}
+
+
+def _model_stream(events: list[dict[str, Any]], compact: tuple[int, ...] = ()) -> bytes:
+    """`events` as SSE, as a model API sends them: each event named by its type, if it has one.
+
+    The events at `compact` are in the compact JSON redaction stores a changed document in."""
+    return "".join(
+        (f"event: {event['type']}\n" if "type" in event else "")
+        + "data: "
+        + (json.dumps(event, separators=(",", ":")) if i in compact else json.dumps(event))
+        + "\n\n"
+        for i, event in enumerate(events)
+    ).encode()
+
+
+def test_a_secret_a_model_streams_in_pieces_is_stored_as_its_placeholder_in_the_first_piece():
+    """A key split across a stream's deltas is hidden whole, as its placeholder in the first piece.
+
+    Its text is cut from the other pieces it crosses. Only the events it crosses change, each in
+    its own line, so the stream still reads as the model's text with the placeholder in it."""
+    start = {"type": "message_start", "message": {"id": "msg_1", "content": []}}
+    stop = {"type": "message_stop"}
+    sent = ["The key is sk_l", "ive_ab", "c1", "23. Keep it."]
+    stored = [f"The key is {_ph(LIVE_KEY)}", "", "", ". Keep it."]
+    assert _response_body(_model_stream([start, *map(_text_delta, sent), stop]), SSE) == (
+        _model_stream([start, *map(_text_delta, stored), stop], compact=(1, 2, 3, 4))
+    )
+
+
+# An event carrying a piece of streamed text, made from the piece.
+_Piece = Callable[[str], dict[str, Any]]
+# A piece of streamed text in each shape a model sends one in.
+_PIECES: dict[str, _Piece] = {
+    "anthropic text": _text_delta,
+    "anthropic tool input": lambda text: {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {"type": "input_json_delta", "partial_json": text},
+    },
+    "openai chat": _chat_delta,
+    "openai chat tool call": _tool_call_delta,
+    "openai responses text": _responses_delta,
+    "openai responses arguments": lambda text: _responses_delta(
+        text, "fc_1", "function_call_arguments"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", _PIECES)
+def test_a_secret_in_pieces_is_hidden_whole_in_each_shape_a_model_streams_text_in(shape):
+    """Text and tool arguments alike: the tool call's JSON still parses once joined."""
+    piece = _PIECES[shape]
+    sent = ['{"q": "', LIVE_KEY[:4], LIVE_KEY[4:9], LIVE_KEY[9:] + '"}']
+    stored = ['{"q": "', _ph(LIVE_KEY), "", '"}']
+    assert _response_body(_model_stream([piece(text) for text in sent]), SSE) == (
+        _model_stream([piece(text) for text in stored], compact=(1, 2, 3))
+    )
+
+
+# Two texts that one stream can carry side by side.
+_TWO_TEXTS: dict[str, tuple[_Piece, _Piece]] = {
+    "content blocks": (_text_delta, lambda text: _text_delta(text, 1)),
+    "choices": (_chat_delta, lambda text: _chat_delta(text, 1)),
+    "tool calls": (_tool_call_delta, lambda text: _tool_call_delta(text, 1)),
+    "content and a tool call": (_chat_delta, _tool_call_delta),
+    "items": (_responses_delta, lambda text: _responses_delta(text, "msg_2")),
+    "text and arguments": (
+        _responses_delta,
+        lambda text: _responses_delta(text, kind="function_call_arguments"),
+    ),
+    "providers": (_text_delta, _chat_delta),
+}
+
+
+@pytest.mark.parametrize("texts", _TWO_TEXTS)
+def test_each_text_s_pieces_are_joined_apart_from_another_s_and_past_its_events(texts):
+    """Pieces are joined per content block, choice, tool call, item and provider, in order.
+
+    A key no one text holds is no secret, and one text's key is found past the other text's
+    events between its pieces."""
+    one, other = _TWO_TEXTS[texts]
+    apart = _model_stream([one("x sk_live_"), other("abc123 y"), one(" z")])
+    assert _response_body(apart, SSE) == apart
+    sent = _model_stream([one("x sk_live_"), other("q"), one("abc123 y")])
+    stored = [one(f"x {_ph(LIVE_KEY)}"), other("q"), one(" y")]
+    assert _response_body(sent, SSE) == _model_stream(stored, compact=(0, 2))
+
+
+def test_a_stream_no_secret_crosses_is_redacted_event_by_event():
+    """A stream whose pieces no key crosses is stored as any SSE is, event by event.
+
+    A quiet one keeps its bytes, and a key whole in one piece is hidden by its event's walk, even
+    one glued to the piece before."""
+    quiet = _model_stream([_text_delta("sk_live"), _text_delta("_ x"), _text_delta("abc123")])
+    assert _response_body(quiet, SSE) == quiet
+    sent = [_text_delta(f"see {LIVE_KEY} "), _text_delta("a"), _text_delta(LIVE_KEY)]
+    stored = [_text_delta(f"see {_ph(LIVE_KEY)} "), _text_delta("a"), _text_delta(_ph(LIVE_KEY))]
+    assert _response_body(_model_stream(sent), SSE) == _model_stream(stored, compact=(0, 2))
+
+
+def test_a_key_a_piece_shows_only_the_start_of_is_hidden_whole():
+    """A piece that ends partway through a key matches as a shorter key; the whole key is hidden.
+
+    So is a key whose last character alone is in the next piece."""
+    for cut in (10, len(LIVE_KEY) - 1):
+        sent = [_text_delta("x " + LIVE_KEY[:cut]), _text_delta(LIVE_KEY[cut:] + " y")]
+        stored = _response_body(_model_stream(sent), SSE)
+        assert stored == _model_stream(
+            [_text_delta(f"x {_ph(LIVE_KEY)}"), _text_delta(" y")], compact=(0, 1)
+        )
+        assert _ph(LIVE_KEY[:cut]).encode() not in stored
+
+
+def test_an_event_a_secret_crosses_is_redacted_whole_its_other_fields_and_lines_too():
+    """The events a key crosses are still walked as JSON and their other lines scanned.
+
+    So the piece's own shapes, shapes after an escaped letter in it and in another field, a secret
+    key's value and a shape on another line of the event are hidden as in any other event."""
+    first = (
+        '{"type":"content_block_delta","index":0,"token":"t1","note":"\\u0041' + TEST_KEY + '",'
+        '"delta":{"type":"text_delta","text":"\\u0041rk_live_zz ' + LIVE_KEY[:9] + '"}}'
+    )
+    sent = f"event: content_block_delta\nid: {TEST_KEY}\ndata: {first}\n\n".encode()
+    sent += _model_stream([_text_delta(LIVE_KEY[9:])])
+    walked = _text_delta(f"A{_ph(STRIPE_RESTRICTED + 'zz')} {_ph(LIVE_KEY)}")
+    walked = {
+        "type": walked["type"],
+        "index": 0,
+        "token": _ph("t1"),
+        "note": "A" + _ph(TEST_KEY),
+        "delta": walked["delta"],
+    }
+    expected = f"event: content_block_delta\nid: {_ph(TEST_KEY)}\n".encode()
+    expected += _model_stream([walked], compact=(0,)).removeprefix(b"event: content_block_delta\n")
+    expected += _model_stream([_text_delta("")], compact=(0,))
+    assert _response_body(sent, SSE) == expected
+
+
+def test_keys_back_to_back_in_pieces_each_go_in_their_own_first_piece():
+    """Each key a stream sends in pieces takes its own placeholder, in the piece it starts in.
+
+    A piece the first key ends in keeps what follows it, up to where the next key starts. An
+    empty piece between two of a key's pieces is left as it was sent."""
+    sent = ["a sk_live_", "", "abc ", "sk_live_", "zz9 b"]
+    stored = [f"a {_ph(LIVE_KEY_SHORT)}", "", " ", _ph(STRIPE_LIVE + "zz9"), " b"]
+    assert _response_body(_model_stream(list(map(_chat_delta, sent))), SSE) == (
+        _model_stream(list(map(_chat_delta, stored)), compact=(0, 2, 3, 4))
+    )
+
+
+def test_an_event_that_holds_pieces_of_two_texts_takes_both_new_texts():
+    """One event can carry a piece of each of several texts, as OpenAI's choices do."""
+
+    def both(first: str, second: str) -> dict[str, Any]:
+        choices = [_chat_delta(first)["choices"][0], _chat_delta(second, 1)["choices"][0]]
+        return {"choices": choices}
+
+    sent = [both("x sk_live_", "y rk_live_"), both("abc123", "zz9")]
+    hidden = (_ph(LIVE_KEY), _ph(STRIPE_RESTRICTED + "zz9"))
+    stored = [both(f"x {hidden[0]}", f"y {hidden[1]}"), both("", "")]
+    assert _response_body(_model_stream(sent), SSE) == _model_stream(stored, compact=(0, 1))
+
+
+def test_a_shape_after_an_escaped_letter_that_runs_into_a_split_key_is_hidden_with_it():
+    """A shape after an escaped letter that overlaps a key split across pieces is hidden with it.
+
+    The two are one secret, so neither leaves the other's tail behind."""
+    glued = ANTHROPIC + "ab_" + STRIPE_LIVE
+    first = '{"choices":[{"index":0,"delta":{"content":"\\u0041' + glued + '"}}]}'
+    sent = f"data: {first}\n\n".encode() + _model_stream([_chat_delta("abc123 y")])
+    stored = [_chat_delta("A" + _ph(glued + "abc123")), _chat_delta(" y")]
+    assert _response_body(sent, SSE) == _model_stream(stored, compact=(0, 1))
+
+
+def test_a_piece_in_an_event_of_several_data_lines_is_joined_with_the_rest_of_its_text():
+    """An event whose `data:` lines join into a delta is a piece of its text too.
+
+    It is rewritten as such an event is: the document on its first `data:` line, the others left
+    empty."""
+    sent = b'data: {"choices": [{"index": 0,\ndata: "delta": {"content": "x sk_live_"}}]}\n\n'
+    sent += _model_stream([_chat_delta("abc123")])
+    walked = _model_stream([_chat_delta(f"x {_ph(LIVE_KEY)}")], compact=(0,))
+    expected = walked.replace(b"\n\n", b"\ndata:\n\n")
+    assert _response_body(sent, SSE) == expected + _model_stream([_chat_delta("")], compact=(0,))
+
+
+def test_a_secret_in_pieces_of_a_shape_irimi_does_not_know_is_redacted_event_by_event():
+    """Pieces in a shape `stream_deltas` does not know are redacted as any SSE is.
+
+    So a key that a thinking block, or another provider, sends across events is stored in
+    pieces."""
+    thinking = [
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": t},
+        }
+        for t in ("a sk_live_", "abc123")
+    ]
+    gemini = [
+        {"candidates": [{"content": {"parts": [{"text": t}]}}]} for t in ("a sk_live_", "abc123")
+    ]
+    for events in (thinking, gemini):
+        sent = _model_stream(events)
+        assert _response_body(sent, SSE) == sent
+
+
+def test_a_stream_a_secret_crosses_keeps_its_lines_and_carries_its_chunks_over():
+    """Each event a key crosses keeps its lines, so its chunks carry over line by line.
+
+    A boundary in a line the key changed moves to its end, and one in any other line stays."""
+    sent = _model_stream([_text_delta("a sk_live_"), _text_delta("abc123 b"), _text_delta("c")])
+    body = _model_stream(
+        [_text_delta(f"a {_ph(LIVE_KEY)}"), _text_delta(" b"), _text_delta("c")], compact=(0, 1)
+    )
+    old, new = sent.splitlines(keepends=True), body.splitlines(keepends=True)
+    assert len(old) == len(new) == 9
+
+    def start(lines: list[bytes], i: int) -> int:
+        return sum(map(len, lines[:i]))
+
+    cuts = [start(old, 1) + 9, start(old, 4) + 3, start(old, 7) + 5]
+    stored = _stream(sent, tuple(b - a for a, b in pairwise([0, *cuts, len(sent)])))
+    assert stored.response is not None and stored.response.body == body
+    moved = [start(new, 2), start(new, 5), start(new, 7) + 5]
+    assert stored.stream_chunks == tuple(b - a for a, b in pairwise([0, *moved, len(body)]))
+
+
+def test_an_event_a_secret_crosses_that_repeats_a_key_fails_the_body_closed():
+    """The event is walked as any JSON is, so a repeated key fails the body closed."""
+    sent = (
+        b'data: {"id": 1, "id": 2, "choices": [{"index": 0, "delta": {"content": "sk_live_"}}]}\n\n'
+    )
+    sent += _model_stream([_chat_delta("abc123")])
+    stored = _stream(sent, (len(sent),))
+    assert stored.response is not None and stored.response.body == FAILED_BODY
+    assert Flag.REDACTION_FAILED in stored.flags
+
+
+def test_a_stream_whose_pieces_cannot_be_read_fails_closed(monkeypatch):
+    def boom(event):
+        raise ValueError("shapes broke")
+
+    monkeypatch.setattr(stream_deltas, "deltas", boom)
+    sent = _model_stream([_text_delta("quiet")])
+    stored = _stream(sent, (3, len(sent) - 3))
+    assert stored.response is not None and stored.response.body == FAILED_BODY
+    assert stored.stream_chunks == (len(FAILED_BODY),)
+    assert Flag.REDACTION_FAILED in stored.flags
 
 
 # ------------------------------------------------------------------------------ rule 7: fail closed

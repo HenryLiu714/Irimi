@@ -30,6 +30,7 @@ LAYERS: list[dict[str, list[str] | None]] = [
             "exitcodes",
             "calls",
             "bodies",
+            "stream_deltas",
         ]
     },
     # contract

@@ -21,6 +21,8 @@ from tests.e2e.workflows.harness.services import (
 CHANNEL = "C0CHAT"
 # Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
 SECRET = credentials.STREAM_SECRET
+# What OpenAI answers in `secret_in_stream`: the key again, so both streams send it in pieces.
+SECRET_DECISION = f"No summary needed: the key {SECRET} stays private."
 # No secret's shape: only its `client_secret` key marks it, on a `data:` line of its own.
 SSE_CLIENT_SECRET = credentials.SSE_CLIENT_SECRET
 # A key's shape the walk reads glued to a letter: the server escapes the letter before it.
@@ -50,6 +52,12 @@ def chat_script(call: LlmCall) -> LlmTurn:
     if "summary" in question.lower():
         return LlmTurn(tool_calls=(("post_summary", {"channel": CHANNEL, "text": question}),))
     return LlmTurn(text="No summary needed.")
+
+
+def secret_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "openai":
+        return LlmTurn(text=SECRET_DECISION)
+    return chat_script(call)
 
 
 def summarize_script(call: LlmCall) -> LlmTurn:
@@ -274,6 +282,10 @@ def _world(world: World) -> None:
     world.llm.script = chat_script
 
 
+def _secret(world: World) -> None:
+    world.llm.script = secret_script
+
+
 def _held(world: World) -> None:
     world.llm = HeldStreamLLM(chat_script)
 
@@ -331,8 +343,9 @@ WORKFLOW = Workflow(
         ),
         "secret_in_stream": Scenario(
             ("What is the test key?", "read_all"),
-            setup=_world,
-            doc="a key-shaped secret inside the stream reaches the caller intact",
+            setup=_secret,
+            doc="a key-shaped secret inside both streams, sent in pieces, reaches the caller "
+            "intact and disk as its placeholder",
         ),
         "caller_disconnects": Scenario(
             (QUESTION, "hang_up"),

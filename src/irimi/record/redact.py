@@ -18,15 +18,17 @@ import os
 import re
 import secrets
 import stat
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from functools import partial
-from itertools import pairwise
+from itertools import accumulate, pairwise
 from pathlib import Path
 from urllib.parse import quote_plus, unquote_plus, urlsplit
 
 from irimi.config import paths
 from irimi.config.files import write_private
+from irimi.core import stream_deltas
 from irimi.core.bodies import FORM_CT
 from irimi.core.exchange import Exchange, Flag, Headers, Request, Response, header_value, media_type
 from irimi.core.secret_shapes import SECRET_SHAPE, shapes_after_escaped_letters
@@ -495,7 +497,7 @@ def _redact_document(text: str, content_type: str, key: bytes) -> str:
 
     The text is tried as JSON whatever its content type. JSON refused for another reason (an
     integer past the digit limit, a repeated key) raises to the guard and fails closed: a text
-    scan would miss a secret key's value.
+    scan would miss a secret key's value. A secret a model streams in pieces is hidden whole.
     """
     walked = _redact_json_text(text, key)
     if walked is not None:
@@ -503,7 +505,13 @@ def _redact_document(text: str, content_type: str, key: bytes) -> str:
     if content_type == FORM_CT:
         return _redact_urlencoded(text, key)
     lines = _LINE.findall(text)
-    redacted = [line for event in _events(lines) for line in _redact_event(event, key)]
+    events = list(_events(lines))
+    split = _redact_split_secrets(events, key)
+    redacted = [
+        line
+        for n, event in enumerate(events)
+        for line in (split[n] if n in split else _redact_event(event, key))
+    ]
     if all(new is old for new, old in zip(redacted, lines, strict=True)):
         return text
     return "".join(redacted)
@@ -526,19 +534,106 @@ def _redact_event(lines: list[str], key: bytes) -> list[str]:
     keeps its line count for `_rechunk`. Any other event is redacted line by line.
     """
     data = [i for i, line in enumerate(lines) if line.startswith(_SSE_DATA)]
-    values = [_content(lines[i])[len(_SSE_DATA) :] for i in data] if len(data) > 1 else []
-    document = "\n".join(values)
+    document = _data(lines) if len(data) > 1 else ""
     walked = None
     if document.lstrip().startswith(("{", "[")):
         walked = _redact_json_text(document, key)
     if walked is None or walked is document:
         return [_redact_line(line, key) for line in lines]
+    return _with_document(lines, walked, key)
+
+
+def _data(lines: list[str]) -> str:
+    """Return an event's data as a client reads it: its `data:` lines' values joined with LF."""
+    return "\n".join(
+        _content(line)[len(_SSE_DATA) :] for line in lines if line.startswith(_SSE_DATA)
+    )
+
+
+def _with_document(lines: list[str], document: str, key: bytes) -> list[str]:
+    """Return an event's lines redacted, `document` on its first `data:` line, the others empty."""
     redacted = [
         _SSE_DATA + _ending(line) if line.startswith(_SSE_DATA) else _redact_line(line, key)
         for line in lines
     ]
-    redacted[data[0]] = _SSE_DATA + _indent(values[0]) + walked + _ending(lines[data[0]])
+    first = next(i for i, line in enumerate(lines) if line.startswith(_SSE_DATA))
+    value = _content(lines[first])[len(_SSE_DATA) :]
+    redacted[first] = _SSE_DATA + _indent(value) + document + _ending(lines[first])
     return redacted
+
+
+def _redact_split_secrets(events: list[list[str]], key: bytes) -> dict[int, list[str]]:
+    """Return, by position, each event a secret is split across, redacted with the secret whole.
+
+    A model streams a text in pieces, one event each (`stream_deltas`), so a key it repeats can be
+    whole in no one event. Each text's pieces are joined in order: a secret across several goes,
+    as its placeholder, in the first, and is cut from the rest. Each event keeps its lines.
+    """
+    texts_of: dict[tuple[object, ...], list[tuple[int, int, str]]] = {}
+    for n, lines in enumerate(events):
+        data = _data(lines).lstrip()
+        if not data.startswith("{"):
+            continue
+        try:
+            document = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        for k, delta in enumerate(stream_deltas.deltas(document)):
+            texts_of.setdefault(delta.text_id, []).append((n, k, delta.text))
+    texts: dict[int, dict[int, str]] = {}
+    for pieces in texts_of.values():
+        for n, k, text in _split_secrets(pieces, events, key):
+            texts.setdefault(n, {})[k] = text
+    return {n: _with_texts(events[n], new, key) for n, new in texts.items()}
+
+
+def _split_secrets(
+    pieces: list[tuple[int, int, str]], events: list[list[str]], key: bytes
+) -> Iterator[tuple[int, int, str]]:
+    """Yield `(event, piece, new text)` for each piece of one text that a key across pieces touches.
+
+    The new text is what the keys leave of the piece, with the placeholder of each that starts in
+    it. A shape the piece holds alone is merged with them, so neither leaves the other's tail.
+    """
+    joined = "".join(text for _, _, text in pieces)
+    ends = list(accumulate(len(text) for _, _, text in pieces))
+    crossing = [
+        (start, stop)
+        for start, stop in (match.span() for match in SECRET_SHAPE.finditer(joined))
+        if stop > ends[bisect_right(ends, start)]
+    ]
+    hit = sorted(
+        {
+            i
+            for start, stop in crossing
+            for i in range(bisect_right(ends, start), bisect_right(ends, stop - 1) + 1)
+            if pieces[i][2]
+        }
+    )
+    spans = list(crossing)
+    glued = {n: shapes_after_escaped_letters(_data(events[n])) for n in {pieces[i][0] for i in hit}}
+    for i in hit:
+        n, _, text = pieces[i]
+        start = ends[i] - len(text)
+        spans += [(start + a, start + b) for a, b in _shape_spans(text, glued[n])]
+    merged = _merged(spans)
+    stops = [stop for _, stop in merged]
+    for i in hit:
+        n, k, text = pieces[i]
+        start = ends[i] - len(text)
+        near = merged[bisect_right(stops, start) : bisect_left(stops, ends[i]) + 1]
+        yield n, k, _hide_spans(joined, start, ends[i], near, key)
+
+
+def _with_texts(lines: list[str], texts: dict[int, str], key: bytes) -> list[str]:
+    """Return an event's lines redacted, with its pieces of streamed text (by place) replaced."""
+    data = _data(lines).lstrip()
+    document = json.loads(data, object_pairs_hook=_unique_members)
+    found = stream_deltas.deltas(document)
+    for k, text in texts.items():
+        stream_deltas.set_text(document, found[k].path, text)
+    walked = _redact_json(document, key, shapes_after_escaped_letters(data))
+    return _with_document(lines, _compact(walked), key)
 
 
 def _content(line: str) -> str:
@@ -584,7 +679,12 @@ def _redact_json_text(text: str, key: bytes) -> str | None:
     walked = _redact_json(document, key, shapes_after_escaped_letters(text))
     if walked is document:
         return text
-    return json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
+    return _compact(walked)
+
+
+def _compact(value: JSONValue) -> str:
+    """Return `value` as the compact JSON a redacted document is stored as."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
@@ -646,19 +746,34 @@ def _redact_text(text: str, key: bytes, glued: frozenset[str] = frozenset()) -> 
     if not glued:
         redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
         return redacted if count else text
+    spans = _shape_spans(text, glued)
+    return _hide_spans(text, 0, len(text), _merged(spans), key) if spans else text
+
+
+def _shape_spans(text: str, glued: frozenset[str]) -> list[tuple[int, int]]:
+    """Return where `text` holds a secret shape, and where it holds each copy of a `glued` one."""
     spans = [match.span() for match in SECRET_SHAPE.finditer(text)]
     for shape in glued:
         at = text.find(shape)
         while at != -1:
             spans.append((at, at + len(shape)))
             at = text.find(shape, at + 1)
-    if not spans:
-        return text
-    pieces, end = [], 0
-    for start, stop in _merged(spans):
-        pieces += [text[end:start], placeholder(key, text[start:stop])]
-        end = stop
-    return "".join([*pieces, text[end:]])
+    return spans
+
+
+def _hide_spans(text: str, start: int, stop: int, spans: list[tuple[int, int]], key: bytes) -> str:
+    """Return `text[start:stop]` less the sorted, disjoint `spans` it overlaps.
+
+    Each span that starts in it is replaced by its placeholder; the rest of a span is dropped."""
+    pieces, at = [], start
+    for left, right in spans:
+        if right <= start or left >= stop:
+            continue
+        pieces.append(text[at : max(left, start)])
+        if left >= start:
+            pieces.append(placeholder(key, text[left:right]))
+        at = min(right, stop)
+    return "".join([*pieces, text[at:stop]])
 
 
 def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

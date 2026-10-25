@@ -53,9 +53,13 @@ all is listed under [known bypasses](security.md#known-bypasses).
   secret key's value is replaced only if it also has a secret's shape when its JSON spans several
   lines of a body that is not one document (a cut document, an SSE event a cut stream ends inside),
   or sits inside a JSON string (a streamed tool call's `partial_json`).
-- **A secret a stream sends in pieces is stored in pieces.** Each SSE event is redacted on its own,
-  so a secret whose characters arrive across several events is never whole in any one, and each
-  piece reaches disk as it was sent.
+- **A secret a stream sends in pieces is joined only from the deltas irimi knows.** The text and
+  tool-call arguments of Anthropic Messages, OpenAI chat completions and OpenAI Responses streams
+  are joined before shapes are matched. Any other delta (a thinking block's, a refusal's, another
+  provider's format) is redacted one SSE event at a time, so a secret it sends across several
+  events reaches disk in pieces. Joined text is matched for shapes only, so a secret key's value
+  that a tool call's arguments send in pieces is stored as sent, and so is the rest of a key that
+  follows a JSON `\u` escape of a letter (`"\u0041sk_live_…"`) and runs on into the next delta.
 - **Business data is not redacted.** Customers, amounts and messages are stored as sent; delete
   old runs with `irimi runs prune`.
 - **The key is per install.** One secret gets different placeholders on two machines, so recordings
