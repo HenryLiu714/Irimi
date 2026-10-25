@@ -115,6 +115,13 @@ missed write that shadow mode refuses (the precondition check rejects it, or it 
 idempotency key) or answers as a retry changes nothing a recorded read shows, so it does not
 diverge the replay.
 
+**Placeholders.** A recorded secret comes back to the agent as its placeholder, never the secret:
+in a response, a read tool's result or a trigger's recorded arguments. A missed read or LLM call
+that holds one when it is sent live, as written, URL-encoded or JSON-escaped, is flagged
+`placeholder-sent`, and the report counts them under the totals. The service got the placeholder,
+so its answer (an auth failure, a model's reply to the placeholder) is the replay's doing, not the
+agent's. Pass a trigger's real arguments with `--args`.
+
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes
 never count. The line under it counts the agent's exchanges and read tools answered from the

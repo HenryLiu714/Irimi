@@ -14,10 +14,11 @@ from irimi.core.exchange import (
     WriteOutcome,
 )
 from irimi.decide import idempotency, policy
-from irimi.decide.policy import Decided, Respond, ShadowPolicy
+from irimi.decide.policy import Decided, Forward, Respond, ShadowPolicy
 from irimi.decide.targets import ForwardTo
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.protocol.trace import JSONValue, ToolCall
+from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.servicemaps import MapIndex
 from irimi.servicemaps.classify import Classification
@@ -50,7 +51,8 @@ class ReplayPolicy:
     already show the matched writes. A recorded answer keeps its `answered_by`, overlay and
     minted ids; only `live` becomes `recording` (answered-by header). Misses go to `self.shadow`,
     whose check reads come from the recording; a lookup that raises is a miss (fail-closed hook
-    rule).
+    rule). A miss sent live that holds a placeholder is flagged `placeholder-sent`: the service
+    gets the placeholder, never the secret behind it.
     """
 
     name: str = "replay"
@@ -101,7 +103,10 @@ class ReplayPolicy:
         # Only a write the write log takes is one a later recorded read would show.
         if decided.is_authored_write(kind):
             self.recording.diverge()
-        return replace(decided, flags=(*decided.flags, Flag.REPLAY_MISS))
+        flags = (*decided.flags, Flag.REPLAY_MISS)
+        if isinstance(decided.decision, Forward) and redact.carries_placeholder(request):
+            flags = (*flags, Flag.PLACEHOLDER_SENT)
+        return replace(decided, flags=flags)
 
     def _from_recording(
         self, request: Request, classification: Classification, run_id: str

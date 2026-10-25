@@ -109,6 +109,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - `examples/hello_agent.py` and three rewritten examples (`quickstart`, `replay`, `sidecar`), and
   `make demo`, which runs one against fake services with no keys.
 - `SECURITY.md`, a code of conduct, and issue and pull request templates.
+- A replay flags a missed request it sends live holding a recorded secret's placeholder
+  (`placeholder-sent`), and its report counts them: the service got the placeholder, not the
+  secret, so what it answers to that is the replay's doing, not the agent's.
 
 ### Removed
 

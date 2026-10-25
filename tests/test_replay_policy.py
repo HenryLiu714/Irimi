@@ -5,6 +5,7 @@
 import json
 import re
 from dataclasses import replace
+from urllib.parse import quote_plus
 
 import pytest
 
@@ -515,6 +516,52 @@ def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
     assert (answer.answered_by, answer.flags[-1]) == ("fake-L0", Flag.REPLAY_MISS)
     assert policy.recording.diverged
     assert _answer(policy, _req()).answered_by == "live"
+
+
+# A recorded secret's placeholder, as an answer from the recording hands it to the agent.
+HANDED_BACK = redact.placeholder(KEY, RECORDED_SECRET)
+SENT_BACK = (("authorization", f"Bearer {HANDED_BACK}"),)
+
+
+def test_a_read_sent_live_after_the_replay_diverged_with_a_placeholder_is_flagged():
+    """Past the divergence a recorded read goes live, so the service gets the placeholder."""
+    recording = _recording(_stored(_req(headers=SENT_BACK)))
+    recording.diverge()
+    answer = _answer(ReplayPolicy(recording, SHIPPED), _req(headers=SENT_BACK))
+    assert (answer.answered_by, answer.flags) == (
+        "live",
+        (Flag.REPLAY_MISS, Flag.PLACEHOLDER_SENT),
+    )
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        _req(query="client_secret=" + quote_plus(HANDED_BACK)),
+        _llm(content=f"the key is {HANDED_BACK}"),
+    ],
+    ids=["read", "llm"],
+)
+def test_any_miss_sent_live_with_a_placeholder_is_flagged(request_):
+    """A read or llm call the recording lacks goes live whether or not the replay diverged."""
+    policy = ReplayPolicy(_recording(), SHIPPED)
+    answer = _answer(policy, request_)
+    assert (answer.answered_by, answer.flags) == (
+        "live",
+        (Flag.REPLAY_MISS, Flag.PLACEHOLDER_SENT),
+    )
+    assert not policy.recording.diverged
+
+
+def test_a_placeholder_in_a_request_irimi_answers_itself_is_never_flagged():
+    """A recorded answer and a faked write never leave irimi, so no service gets the placeholder."""
+    policy = ReplayPolicy(_recording(_stored(_req(headers=SENT_BACK))), SHIPPED)
+    assert _answer(policy, _req(headers=SENT_BACK)).flags == (Flag.FROM_RECORDING,)
+    body = f"metadata[note]={quote_plus(HANDED_BACK)}".encode()
+    write = _req("POST", path="/v1/customers/cus_1", body=body, ct=FORM_CONTENT_TYPE)
+    answer = _answer(policy, write)
+    assert (answer.answered_by, answer.response is None) == ("fake-L1", False)
+    assert answer.flags == (Flag.REPLAY_MISS,)
 
 
 def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():

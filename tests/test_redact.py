@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+from urllib.parse import quote, quote_plus
 
 import pytest
 
@@ -100,6 +101,66 @@ def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_
     assert first.request.headers == again.request.headers == (("authorization", _ph(auth)),)
     assert other.request.headers == (("authorization", _ph(auth, OTHER_KEY)),)
     assert _ph(auth, OTHER_KEY) != _ph(auth)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"path": f"/v1/customers/{_ph('x')}"},
+        {"query": "client_secret=" + quote_plus(_ph("x"))},
+        {"query": "client_secret=" + quote(_ph("x"), safe="").lower()},
+        {"headers": (("authorization", f"Bearer {_ph('x')}"),)},
+        {"body": json.dumps({"token": _ph("x")}).encode()},
+        {"body": ("token=" + quote_plus(_ph("x"))).encode()},
+        {
+            "body": json.dumps({"note": _ph("x")})
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003E")
+            .encode()
+        },
+    ],
+    ids=["path", "query", "lower-case-escapes", "header", "json-body", "form-body", "json-escapes"],
+)
+def test_a_placeholder_sent_back_anywhere_in_a_request_is_found(where):
+    """A placeholder is found as `placeholder` wrote it, URL-encoded, or JSON-escaped."""
+    assert redact.carries_placeholder(_request(**where))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        LIVE_KEY,
+        redact.REDACTION_FAILED,
+        _ph("x")[:-2] + ">",
+        "<redacted:ABCDEF0123456789>",
+        _ph("x").replace("<", "%253C"),
+    ],
+    ids=[
+        "nothing",
+        "a-secret",
+        "redaction-failed",
+        "15-digits",
+        "upper-case-digits",
+        "twice-encoded",
+    ],
+)
+def test_a_request_without_a_placeholder_carries_none(text):
+    """Only the placeholder's own shape counts: not a secret, nor a near miss."""
+    request = _request(
+        path=f"/v1/customers/{text}",
+        query=f"q={text}",
+        headers=(("authorization", text),),
+        body=text.encode(),
+    )
+    assert not redact.carries_placeholder(request)
+
+
+def test_a_header_or_body_no_codec_reads_is_searched_without_raising():
+    """A lone surrogate in a header and a body that is not UTF-8 are searched as they are."""
+    request = _request(headers=(("x-note", "\ud800" + _ph("x")),), body=b"\xff" + _ph("y").encode())
+    assert redact.carries_placeholder(request)
+    assert not redact.carries_placeholder(_request(headers=(("x-note", "\ud800"),), body=b"\xff"))
 
 
 # ------------------------------------------------------------------------------ rule 1: headers

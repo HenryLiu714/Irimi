@@ -78,6 +78,8 @@ class Flag(StrEnum):
     REPLAY_MISS = "replay-miss"
     # A replay answered from the recording, keeping the recorded `answered_by` (live -> recording).
     FROM_RECORDING = "from-recording"
+    # A replay sent this request live holding a recorded secret's placeholder, not the secret.
+    PLACEHOLDER_SENT = "placeholder-sent"
 
 
 IDEMPOTENCY_FLAGS: tuple[Flag, ...] = (Flag.IDEMPOTENT_REPLAY, Flag.IDEMPOTENCY_CONFLICT)

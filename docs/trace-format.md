@@ -386,6 +386,7 @@ An event's `type` (`trace.EventType`):
 | `stream-truncated` | 2 | The stored stream is incomplete; the agent got every chunk that arrived. |
 | `replay-miss` | 2 | A replay found no recorded answer and decided the request as shadow mode would. |
 | `from-recording` | 2 | A replay answered from the recording. |
+| `placeholder-sent` | 3 | A replay sent this request live holding a secret's placeholder, never the secret behind it. |
 
 `would_fire` is open too: its values are event names from a service map.
 
@@ -404,7 +405,7 @@ An event's `type` (`trace.EventType`):
 | Version | Written by | Changes |
 | --- | --- | --- |
 | 2 | irimi 0.1.0 | The first released version. |
-| 3 | irimi 0.2 | Added `irimi` to `answered_by` and the `refused` flag. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
+| 3 | irimi 0.2 | Added `irimi` to `answered_by`, and the `refused` and `placeholder-sent` flags. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
 
 ## Example
 

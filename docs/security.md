@@ -97,8 +97,9 @@ no other run uses ([cli.md](cli.md#irimi-runs-rm-and-runs-prune)).
 
 ## Redaction
 
-The store writes a redacted copy of each exchange, tool call and run record. The engine and the
-agent never see a placeholder.
+The store writes a redacted copy of each exchange, tool call and run record. Under shadow and
+serve, the engine and the agent never see a placeholder; a replay answers from the recording, so
+its agent gets the placeholders, never the secrets ([replay.md](replay.md#from-the-recording-and-missed)).
 
 - **Placeholder.** A secret becomes `<redacted:` + the first 16 hex digits of
   HMAC-SHA256(key, value) + `>`. The key is `$IRIMI_HOME/redact.key`, 32 random bytes created `0600`
