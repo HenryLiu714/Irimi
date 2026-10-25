@@ -652,6 +652,51 @@ def test_a_task_a_sync_trigger_returns_makes_its_calls_in_no_run_once_its_run_ha
         assert len([line for line in shadow.summary() if "○ stripe  refund" in line]) == 2
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_pool_worker_that_kept_an_ended_run_adds_nothing_to_it_and_its_trigger_starts_its_own(
+    run_workflow, mode
+):
+    """A pool worker keeps the run it started in; once that run has ended, the worker is in none.
+
+    A free-threaded build starts every thread in a copy of its creator's context, as
+    `inherited_worker`'s pool does on any build. The second message's refund, made on the worker
+    without `sdk.propagate`, lands in the engine's own run, and `audit`, called there from outside
+    any run, is a run of its own. No run holds an exchange made after its end."""
+    shadow = run_workflow(W, "inherited_worker", mode)
+    started = [(e["name"], e["run"]) for e in shadow.events("run.start")]
+    assert [name for name, _ in started] == ["handle", "handle", "audit"]
+    first, second, audit = (run_id for _, run_id in started)
+    assert len({first, second, audit}) == 3
+    assert [(c["label"], c["run"], c["answered_by"]) for c in shadow.calls()] == [
+        ("read:ch_Q0", first, None),
+        ("refund:ch_Q0", first, "fake-L1"),
+        ("read:ch_Q1", second, None),
+        ("refund:ch_Q1", None, "fake-L1"),
+        ("audit:ch_Q0", audit, None),
+    ]
+    reader = shadow.stored()
+    stored = {r.run_id: r for r in shadow.sdk_runs()}
+    assert stored.keys() == {first, second, audit}
+    held = {
+        first: ["GET /v1/charges/ch_Q0", "GET /v1/charges/ch_Q0", "POST /v1/refunds"],
+        second: ["GET /v1/charges/ch_Q1"],
+        audit: ["GET /v1/refunds"],
+    }
+    for run_id, requests in held.items():
+        record = stored[run_id]
+        assert record.end is not None and record.end.outcome == "ok"
+        events = [e for e in reader.load_run(run_id).events if isinstance(e, Exchange)]
+        assert sorted(f"{e.request.method} {e.request.path}" for e in events) == requests
+        assert all(e.ended_at <= record.end.ended_at for e in events)
+    assert stored[audit].trigger is not None
+    assert stored[audit].trigger.name == "audit"
+    engine = [e for e in reader.load_run(shadow.engine_run_id()).events if isinstance(e, Exchange)]
+    assert sorted((e.request.method, charge_named(e)) for e in engine) == [
+        ("GET", "ch_Q1"),
+        ("POST", "ch_Q1"),
+    ]
+
+
 # -- the worker's ledger tools: tool calls under concurrency --------------------------------------
 
 

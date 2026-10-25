@@ -112,6 +112,11 @@ _THREAD = (
     "the thread the trigger starts without `propagate` made its calls in the process run, which "
     "the run's recording lacks, so its refund misses and is faked again"
 )
+_INHERITED = (
+    "the second message's refund ran on a pool worker still in the first message's ended run, so "
+    "it is in the process run, which the run's recording lacks; called alone, the trigger starts "
+    "that pool in its own run, so its refund misses and is faked again"
+)
 _ACCOUNTS = "a tool reads the accounts table the agent's `main()` creates, and raises without it"
 _RECORD = (
     "`--record`, which makes the trigger call its tools, is `main()`'s flag, so the replay makes "
@@ -129,6 +134,12 @@ ALONE: dict[tuple[str, str], Alone] = {
     (W3, "task_outlives_trigger"): _alone(_LOOP, (_SAME_ALONE.format(1), 0, (0, 0, 0, 0))),
     (W3, "unpropagated_thread"): _alone(_THREAD, (_SAME_ALONE.format(0), 1, (0, 0, 0, 1))),
     (W3, "ledger_unpropagated"): _alone(_THREAD, (_SAME_ALONE.format(0), 1, (0, 0, 0, 2))),
+    (W3, "inherited_worker"): _alone(
+        _INHERITED,
+        (_SAME_ALONE.format(0), 0, (1, 0, 0, 0)),
+        (_SAME_ALONE.format(0), 1, (0, 0, 0, 1)),
+        (_SAME_ALONE.format(0), 0, (0, 0, 0, 0)),
+    ),
     (W5, "replayed_event"): _alone(
         "the second delivery's run did nothing because the process remembered the first; its "
         "trigger alone does not, so it handles the dispute again, missing every call",
