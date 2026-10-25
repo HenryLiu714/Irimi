@@ -6,6 +6,7 @@ import contextlib
 import http.client
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -229,9 +230,13 @@ def _charge_named(ex: Exchange) -> str:
     return parse_qs(ex.request.body.decode())["charge"][0]
 
 
+# The line above the summary serve prints at a run's end; a late block's adds ` (late)`.
+END_BLOCK = re.compile(r"--- run \S+ ---")
+
+
 def _ended_runs(count: int):
-    """Return a `Served.wait_for` condition: `count` run blocks printed."""
-    return lambda lines: sum(line.startswith("--- run ") for line in lines) == count
+    """Return a `Served.wait_for` condition: `count` run blocks printed at runs' ends, not late."""
+    return lambda lines: sum(bool(END_BLOCK.fullmatch(line)) for line in lines) == count
 
 
 def test_two_concurrent_requests_to_a_served_agent_are_two_runs_that_never_mix(
