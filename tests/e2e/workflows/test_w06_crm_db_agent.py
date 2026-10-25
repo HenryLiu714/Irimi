@@ -241,21 +241,44 @@ def test_an_unlabelled_database_write_happens_for_real_under_shadow(run_workflow
 
 @pytest.mark.parametrize("mode", MODES)
 def test_a_write_tool_a_framework_unwraps_still_runs_its_fake(run_workflow, mode):
-    """`inspect.unwrap` of a write tool gives the tool, never its real function.
+    """`inspect.unwrap` of a write tool, sync or async, gives the tool, never its real function.
 
     A framework that calls what it unwrapped gets the fake under irimi and the real write bare, as
-    a call of the tool itself does."""
+    a call of the tool itself does. What it reads off the tool is the real function's signature
+    and type hints, in every mode."""
     bare = run_workflow(W, "framework_unwraps", "bare")
-    assert bare.tools() == [("crm.find_accounts", "real"), ("crm.upsert_account", "real")]
-    assert bare.result()["upserted"] == {"upserted": "acc_1"}
-    assert rows(bare)[0] == ("acc_1", "Unwrapped", "smb", "2026-01-01", 0, None)
-    shadow = run_workflow(W, "framework_unwraps", mode)
-    assert shadow.tools() == [("crm.find_accounts", "real"), ("crm.upsert_account", "shadow")]
-    assert shadow.result()["upserted"] == {"stood_in": True, "id": "acc_1"}
-    assert rows(shadow) == SEED
-    assert [(c.name, c.ran) for c in tool_calls(shadow) if c.kind == "write"] == [
-        ("crm.upsert_account", "shadow")
+    assert bare.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "real"),
+        ("crm.notify_owner", "real"),
     ]
+    assert bare.result()["upserted"] == {"upserted": "acc_1"}
+    assert bare.result()["notified"] == {"queued": "acc_1"}
+    assert rows(bare)[0] == ("acc_1", "Unwrapped", "smb", "2026-01-01", 0, None)
+    assert files(bare) == ["crm.sqlite3", "outbox.jsonl"]
+    shadow = run_workflow(W, "framework_unwraps", mode)
+    assert shadow.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    assert shadow.result()["upserted"] == {"stood_in": True, "id": "acc_1"}
+    assert shadow.result()["notified"] == {"stood_in": True}
+    assert rows(shadow) == SEED
+    assert files(shadow) == ["crm.sqlite3"]
+    assert [(c.name, c.ran) for c in tool_calls(shadow) if c.kind == "write"] == [
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    # The unwrap went past the corpus's own logging wrapper and stopped at the SDK's.
+    registered = {
+        "unwrapped": True,
+        "wraps_more": False,
+        "parameters": ["account"],
+        "hints": {"account": "dict[str, typing.Any]", "return": "dict[str, typing.Any]"},
+    }
+    for run in (bare, shadow):
+        assert run.events("registered", with_time=False) == [{"event": "registered", **registered}]
 
 
 @pytest.mark.parametrize("mode", MODES)

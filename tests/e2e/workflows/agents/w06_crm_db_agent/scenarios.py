@@ -68,8 +68,9 @@ WORKFLOW = Workflow(
         ),
         "framework_unwraps": Scenario(
             ("framework_unwraps",),
-            doc="a framework unwraps a write tool with inspect.unwrap and calls what it gets: the "
-            "tool itself, so its fake runs under shadow and the real write only bare",
+            doc="a framework unwraps a sync and an async write tool with inspect.unwrap and calls "
+            "what it gets: the tool itself, so its fake runs under shadow and the real write only "
+            "bare",
         ),
         "outside_run": Scenario(
             ("outside_run",),

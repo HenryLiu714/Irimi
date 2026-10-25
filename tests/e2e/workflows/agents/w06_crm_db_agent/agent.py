@@ -14,7 +14,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_type_hints
 
 from irimi import sdk
 from tests.e2e.workflows.agents import agentkit, observe
@@ -392,8 +392,20 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         # A framework that registers a tool by what `inspect.unwrap` gives, to read its signature,
         # and then calls that.
         registered = inspect.unwrap(upsert_account)
+        hints = get_type_hints(registered)
+        agentkit.obs(
+            "registered",
+            unwrapped=registered is not upsert_account,
+            wraps_more=hasattr(registered, "__wrapped__"),
+            parameters=list(inspect.signature(registered).parameters),
+            hints={name: repr(hint) for name, hint in hints.items()},
+        )
         account = find_accounts(segment)[0]
-        return {"upserted": registered({**account, "name": "Unwrapped"})}
+        notify = inspect.unwrap(notify_owner)
+        return {
+            "upserted": registered({**account, "name": "Unwrapped"}),
+            "notified": asyncio.run(notify(account["id"], "unwrapped")),
+        }
     if scenario == "stand_in_http":
         return {"synced": sync_industry("acc_1", "aerospace")}
     if scenario == "async_tools":
