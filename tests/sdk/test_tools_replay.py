@@ -25,6 +25,8 @@ import pytest
 from irimi import sdk
 from irimi.cli import runner
 from irimi.decide.policy import ShadowPolicy
+from irimi.engine import control as engine_control
+from irimi.protocol import control as protocol_control
 from irimi.protocol.control import NO_RECORDED_CALL, RECORDED_ACTION, RecordedOutcome
 from irimi.protocol.env import (
     AGENT_VERSION_ENV,
@@ -789,6 +791,102 @@ def test_a_result_this_process_cannot_rebuild_is_released_so_its_body_is_answere
         ("db.balance", "recording"),
     ]
     assert _REAL_READS == ["acc_p", "acc_1", "acc_1", "acc_p"]
+    assert warnings() == []
+
+
+def _profile_then_balance() -> list[Any]:
+    """`db.profile`, whose body calls `db.balance`, then the agent's own `db.balance`."""
+    first = profile("acc_p")
+    _BALANCES["acc_1"] = 200
+    return [first, balance("acc_1")]
+
+
+# What an SDK or an irimi from before `tool-calls/recorded/release` gets in a replay of that:
+# the answer is used up with its body's `db.balance`, so the body takes the agent's recorded one.
+_USED_UP_WITH_ITS_BODY = (
+    [Profile("acc_p", 200), {"account": "acc_1", "balance": 200}],
+    [("db.balance", "recording"), ("db.profile", "real"), ("db.balance", "real")],
+)
+
+
+def test_an_sdk_from_before_the_release_route_is_answered_as_it_was(irimi, monkeypatch, warnings):
+    """An SDK that reads only `result`, `error` and `awaited`, and never releases, still replays.
+
+    Its answers hold the fields they did, plus `answer_id`; its tool's body misses as it did."""
+
+    class _Before:
+        def __init__(self, reporter: client.Reporter) -> None:
+            self.reporter = reporter
+
+        def post(self, *args: Any) -> None:
+            self.reporter.post(*args)
+
+        def recorded(self, *args: Any) -> RecordedOutcome | None:
+            found = self.reporter.recorded(*args)
+            return None if found is None else dataclasses.replace(found, answer_id=None)
+
+    try:
+        run_id = irimi.record(_profile_then_balance)
+        del sys.modules[_PROFILES.__name__]
+        monkeypatch.setattr(state, "reporter", _Before(state.reporter))
+        result, calls = irimi.replay(run_id, _profile_then_balance)
+    finally:
+        sys.modules.pop(_PROFILES.__name__, None)
+    assert (result, [(c.name, c.ran) for c in calls]) == _USED_UP_WITH_ITS_BODY
+    assert warnings() == []
+
+
+def test_an_answer_holds_the_fields_an_older_sdk_reads_as_they_were(irimi):
+    """A hit's answer is the outcome an older SDK read, its fields unchanged, and an `answer_id`."""
+    run_id = irimi.record(lambda: balance("acc_1"))
+    lookup = {"name": "db.balance", "args": {"account": "acc_1"}}
+
+    def asks() -> tuple[int, dict[str, Any]]:
+        return _post(irimi.port, f"/_irimi/runs/{irimi.cfg.run_id}/{RECORDED_ACTION}", lookup)
+
+    (status, answer), _ = irimi.replay(run_id, asks)
+    assert status == 200 and sorted(answer) == ["answer_id", "awaited", "error", "result"]
+    assert (answer["result"], answer["error"], answer["awaited"]) == (
+        {"account": "acc_1", "balance": 100},
+        None,
+        False,
+    )
+
+
+def test_this_sdk_against_an_irimi_from_before_the_release_route_releases_nothing(
+    irimi, monkeypatch, warnings
+):
+    """Against an irimi whose answers name no `answer_id`, the SDK posts no release.
+
+    That irimi answers the route `404`, which the SDK would warn of; it says nothing."""
+    encode = protocol_control.recorded_outcome_to_json
+    monkeypatch.setattr(
+        protocol_control, "recorded_outcome_to_json", lambda call, answer_id=None: encode(call)
+    )
+    monkeypatch.setattr(engine_control, "RELEASE_ACTION", "tool-calls/recorded/not-a-route")
+
+    def script() -> tuple[list[Any], tuple[int, dict[str, Any]]]:
+        replayed = _profile_then_balance()
+        route = f"/_irimi/runs/{irimi.cfg.run_id}/{RECORDED_ACTION}/release"
+        return replayed, _post(irimi.port, route, {"answer_id": "a1"})
+
+    try:
+        run_id = irimi.record(_profile_then_balance)
+        del sys.modules[_PROFILES.__name__]
+        (result, released), calls = irimi.replay(run_id, script)
+    finally:
+        sys.modules.pop(_PROFILES.__name__, None)
+    assert (result, [(c.name, c.ran) for c in calls]) == _USED_UP_WITH_ITS_BODY
+    assert released[0] == 404 and released[1]["error"]["message"].startswith("no control route")
+    assert warnings() == []
+
+
+def test_an_answer_with_no_id_from_an_older_irimi_is_never_released(monkeypatch, warnings):
+    body = json.dumps({**_HIT, "result": _GONE}).encode()
+    with _answering(monkeypatch, 200, body) as seen:
+        assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    route = "/_irimi/runs/abcd1234abcd1234/tool-calls"
+    assert [path for path, _ in seen] == [f"{route}/recorded", route]
     assert warnings() == []
 
 
