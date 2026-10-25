@@ -30,8 +30,9 @@ a target you configured.
   address, `0.0.0.0` included, prints a warning in the banner: any machine that can reach the port
   can then send traffic through irimi and call its control endpoint.
 - **The control endpoint.** `/_irimi/` on the listener has no authentication. Any client that can
-  reach the listener can start, end and add tool calls to runs, and read the store's counters. It
-  can never make irimi forward a request or read a stored body. See
+  reach the listener can start, end and add tool calls to runs, read the store's counters, and in
+  a replay look up a read tool's recorded result or give an answer back. It can never make irimi
+  forward a request or read a stored exchange's body. See
   [control-protocol.md](control-protocol.md).
 - **Base-URL mode** (`http://127.0.0.1:PORT/<host>/<path>`, for SDKs that ignore proxy settings)
   answers only clients on loopback, whatever `--bind` says, and relays only to the exact hosts of a
