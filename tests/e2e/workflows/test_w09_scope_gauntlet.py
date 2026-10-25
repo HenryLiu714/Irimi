@@ -4,13 +4,16 @@ The labels are the calls in `tests/e2e/workflows/agents/w09_scope_gauntlet/agent
 
 import bz2
 import dataclasses
+import gzip
 import hashlib
 import json
 import re
 import shlex
 import sys
+import zlib
 from urllib.parse import urlencode
 
+import brotli
 import pytest
 
 import irimi
@@ -286,6 +289,57 @@ def test_a_read_back_in_stacked_codings_is_overlaid_and_one_in_bzip2_is_not(run_
     assert shadow.exchange_lines()[-2:] == [
         "real          read      GET api.stripe.com/v1/refunds -> 200  [overlay]",
         "real          read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
+    ]
+
+
+def aws_chunks(body: bytes) -> list[bytes]:
+    """Return the data chunks of an `aws-chunked` body, without its last chunk and trailer."""
+    chunks: list[bytes] = []
+    at = 0
+    while True:
+        end = body.index(b"\r\n", at)
+        size = int(body[at:end].split(b";")[0], 16)
+        if size == 0:
+            return chunks
+        chunks.append(body[end + 2 : end + 2 + size])
+        at = end + 2 + size + 2
+
+
+def test_bare_the_services_receive_each_odd_body_as_the_agent_coded_it(run_workflow):
+    """What the shadow pins decode is what `bodies` sends: bare, the services get it as coded.
+
+    The S3 key is split over two chunks, the 600 refund is two gzip members, and the refunds read
+    back come in `gzip, br` and in bzip2, so each shadow pin holds irimi to the coding it names."""
+    bare = run_workflow(W, "bodies", "bare")
+    key = credentials.STRIPE_API_KEY.encode()
+    upload = json.dumps({"note": credentials.STRIPE_API_KEY}).encode()
+    puts = bare.internet.requests(OBJECT_STORE)
+    assert [(r.path, r.headers["content-encoding"]) for r in puts] == [
+        ("/bucket/upload_aws_chunked.json", "aws-chunked"),
+        ("/bucket/upload_aws_chunked_gzip.json", "aws-chunked,gzip"),
+    ]
+    split = aws_chunks(puts[0].body)
+    assert len(split) == 2 and b"".join(split) == upload
+    assert not any(key in chunk for chunk in split)
+    [zipped] = aws_chunks(puts[1].body)
+    assert gzip.decompress(zipped) == upload
+    posts = [r for r in bare.internet.requests("api.stripe.com") if r.path == "/v1/refunds"]
+    posts = [r for r in posts if r.method == "POST"]
+    assert [r.headers.get("content-encoding") for r in posts] == [
+        "gzip",
+        None,
+        "gzip, br",
+        "gzip",
+        "bzip2",
+    ]
+    assert gzip.decompress(brotli.decompress(posts[2].body)) == noted_refund("500")
+    first = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    assert first.decompress(posts[3].body) == f"charge={CHARGE}".encode() and first.eof
+    assert gzip.decompress(first.unused_data) == b"&amount=600"
+    assert posts[4].body == bz2.compress(noted_refund("700"))
+    assert [(e["label"], e["encoding"]) for e in bare.events("refunds")] == [
+        ("read_gzip_br", "gzip, br"),
+        ("read_bzip2", "bzip2"),
     ]
 
 
