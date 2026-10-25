@@ -351,9 +351,8 @@ class ShadowSession:
             # chunks read off disk may not add up.
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
-            chunks = decision.stream_chunks
-            if response.body == decision.response.body and sum(chunks) == len(response.body):
-                stream_chunks = chunks
+            if sum(decision.stream_chunks) == len(response.body):
+                stream_chunks = decision.stream_chunks
         # A target's read is not a Forward, so the overlay never touches it.
         elif isinstance(decision, Forward) and as_sent:
             overlay = self._unedited(plan, decision, upstream)
