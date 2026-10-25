@@ -883,6 +883,21 @@ def test_runs_rm_deletes_a_damaged_run_named_in_full(home, capfd):
     assert _blobs(store) == set()
 
 
+def test_a_run_an_older_irimi_stored_under_a_key_is_still_shown_and_deleted(home, capfd):
+    """irimi no longer names a run with a secret's shape, but it reads and deletes one it did."""
+    store = _store_with(home, runs=(_ended_run("kept", HAND_BUILT_AT),))
+    legacy = store / "runs" / "sk_live_x"
+    (store / "runs" / "kept").rename(legacy)
+    run_json = legacy / "run.json"
+    run_json.write_text(run_json.read_text().replace('"kept"', '"sk_live_x"'))
+    assert main(["runs", "show", "sk_live_x"]) == 0
+    out, err = capfd.readouterr()
+    assert out.startswith("run: sk_live_x\n") and err == ""
+    assert main(["runs", "rm", "sk_live_x"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run sk_live_x"
+    assert not legacy.exists()
+
+
 def test_runs_rm_unattributed_deletes_the_events_no_run_claimed(home, capfd):
     store = _store_with(home, _own_body("unattributed"))
     assert main(["runs", "rm", "unattributed"]) == 0

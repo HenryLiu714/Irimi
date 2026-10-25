@@ -34,8 +34,10 @@ closed vocabulary and the compatibility rules. How the store writes these files 
   serve.lock                    held by the one irimi serve writing this store
 ```
 
-- **A run id** is also a directory name, so it matches `^[A-Za-z0-9_-]{1,64}$`. An `Irimi-Run`
-  header that does not match is treated as absent.
+- **A run id** is also a directory name, so it matches `^[A-Za-z0-9_-]{1,64}$`, and a new one
+  holds no credential's shape that redaction replaces in text (`core/secret_shapes.py`, such as
+  `sk_live_…`), since redaction never sees a directory name. A run an older irimi stored under
+  such an id is still read. An `Irimi-Run` header that is no run id is treated as absent.
 - **Events with no usable run** go to `unattributed/events.jsonl`, which has no `run.json`. That
   covers the run id `unattributed`, an id the store cannot use as a directory, and an id that
   differs only in case from a run directory already present (on a case-insensitive filesystem the

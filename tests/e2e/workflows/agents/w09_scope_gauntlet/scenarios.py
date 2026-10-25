@@ -97,7 +97,11 @@ WORKFLOW = Workflow(
         "big_reads": Scenario(
             ("big_reads",), setup=_big, doc="a 3 MB charge: the check read and the overlay give up"
         ),
-        "headers": Scenario(("headers",), setup=_stripe, doc="Irimi-Rewrote and Irimi-Run forged"),
+        "headers": Scenario(
+            ("headers",),
+            setup=_stripe,
+            doc="Irimi-Rewrote forged, and Irimi-Run as a path and with a key's shape",
+        ),
         "self_addressed": Scenario(
             ("self_addressed",),
             setup=_stripe,

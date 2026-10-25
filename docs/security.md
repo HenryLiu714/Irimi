@@ -77,6 +77,9 @@ Rules that follow from these, each also held by a test:
   before it is forwarded, sent to a target or used for a check read, so a run id never reaches a
   service. When irimi stamps an answer, it replaces any `Irimi-Answered-By` the target or service
   sent.
+- **A run id is never a key.** A run id names a directory, which redaction never sees, so one with
+  a credential's shape is no run id (`protocol/trace.is_valid_run_id`): the control endpoint
+  refuses it `400`, and an `Irimi-Run` header holding one is treated as absent.
 - **A store failure never affects traffic.** The store only enqueues; one writer thread does the
   I/O. A full queue or a failed write drops the event and counts it on the run
   (`dropped_events`), never blocking or failing the agent's request.

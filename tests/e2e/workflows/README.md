@@ -70,7 +70,8 @@ Every shadow run, serve run and replay of every scenario is held to these
 2. No request that reached a fake service carried `Irimi-Run`.
 3. No write tool's real function ran.
 4. No canary credential, sent by the agent or handed back by a live read, reached disk where irimi
-   writes, whole or as the start a cut before redaction would leave.
+   writes, whole or as the start a cut before redaction would leave, in a file or in the name of
+   a file or directory.
 5. The agent exited as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is found by name, so it is held to these without an edit to the tests.

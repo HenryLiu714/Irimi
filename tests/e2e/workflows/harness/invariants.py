@@ -21,6 +21,7 @@ CANARIES = {
     "OPENAI_API_KEY": credentials.OPENAI_API_KEY,
     "SLACK_WEBHOOK_PATH": credentials.SLACK_WEBHOOK_PATH,
     "LONG_ERROR_KEY": credentials.LONG_ERROR_KEY,
+    "RUN_ID_KEY": credentials.RUN_ID_KEY,
 }
 # The credentials a fake service hands back in a response body: one on disk is a leak on the
 # response side, which the agent's canaries never reach. A bomb's first line holds one, so the
@@ -95,15 +96,17 @@ def _live_answers_not_served(result: Result) -> list[str]:
 
 
 def _canaries_under(root: Path) -> list[str]:
-    """Return each canary found under `root`, whole or as its first CANARY_PART characters."""
+    """Return each canary found under `root`, whole or as its first CANARY_PART characters.
+
+    A file's or directory's name is read as well as a file's bytes: redaction never sees a name."""
     canaries = {**CANARIES, **SERVED_CANARIES}
     found = []
     for path in root.rglob("*"):
-        if path.is_file():
-            data = path.read_bytes()
-            for name, value in canaries.items():
-                if value.encode() in data:
-                    found.append(f"{name} in {path}")
-                elif value[:CANARY_PART].encode() in data:
-                    found.append(f"{name}'s first {CANARY_PART} characters in {path}")
+        # No canary holds a newline, so none is found across the name and the bytes.
+        data = path.name.encode() + b"\n" + (path.read_bytes() if path.is_file() else b"")
+        for name, value in canaries.items():
+            if value.encode() in data:
+                found.append(f"{name} in {path}")
+            elif value[:CANARY_PART].encode() in data:
+                found.append(f"{name}'s first {CANARY_PART} characters in {path}")
     return found
