@@ -3,7 +3,7 @@
 - The divergence point is the first agent call the recording did not answer (a `replay-miss`
   exchange or a read tool that ran for real); only a missed write sets `ReplayIndex.diverged`.
 - Calls within a read tool's span belong to its body and are not counted (`made_within`).
-- The exit code is `irimi compare`'s, never the agent's; with dropped events it is never OK.
+- The exit code is `irimi compare`'s, never the agent's, so a run read in part is never OK.
 """
 
 import shlex
@@ -58,11 +58,10 @@ class ReplayReport:
 
     @property
     def exit_code(self) -> int:
-        """Return the comparison's exit code, or the stop signal's; never OK with dropped events."""
+        """Return the comparison's exit code, or the stop signal's."""
         if self.ended.stopped is not None:
             return self.ended.stopped
-        dropped = self.source.dropped_events or self.replayed.dropped_events
-        return max(self.comparison.exit_code, exitcodes.DIFFERENT if dropped else exitcodes.OK)
+        return self.comparison.exit_code
 
     def lines(self) -> list[str]:
         header = f"irimi replay · {self.source.run_id} -> {self.replayed.run_id}"
@@ -80,12 +79,7 @@ class ReplayReport:
             lines.append(f"  {compare.ARGS_DIFFER}")
         lines.append(f"  {self._diverged()}")
         lines.append(f"  {self.answered} from the recording · {self.missed} missed")
-        for record, which in ((self.source, "recording"), (self.replayed, "replay")):
-            if record.dropped_events:
-                lines.append(
-                    f"  the store dropped {record.dropped_events} of the {which}'s events, "
-                    "which are not compared"
-                )
+        lines += self.comparison.unread_lines("the recording", "the replay")
         return [*lines, "", *self.comparison.lines()]
 
     def result(self) -> ReplayResult:

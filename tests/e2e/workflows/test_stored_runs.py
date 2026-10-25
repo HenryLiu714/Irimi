@@ -95,6 +95,20 @@ def is_telemetry(line: str) -> bool:
     return line.split()[1] == "telemetry"
 
 
+# The scenarios that send a body irimi cannot redact, so the store flags its copy.
+UNREDACTABLE = {("w09_scope_gauntlet", "unredactable_post")}
+
+
+def stored_line(event: Exchange, case: tuple[str, str]) -> str:
+    """Return a stored exchange's line as irimi printed it.
+
+    In `UNREDACTABLE` that is less `redaction-failed`, which only the store sets, on its copy."""
+    if case not in UNREDACTABLE:
+        return exchange_line(event)
+    flags = tuple(flag for flag in event.flags if flag != Flag.REDACTION_FAILED)
+    return exchange_line(dataclasses.replace(event, flags=flags))
+
+
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=IDS)
 def test_every_shadow_run_stores_one_process_run_with_its_argv_and_exit(
     run_workflow, name, scenario
@@ -126,7 +140,7 @@ def test_every_exchange_irimi_reported_is_stored_exactly_once(run_workflow, name
     shadow = run_workflow(name, scenario, "shadow")
     events = shadow.stored_events()
     lines = reported(shadow)
-    stored = [exchange_line(e) for e in events if isinstance(e, Exchange)]
+    stored = [stored_line(e, (name, scenario)) for e in events if isinstance(e, Exchange)]
     assert sorted(stored) == sorted(line for line in lines if not is_telemetry(line))
     hosts = [line.split()[3].split("/", 1)[0] for line in lines if is_telemetry(line)]
     assert sorted(e.host for e in events if isinstance(e, TelemetrySeen)) == sorted(hosts)
@@ -424,7 +438,7 @@ def test_every_exchange_and_tool_call_a_serve_reported_is_stored_once_in_its_run
     ids = [record.run_id for record in reader.list_runs()] + [trace.UNATTRIBUTED]
     events = {run_id: reader.load_run(run_id).events for run_id in ids}
     flat = [event for run_events in events.values() for event in run_events]
-    stored = [exchange_line(e) for e in flat if isinstance(e, Exchange)]
+    stored = [stored_line(e, (name, scenario)) for e in flat if isinstance(e, Exchange)]
     assert sorted(stored) == sorted(line for line in reported(serve) if not is_telemetry(line))
     assert all(e.run_id == run_id for run_id, run_events in events.items() for e in run_events)
     calls = [e for e in flat if isinstance(e, ToolCall)]
@@ -482,9 +496,9 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
 ):
     """`irimi compare r r` prints one `=` row per write line `runs show r`'s summary printed.
 
-    A write whose body was cut when stored (W9 `bombs`) is a `?` pair counted as not compared,
-    and the run exits 1. Compare interleaves HTTP and tool writes in `seq` order, so each kind is
-    checked in order separately."""
+    A write not stored whole (W9 `bombs`' cut body, `unredactable_post`'s body irimi could not
+    redact) is a `?` pair counted as not compared, and the run exits 1. Compare interleaves HTTP
+    and tool writes in `seq` order, so each kind is checked in order separately."""
     shadow = run_workflow(name, scenario, mode)
     if not started(shadow):
         return
@@ -502,9 +516,10 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
                 "  0 same · 0 changed · 0 only in A · 0 only in B",
             ), run_id
             continue
-        # Whether each HTTP write the summary printed, in `seq` order, was stored cut.
+        # Whether each HTTP write the summary printed, in `seq` order, was not stored whole: the
+        # flags spelled out here, not taken from `compare`, so a change there is caught.
         cut = [
-            Flag.BODY_TRUNCATED in e.flags
+            not {Flag.BODY_TRUNCATED, Flag.REDACTION_FAILED}.isdisjoint(e.flags)
             for e in reader.load_run(run_id, bodies=False).events
             if isinstance(e, Exchange) and exchange.is_summary_write(e)
         ]
@@ -518,7 +533,7 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
         ]
         totals = f"  {len(writes) - sum(cut)} same · 0 changed · 0 only in A · 0 only in B"
         if any(cut):
-            totals += f" · {sum(cut)} not compared (a body was cut when stored)"
+            totals += f" · {sum(cut)} not compared (a write was not stored whole)"
         if not writes:
             assert out[4:] == [totals], run_id
             continue
@@ -562,8 +577,8 @@ def test_irimi_compare_of_every_stored_run_with_itself_is_its_summary_s_writes(
 def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run_workflow, mode):
     """The corpus gives the compare check above every kind of write to meet, in each mode.
 
-    A faked write, one that would fail, a write tool's fake, a cut body, interleaved HTTP and tool
-    writes, and under serve a write in `unattributed`."""
+    A faked write, one that would fail, a write tool's fake, a cut body, a body irimi could not
+    redact, interleaved HTTP and tool writes, and under serve a write in `unattributed`."""
     seen: Counter[str] = Counter()
     for name, scenario in CASES:
         result = run_workflow(name, scenario, mode)
@@ -585,8 +600,9 @@ def test_the_corpus_gives_irimi_compare_s_universal_check_something_to_catch(run
             seen["would fail"] += any(e.precondition.outcome == "rejected" for e in writes)
             seen["stood in"] += any(kinds)
             seen["cut"] += any(Flag.BODY_TRUNCATED in e.flags for e in writes)
+            seen["unredacted"] += any(Flag.REDACTION_FAILED in e.flags for e in writes)
             seen["interleaved"] += kinds != sorted(kinds)
             seen["unattributed"] += run_id == trace.UNATTRIBUTED and bool(actions)
-    expected = ["answered", "would fail", "stood in", "cut", "interleaved"]
+    expected = ["answered", "would fail", "stood in", "cut", "unredacted", "interleaved"]
     expected += ["unattributed"] if mode == "serve" else []
     assert [kind for kind in expected if not seen[kind]] == []

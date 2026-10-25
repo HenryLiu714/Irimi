@@ -416,30 +416,34 @@ def test_irimi_compare_says_which_run_it_could_not_read(shared_store_run, tmp_pa
     assert missing_blob is not None and missing_blob[1] == missing_blob[2], line
 
 
-def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run, tmp_path):
-    """A run whose last line a crash cut is read without that line.
-
-    Here `half_refund`'s run ends mid-way through its `send_reply` tool call, in a copy of the
-    store.
-
-    KNOWN BUG: compare calls the reply a write only A made, and nothing it prints says B's record
-    was cut, so a cut record reads as a run that never replied."""
-    full = shared_store_run(W, "full_refund")
-    half = shared_store_run(W, "half_refund")
-    a, b = (result.one("run.start")["run"] for result in (full, half))
-    copy = tmp_path / "store"
-    shutil.copytree(half.store_root(), copy)
-    events = copy / "runs" / b / "events.jsonl"
+def _cut_at_its_reply(result, run_id: str, copy) -> None:
+    """Copy `result`'s store to `copy`, its run `run_id` ending mid-way through `send_reply`."""
+    shutil.copytree(result.store_root(), copy)
+    events = copy / "runs" / run_id / "events.jsonl"
     lines = events.read_text().splitlines(keepends=True)
     [last_write] = [i for i, line in enumerate(lines) if '"type": "tool_call"' in line][-1:]
     assert f"{AGENT}:send_reply" in lines[last_write]
     events.write_text("".join(lines[:last_write]) + lines[last_write][:40])
+
+
+def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run, tmp_path):
+    """A run whose last line a crash cut is read without that line, and compare says so.
+
+    Here `half_refund`'s run ends mid-way through its `send_reply` tool call, in a copy of the
+    store. The reply is a write only A made, and the note under the header says why, as it does
+    for events the store dropped."""
+    full = shared_store_run(W, "full_refund")
+    half = shared_store_run(W, "half_refund")
+    a, b = (result.one("run.start")["run"] for result in (full, half))
+    copy = tmp_path / "store"
+    _cut_at_its_reply(half, b, copy)
     assert half.command("compare", a, b, "--store", str(copy)) == (
         1,
         [
             f"irimi compare · {a} vs {b}",
             f"  A  {TRIAGE}",
             f"  B  {TRIAGE}",
+            "  B's last event was cut off when stored, so it is not compared",
             "",
             f"  ~ A {FULL}",
             f"    B ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
@@ -449,6 +453,61 @@ def test_irimi_compare_reads_a_run_whose_last_line_a_crash_cut(shared_store_run,
         ],
         [],
     )
+    code, shown, err = half.runs("show", b, "--store", str(copy))
+    assert (code, err) == (0, [])
+    assert shown[6:9] == ["outcome: ok", "last event: cut off when stored, not shown", ""]
+    # Compared with itself, every write it read is the same, and it still exits 1.
+    code, out, err = half.command("compare", b, b, "--store", str(copy))
+    assert (code, out[3:6], err) == (
+        1,
+        [
+            "  A's last event was cut off when stored, so it is not compared",
+            "  B's last event was cut off when stored, so it is not compared",
+            "",
+        ],
+        [],
+    )
+    # A run the store dropped events of says so too, above its cut.
+    record = copy / "runs" / b / "run.json"
+    record.write_text(json.dumps(json.loads(record.read_text()) | {"dropped_events": 2}))
+    code, out, err = half.command("compare", a, b, "--store", str(copy))
+    assert (code, out[3:6], err) == (
+        1,
+        [
+            "  the store dropped 2 of B's events, which are not compared",
+            "  B's last event was cut off when stored, so it is not compared",
+            "",
+        ],
+        [],
+    )
+
+
+def test_a_replay_of_a_run_whose_last_line_a_crash_cut_says_so_and_differs(
+    shared_store_run, tmp_path
+):
+    """A replay of the cut run makes the reply and the model call the recording lost.
+
+    It says the recording was cut, and exits 1."""
+    half = shared_store_run(W, "half_refund")
+    run = half.one("run.start")["run"]
+    copy = tmp_path / "store"
+    _cut_at_its_reply(half, run, copy)
+    again = replay(dataclasses.replace(half, store=copy), run, tmp_path / "replay")
+    assert check_invariants(again) == []
+    assert again.replay_result() == [
+        f"irimi replay · {run} -> {again.process_run_id()}",
+        "  agent exited 0",
+        "  diverged at the agent's 7th call: real          llm       "
+        "POST api.anthropic.com/v1/messages -> 200  [replay-miss]",
+        "  6 from the recording · 1 missed",
+        "  the recording's last event was cut off when stored, so it is not compared",
+        "",
+        f"  = ○ stripe  refund $24.50 on ch_TICKET1  {PASSED}",
+        f"  + {REPLY}",
+        "",
+        "  1 same · 0 changed · 0 only in A · 1 only in B",
+    ]
+    assert again.replay is not None and again.replay.exit_code == 1
 
 
 def _irimi_process(

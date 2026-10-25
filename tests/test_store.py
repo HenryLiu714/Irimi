@@ -693,11 +693,33 @@ def test_a_store_abandoned_without_close_leaves_an_incomplete_run_that_still_rea
 
     run = StoreReader(root).load_run("r1")
     assert run.record.end is None  # incomplete
-    assert _paths(run) == [f"/n{n}" for n in range(5)]
+    assert (_paths(run), run.cut_tail) == ([f"/n{n}" for n in range(5)], False)
 
     with open(root / "runs/r1/events.jsonl", "a") as f:
         f.write('{"seq": 6, "type": "exchange", "run_id": "r1", "servi')  # a crash mid-write
-    assert _paths(StoreReader(root).load_run("r1")) == [f"/n{n}" for n in range(5)]
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == ([f"/n{n}" for n in range(5)], True)
+
+
+def test_a_last_line_whole_but_for_its_newline_is_read_and_is_not_cut_off(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/a"))
+    s.close()
+    events = root / "runs/r1/events.jsonl"
+    events.write_bytes(events.read_bytes().rstrip(b"\n"))
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == (["/a"], False)
+
+
+def test_the_unattributed_pool_says_when_a_crash_cut_off_its_last_event(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange(trace.UNATTRIBUTED, "/a"))
+    s.close()
+    assert not StoreReader(root).load_run(trace.UNATTRIBUTED).cut_tail
+    with open(root / "unattributed" / "events.jsonl", "a") as f:
+        f.write('{"seq": 2, "ty')
+    pool = StoreReader(root).load_run(trace.UNATTRIBUTED)
+    assert (_paths(pool), pool.cut_tail) == (["/a"], True)
 
 
 def test_a_restarted_store_resumes_seq_after_truncating_a_half_line(root, key):
@@ -1472,6 +1494,10 @@ def test_every_refusal_names_its_file_and_its_line(root, key):
     with pytest.raises(TraceFormatError) as refused:
         reader.load_run("r1")
     assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
+    events.write_text(first + "\n" + second.replace('"seq": 2', '"seq": "2"'))  # no newline
+    with pytest.raises(TraceFormatError) as refused:
+        reader.load_run("r1")
+    assert str(refused.value) == f"{events}, line 2: 'seq' is a string, not an integer"
     events.write_text(first + "\n" + second + "\n")
     blob = root / "blobs" / trace.body_ref(b"a body").sha256
     blob.unlink()
@@ -1583,6 +1609,16 @@ def test_json_nested_past_the_parsers_depth_is_damage_not_a_recursion_error(root
     for run_id in ("good", "deep"):
         with pytest.raises(TraceFormatError):
             reader.load_run(run_id)
+
+
+def test_a_last_line_nested_past_the_parsers_depth_is_read_as_cut_off(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/a"))
+    s.close()
+    with open(root / "runs/r1/events.jsonl", "a") as f:
+        f.write("[" * 1_000_000)
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == (["/a"], True)
 
 
 def test_a_missing_blob_is_a_trace_format_error(root, key):

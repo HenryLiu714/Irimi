@@ -359,6 +359,8 @@ class StoredRun:
 
     record: RunRecord
     events: list[Event]  # bodies loaded or empty; see `StoreReader.load_run`
+    # Its last event's line was cut off, by a crash or as it was written, so the reader skipped it.
+    cut_tail: bool = False
 
 
 def body_ref(body: bytes, truncated: bool = False) -> BodyRef:

@@ -140,15 +140,35 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   tools are not compared. A retry is the write it repeats, once.
 - **By data, not by line.** Two writes are the same when they are the same operation, irimi
   answered them the same way (faked, refused, sent to the same target; the same precondition
-  outcome and rejection code), and they carry the same fields: the objects the path names, the
-  query, the scope headers and the body less `compare_ignores:`. A write tool compares its
-  arguments. When a changed pair prints alike, the fields that differ are listed under it, as
+  outcome, rejection code and currency; the same flags for what irimi did), and they carry the
+  same fields: the objects the path names, the query, the scope headers and the body less
+  `compare_ignores:`. A write tool compares its arguments and the type of error its fake raised,
+  if any. When a changed pair prints alike, the fields that differ are listed under it, as
   `args.body` is above.
-- **Pairing.** Identical writes line up first; the writes between them pair by operation, so a
-  refund of another amount is one changed write, not one removed and one added.
-- **A body cut when stored is `?`.** Such a write is never `same`, even compared with itself.
-- **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and 2
-  when a run is not in the store or cannot be read. Both runs must be in one store.
+- **Sent the same, answered otherwise.** When a changed pair's two writes sent the same (the
+  fields above; for a write tool, its arguments), the line under it says
+  `(both sent the same; only the outcome differs)`, above the parts of the outcome that differ:
+  how irimi answered, the precondition outcome and rejection code, the currency the check read
+  found, the target, the flags, or the error a write tool's fake raised. So a check irimi could
+  make in one run and not the other, or a target that was down, does not read as the agent's
+  change. The pair is still `~`, and the comparison exits 1.
+- **Pairing.** Writes line up in order, with as many identical pairs as the two runs allow, then
+  as many pairs of one operation, so a refund of another amount is one changed write, not one
+  removed and one added, even beside a refund one run made twice. Writes of one operation pair
+  even when they name different objects, such as updates to two customers. Of pairings as good,
+  the earliest writes pair, so of a write one run made twice the later copy is the extra one.
+- **A write not stored whole is `?`.** A body cut when stored, or a part of the exchange irimi
+  could not redact and stored as `<redaction-failed>` (for a write tool, its arguments or error
+  type), leaves nothing to compare. Such a write is never `same`, even compared with itself.
+- **A run read in part.** A run whose events the store dropped, or whose last line is half
+  written (a crash, or a run still being written), is read without them, and the header says so:
+  `the store dropped 2 of B's events, which are not compared`, or
+  `B's last event was cut off when stored, so it is not compared`. A missing event may have been a
+  write, so such a comparison is never the same. A replay says the same of the recording or the
+  replay.
+- **Exit code.** As `diff(1)`'s: 0 when every write is `=` and both runs were read whole, 1
+  otherwise, `?` included, and 2 when a run is not in the store or cannot be read. Both runs must
+  be in one store.
 
 Comparing two separate recorded runs is not a replay: each ran against the services as they were
 then, so a difference can come from their data changing or the model sampling another answer, not
@@ -164,7 +184,7 @@ only from the agent.
 | Code | `irimi replay` |
 | --- | --- |
 | 0 | every write is the same |
-| 1 | a write differs, or was cut when stored, or events were dropped |
+| 1 | a write differs or was not stored whole, or a run was read in part |
 | 2 | irimi could not do it: the replay was refused, could not start or call the agent, or its run could not be read back |
 | 130, 143 | stopped by SIGINT or SIGTERM |
 | 141 | whatever read irimi's output went away |

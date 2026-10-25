@@ -173,6 +173,12 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
     (W11, "loopback_service"): _ESCAPE,
     (W11, "redirected"): "each hop's query names the fake internet's port, new in every run",
 }
+# Rule 7's exception: a recorded write whose answer is not whole misses once, and is faked again
+# without reaching the internet.
+MISSES_A_WRITE = {
+    (W9, "unredactable_post"): "its post is flagged `redaction-failed`, so the recording cannot "
+    "answer it (`UNSERVABLE_FLAGS`)",
+}
 # Rule 3's exception: the engine refuses a write whose body decodes past irimi's cap before any
 # policy is asked, so no replay flag is due.
 CUT_BEFORE_THE_POLICY = {(W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
@@ -476,7 +482,8 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         # 4. Every answer irimi decided reached the agent stamped as irimi recorded it.
         if not alone_differs:
             assert stamp_problems(replay) == Counter(), r.run_id
-        # 5. The comparison prints `=` rows (a `?` pair for a cut body) and exits 0 (1 for a cut).
+        # 5. The comparison prints `=` rows (a `?` pair for a write not stored whole) and exits 0
+        # (1 for such a pair).
         # A trigger the replay could not call compares nothing, which only `ALONE` may pin.
         if r.compared is None:
             assert (alone_differs, r.replay.exit_code) == (True, 2), r.run_id
@@ -496,9 +503,14 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             # and the replay says so.
             missed = [line(ex) for ex in replay.reported if Flag.REPLAY_MISS in ex.flags]
             if not alone_differs:
-                assert missed == [], r.run_id
+                assert len(missed) == int(case in MISSES_A_WRITE), (r.run_id, missed)
             # A read tool run for real is a miss too, which a scenario's table names.
-            whole = not (alone_differs or case in TOOLS_RUN_FOR_REAL or case in NAMES_ITS_OWN_RUNS)
+            whole = not (
+                alone_differs
+                or case in TOOLS_RUN_FOR_REAL
+                or case in NAMES_ITS_OWN_RUNS
+                or case in MISSES_A_WRITE
+            )
             if whole:
                 assert f"  {replay_report.NO_DIVERGENCE}" in replay.replay_result(), r.run_id
         if alone_differs:
@@ -573,6 +585,7 @@ def test_the_tables_name_only_scenarios_that_exist():
         set(REFUSED)
         | set(ALONE)
         | set(REACHES_THE_INTERNET)
+        | set(MISSES_A_WRITE)
         | CUT_BEFORE_THE_POLICY
         | set(EXIT_DIFFERS)
         | set(COMPARE_DIFFERS)

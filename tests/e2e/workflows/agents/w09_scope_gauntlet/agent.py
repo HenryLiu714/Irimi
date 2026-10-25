@@ -591,6 +591,31 @@ def _log_bytes(event: str, label: str, body: bytes, encoding: str | None) -> Non
     )
 
 
+# The text `unredactable_post` posts, so a replay can post another.
+POST_TEXT_ENV = "POST_TEXT"
+# Past the 4300 digits `json.loads` reads of an integer, so no reader can parse the body.
+LONG_INTEGER = "1" * 5000
+
+
+def unredactable_post() -> None:
+    """Post to Slack with JSON holding an integer too long to read, which irimi cannot redact.
+
+    No reader parses the body, irimi's summary and Slack's fake included, and irimi stores none of
+    it."""
+    text = json.dumps(os.environ.get(POST_TEXT_ENV, "deploy started"))
+    body = f'{{"channel": "C0GAUNT", "text": {text}, "n": {LONG_INTEGER}}}'
+    http(
+        "POST",
+        base("slack") + "/api/chat.postMessage",
+        body=body.encode(),
+        headers={
+            "Authorization": f"Bearer {agentkit.key('SLACK_BOT_TOKEN')}",
+            "Content-Type": "application/json",
+        },
+        label="unredactable_post",
+    )
+
+
 def unmapped_hosts() -> None:
     """Call hosts no map claims, and a mapped RPC host's unrouted method."""
     gql = agentkit.internal("graphql.internal")
@@ -639,6 +664,7 @@ GROUPS = {
     "bombs": bombs,
     "cut_refund": cut_refund,
     "cut_update": cut_update,
+    "unredactable_post": unredactable_post,
     "unmapped_hosts": unmapped_hosts,
     "get_that_writes": get_that_writes,
 }

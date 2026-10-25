@@ -145,6 +145,11 @@ WORKFLOW = Workflow(
             doc="cut_refund with the cut write a customer update: `irimi compare` will not compare "
             "it with the cut refund, a `?` row",
         ),
+        "unredactable_post": Scenario(
+            ("unredactable_post",),
+            doc="a Slack post whose JSON holds an integer too long to read: irimi stores no body "
+            "for it, and `irimi compare` will not call it the same, even as itself, a `?` row",
+        ),
         "unmapped_hosts": Scenario(
             ("unmapped_hosts",), setup=_internal, doc="GraphQL and Slack's unrouted method"
         ),

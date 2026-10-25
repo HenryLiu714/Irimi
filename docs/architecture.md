@@ -152,9 +152,11 @@ The store's own layout is in [trace-format.md](trace-format.md#layout).
   1000 writes, after a second idle, when a run ends (its `events.jsonl`) and on close. A `run.json`
   is written to a temporary file, synced and renamed into place, so a crash leaves the old record
   or the new one.
-- **Crashes.** A final line a crash cut off is skipped on read. A store that resumes the run (a
-  restarted `irimi serve`) truncates it before appending and continues `seq` after the last line it
-  can read. A blob a crash tore is rewritten by the next event that needs it.
+- **Crashes.** A final line a crash cut off is skipped on read, and the run read back says so
+  (`StoredRun.cut_tail`), for `irimi runs show`, `irimi compare` and `irimi replay` to print. A
+  store that resumes the run (a restarted `irimi serve`) truncates it before appending and
+  continues `seq` after the last line it can read. A blob a crash tore is rewritten by the next
+  event that needs it.
 - **Sharing a root.** One process writes a given run; several may share a root, since run
   directories never collide and a blob is the same bytes whoever writes it. `unattributed/` is the
   one shared file, so each writer numbers its own lines there. A serve fills it, so a root has at

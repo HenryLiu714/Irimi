@@ -28,7 +28,8 @@ class ReplayResult:
     Attributes:
         source_run_id: The stored run that was replayed.
         replay_run_id: The run the replay stored, or None when it was refused before it ran.
-        exit_code: 0 same writes, 1 any differ, 2 could not run, 130/143 stopped by a signal.
+        exit_code: 0 same writes, 1 any differ or could not be compared, 2 could not run,
+            130/143 stopped by a signal.
         diverged_at: The line naming the first call the recording did not answer, or None.
         lines: What `irimi replay` printed, one string per line.
 

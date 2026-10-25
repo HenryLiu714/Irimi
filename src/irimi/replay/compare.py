@@ -1,16 +1,17 @@
 """Compare two stored runs write by write, for `irimi compare` and `irimi replay`.
 
 Actions (`RunSummary.actions`) compare by data: key, `outcome` and `fields`, never printed text.
-Identical actions anchor first; the stretches between pair by key, so a refund of another amount
-is one changed write. An action whose body was cut when stored is never `same`.
+The pairing has the most identical actions, then the most pairs of one key, so a refund of
+another amount is one changed write. An action not stored whole is never `same`, and a run the
+store gave back in part is never the same.
 """
 
-import difflib
 import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Callable, Hashable, Iterator, Sequence
+from collections import Counter
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl
@@ -19,6 +20,7 @@ from irimi import services
 from irimi.core import exitcodes
 from irimi.core.exchange import Flag
 from irimi.protocol.trace import JSONValue, RunRecord, StoredRun, canonical_json, trigger_args
+from irimi.record import redact
 from irimi.replay.index import compared_body
 from irimi.report import model
 from irimi.report.model import RunView, WriteEntry
@@ -32,9 +34,14 @@ from irimi.servicemaps import MapIndex, path_params
 EXCHANGE_KEY = "exchange"
 TOOL_KEY = "tool"
 ARGS_DIFFER = "(the triggers' args differ)"
-# Noted for a pair either side of which is flagged `body-truncated`; the flag does not say which
-# body was cut, so a cut response counts too.
-CUT_NOTE = "a body was cut when stored"
+# Noted for a pair either side of which was not stored whole (`Action.cut`).
+CUT_NOTE = "a write was not stored whole"
+# Flags that say part of an exchange was not stored as it was: cut, or stored as
+# `<redaction-failed>`. Neither says which part, so a cut response counts too.
+NOT_WHOLE_FLAGS = frozenset({Flag.BODY_TRUNCATED, Flag.REDACTION_FAILED})
+# Printed under a changed pair whose two writes sent the same, above how their outcomes differ, so
+# a check irimi made in one run and could not in the other does not read as the agent's change.
+SENT_ALIKE = "(both sent the same; only the outcome differs)"
 # Flags that say what irimi did with a write. `from-recording` and `replay-miss` are left out:
 # they would set every replayed write apart from its recording.
 OUTCOME_FLAGS = frozenset(
@@ -66,7 +73,9 @@ class Action:
 
     key: tuple[str, ...]  # (EXCHANGE_KEY, service, operation), or (TOOL_KEY, the tool's name)
     sentence: str  # the summary's line for it, without the indent and unescaped
-    cut: bool = False  # its exchange is flagged `body-truncated`
+    # Not stored whole: flagged as `NOT_WHOLE_FLAGS` names, or a tool's args or error type stored
+    # as `<redaction-failed>`.
+    cut: bool = False
     outcome: tuple[Field, ...] = ()
     # None for data JSON cannot hold (nested too deep or not finite); such an action equals nothing.
     fields: tuple[Field, ...] | None = ()
@@ -88,11 +97,16 @@ class Action:
         return "".join(_seen(char) for char in self.text)
 
     @property
-    def data(self) -> Hashable:
-        """Return what it is compared by; a fresh object, equal to nothing, if cut or not JSON."""
+    def sent(self) -> Hashable:
+        """Return its key and fields; a fresh object, equal to nothing, if cut or not JSON."""
         if self.cut or self.fields is None:
             return object()
-        return (self.key, self.outcome, self.fields)
+        return (self.key, self.fields)
+
+    @property
+    def data(self) -> Hashable:
+        """Return what it is compared by: what it `sent`, and its outcome."""
+        return (self.sent, self.outcome)
 
 
 # Unicode categories that print as nothing or as a space (format, separator, private-use and
@@ -125,17 +139,46 @@ class Row:
 
 
 @dataclass(frozen=True)
+class Unread:
+    """What the store did not give back of a run; either may have been a write."""
+
+    dropped: int = 0  # events it dropped (`RunRecord.dropped_events`)
+    cut_tail: bool = False  # a last event cut off (`StoredRun.cut_tail`)
+
+    @classmethod
+    def of(cls, run: StoredRun) -> "Unread":
+        return cls(run.record.dropped_events, run.cut_tail)
+
+    def lines(self, name: str) -> list[str]:
+        """Return a note for each part of the run, named `name`, the store did not give back."""
+        lines = []
+        if self.dropped:
+            lines.append(
+                f"  the store dropped {self.dropped} of {name}'s events, which are not compared"
+            )
+        if self.cut_tail:
+            lines.append(f"  {name}'s last event was cut off when stored, so it is not compared")
+        return lines
+
+
+@dataclass(frozen=True)
 class Comparison:
     rows: tuple[Row, ...]
+    unread: tuple[Unread, Unread] = (Unread(), Unread())  # A's and B's
 
     def count(self, mark: Mark) -> int:
         return sum(1 for row in self.rows if row.mark == mark)
 
     @property
     def exit_code(self) -> int:
-        """Return `exitcodes.OK` when every row is `same`, else `DIFFERENT` (a `cut` row too)."""
-        same = all(row.mark == "same" for row in self.rows)
+        """Return `exitcodes.OK` when every row is `same` and both runs were read whole."""
+        whole = self.unread == (Unread(), Unread())
+        same = whole and all(row.mark == "same" for row in self.rows)
         return exitcodes.OK if same else exitcodes.DIFFERENT
+
+    def unread_lines(self, a: str, b: str) -> list[str]:
+        """Return the notes of what the store did not give back of A, named `a`, and B, `b`."""
+        return [*self.unread[0].lines(a), *self.unread[1].lines(b)]
 
     def lines(self) -> list[str]:
         """Return every row, a blank line and the totals; the totals alone if neither run wrote."""
@@ -164,6 +207,7 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
             Action(
                 (TOOL_KEY, action.name),
                 tool_write_sentence(action),
+                cut=redact.REDACTION_FAILED in (action.args, error),
                 outcome=_named({"raised": error}),
                 fields=_fields(_spread("args", action.args)),
             )
@@ -223,7 +267,7 @@ def _exchange_action(entry: WriteEntry) -> Action:
     return Action(
         (EXCHANGE_KEY, exchange.service, exchange.operation),
         write_sentence(entry),
-        Flag.BODY_TRUNCATED in exchange.flags,
+        not NOT_WHOLE_FLAGS.isdisjoint(exchange.flags),
         _named(outcome),
         fields,
     )
@@ -243,37 +287,122 @@ def _fields(values: dict[str, JSONValue]) -> tuple[Field, ...] | None:
 
 
 def align(a: Sequence[Action], b: Sequence[Action]) -> tuple[Row, ...]:
-    """Line up `a` and `b`, each action in one row: identical actions by data, the rest by key."""
+    """Line up `a` and `b` in order, each action in one row: most identical pairs, then most pairs.
+
+    Pairs are of one key. Between two pairs, the actions only `a` has come before those only `b`
+    has."""
     rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, lambda action: action.data):
-        if tag == "equal":
-            rows += [Row("same", one, other) for one, other in zip(x, y, strict=True)]
+    i = j = 0
+    for x, y in _pairs(a, b):
+        rows += _unpaired(a[i:x], b[j:y])
+        rows.append(_pair(a[x], b[y]))
+        i, j = x + 1, y + 1
+    return (*rows, *_unpaired(a[i:], b[j:]))
+
+
+def _unpaired(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
+    return [*(Row("only_a", x, None) for x in a), *(Row("only_b", None, y) for y in b)]
+
+
+# How `_pairs` moves on from `(i, j)`; a tie pairs, else passes over `b[j]`.
+_SKIP_A, _SKIP_B, _PAIR = range(3)
+
+
+def _pairs(a: Sequence[Action], b: Sequence[Action]) -> list[tuple[int, int]]:
+    """Return the `(i, j)` of each pair `align` makes.
+
+    One identical pair outweighs all the other pairs the runs could make, so a repeated action
+    pairs with the copy that leaves its neighbours a pair. Of pairings as good, the one whose
+    pairs come soonest wins, so a repeat beside its copy is the extra one. Between the identical
+    actions both runs start with and the ones `_shared_end` counts, the cost is the product of
+    what is left of each, in time and bytes."""
+    # Every best pairing pairs the identical actions both runs start with.
+    start = 0
+    while start < min(len(a), len(b)) and a[start].data == b[start].data:
+        start += 1
+    end = _shared_end(a[start:], b[start:])
+    stop_a, stop_b = len(a) - end, len(b) - end
+    pairs = [(n, n) for n in range(start)]
+    steps = _steps(a[start:stop_a], b[start:stop_b])
+    i = j = start
+    while i < stop_a and j < stop_b:
+        step = steps[i - start][j - start]
+        if step == _PAIR:
+            pairs.append((i, j))
+            i, j = i + 1, j + 1
+        elif step == _SKIP_B:
+            j += 1
         else:
-            rows += _by_key(x, y)
-    return tuple(rows)
+            i += 1
+    return [*pairs, *((stop_a + n, stop_b + n) for n in range(end))]
 
 
-def _by_key(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
-    """Line up unanchored actions by key; an unmatched stretch is all `only_a`, then `only_b`."""
-    rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, lambda action: action.key):
-        if tag == "equal":
-            rows += [_pair(one, other) for one, other in zip(x, y, strict=True)]
-        else:
-            rows += [Row("only_a", one, None) for one in x]
-            rows += [Row("only_b", None, other) for other in y]
-    return rows
+def _shared_end(a: Sequence[Action], b: Sequence[Action]) -> int:
+    """Return the length of the longest identical end both runs share that holds every copy it has.
+
+    Every best pairing pairs such an end action for action: its actions are identical only to
+    each other, and only that pairs them all. An end with a copy of one of its actions before it
+    is not counted, since the soonest pairing may pair that earlier copy."""
+    data_a, data_b = [x.data for x in a], [y.data for y in b]
+    made = Counter([*data_a, *data_b])
+    inside: Counter[Hashable] = Counter()
+    # How many distinct actions of the end so far have a copy before it.
+    outside = end = 0
+    for n in range(1, min(len(a), len(b)) + 1):
+        data = data_a[-n]
+        if data != data_b[-n]:
+            break
+        if not inside[data]:
+            outside += 1
+        inside[data] += 2
+        if inside[data] == made[data]:
+            outside -= 1
+        if not outside:
+            end = n
+    return end
 
 
-def _opcodes(
+def _steps(a: Sequence[Action], b: Sequence[Action]) -> list[bytearray]:
+    """Return the best first step from each `(i, j)`, scoring `a[i:]` against `b[j:]`."""
+    key_a, key_b = _interned(a, b, lambda action: action.key)
+    data_a, data_b = _interned(a, b, lambda action: action.data)
+    # Every pair scores how soon it comes, `(len(a) - i) + (len(b) - j)`; a pair of one key
+    # outweighs all of that, and an identical pair all the other pairs.
+    most = min(len(a), len(b))
+    one_key = most * (len(a) + len(b)) + 1
+    identical = (most + 1) * one_key
+    # `after[j]` scores `a[i + 1:]` against `b[j:]`, and `here[j]` scores `a[i:]`.
+    after = [0] * (len(b) + 1)
+    steps: list[bytearray] = []
+    for i in reversed(range(len(a))):
+        here = [0] * (len(b) + 1)
+        row = bytearray(len(b))
+        soon = len(a) - i + len(b)
+        for j in reversed(range(len(b))):
+            best, step = after[j], _SKIP_A
+            if here[j + 1] >= best:
+                best, step = here[j + 1], _SKIP_B
+            if key_a[i] == key_b[j]:
+                kind = identical if data_a[i] == data_b[j] else one_key
+                paired = after[j + 1] + kind + soon - j
+                if paired >= best:
+                    best, step = paired, _PAIR
+            here[j], row[j] = best, step
+        steps.append(row)
+        after = here
+    return steps[::-1]
+
+
+def _interned(
     a: Sequence[Action], b: Sequence[Action], by: Callable[[Action], Hashable]
-) -> Iterator[tuple[str, Sequence[Action], Sequence[Action]]]:
-    """Yield `difflib` opcodes over `a` and `b` compared `by`, with the stretches each spans.
+) -> tuple[list[int], list[int]]:
+    """Return each action's `by` as an int, equal where `by` is equal."""
+    ids: dict[Hashable, int] = {}
 
-    Autojunk is off: forty identical writes are forty writes, not noise."""
-    matcher = difflib.SequenceMatcher(a=[by(x) for x in a], b=[by(y) for y in b], autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        yield tag, a[i1:i2], b[j1:j2]
+    def interned(action: Action) -> int:
+        return ids.setdefault(by(action), len(ids))
+
+    return [interned(x) for x in a], [interned(y) for y in b]
 
 
 def _pair(x: Action, y: Action) -> Row:
@@ -285,7 +414,7 @@ def _pair(x: Action, y: Action) -> Row:
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
     """Compare `a`'s writes against `b`'s; `index` supplies `human:` and `compare_ignores:`."""
-    return Comparison(align(actions(a, index), actions(b, index)))
+    return Comparison(align(actions(a, index), actions(b, index)), (Unread.of(a), Unread.of(b)))
 
 
 def header_lines(a: RunRecord, b: RunRecord) -> list[str]:
@@ -326,8 +455,9 @@ def _row_lines(row: Row, alike: frozenset[str] = frozenset()) -> list[str]:
     """Return a row's lines: a differing pair as A over B, any other row as its one action.
 
     An action whose sentence prints like another's in the comparison (`alike`) prints `escaped`
-    text (`printable` prints a newline and a typed `\\n` alike), in a pair or not. A pair with one
-    sentence prints its differing fields."""
+    text (`printable` prints a newline and a typed `\\n` alike), in a pair or not. A changed pair
+    that sent the same says so above its outcome's differences; one with one sentence prints its
+    differing fields."""
     marker = MARKERS[row.mark]
 
     def shown(action: Action) -> str:
@@ -335,7 +465,9 @@ def _row_lines(row: Row, alike: frozenset[str] = frozenset()) -> list[str]:
 
     if row.mark in ("changed", "cut") and row.a is not None and row.b is not None:
         lines = [f"  {marker} A {shown(row.a)}", f"    B {shown(row.b)}"]
-        if row.mark == "changed" and row.a.sentence == row.b.sentence:
+        if row.a.sent == row.b.sent:
+            lines += [f"      {SENT_ALIKE}", *field_diff(row.a, row.b)]
+        elif row.mark == "changed" and row.a.sentence == row.b.sentence:
             lines += field_diff(row.a, row.b)
         return lines
     action = row.a if row.a is not None else row.b

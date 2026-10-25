@@ -220,7 +220,7 @@ def _run_replay(
 
 
 def _load_source(args: argparse.Namespace) -> StoredRun:
-    """Return the stored run to replay, read whole; raise `replay.plan.Refused` if it cannot be."""
+    """Return the stored run to replay, with bodies; raise `replay.plan.Refused` if it cannot be."""
     root = compose.store_root(args)
     if args.run_id == UNATTRIBUTED:
         # A pool of requests from many sessions, not one run.

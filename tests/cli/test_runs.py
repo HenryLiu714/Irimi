@@ -552,6 +552,29 @@ def test_runs_show_prints_the_header_every_event_and_the_summary(home, capfd):
     ]
 
 
+def test_runs_show_says_a_crash_cut_off_the_run_s_last_event_and_shows_the_rest(home, capfd):
+    _hand_built_incomplete_run(home / "store", redact.load_key(home))
+    with open(home / "store" / "runs" / "handbuilt" / "events.jsonl", "a") as f:
+        f.write('{"seq": 9, "type": "exchange", "run_id": "handbuilt", "servi')
+    assert main(["runs", "show", "handbuilt"]) == 0
+    out, err = capfd.readouterr()
+    assert err == ""
+    assert out.splitlines() == [
+        "run: handbuilt",
+        "attribution: sdk",
+        "trigger: refund_ticket",
+        "entrypoint: agent:refund_ticket",
+        'args: {"ticket":"T-1"}',
+        "agent version: 2.0.1",
+        "outcome: incomplete",
+        "last event: cut off when stored, not shown",
+        "",
+        *HANDBUILT_EVENTS,
+        "",
+        *_handbuilt_summary("refund $49.00 on ch_1", ["  money: $49.00 in faked writes"]),
+    ]
+
+
 def test_runs_show_prints_an_error_run_s_error_and_exit_code(home, capfd):
     run_id = _shadow(capfd, "import sys", "sys.exit(3)")
     assert main(["runs", "show", run_id]) == 0
@@ -622,6 +645,29 @@ def test_runs_show_unattributed_reads_the_events_no_run_claimed(home, capfd):
     lines = capfd.readouterr().out.splitlines()
     assert lines[:2] == ["run: unattributed", "attribution: header"]
     assert "irimi shadow · run unattributed · 1 exchange · 0.0s" in lines
+
+
+def test_runs_show_unattributed_holding_only_a_cut_off_line_says_so_not_that_it_is_empty(
+    home, capfd
+):
+    (home / "store" / "unattributed").mkdir(parents=True)
+    (home / "store" / "unattributed" / "events.jsonl").write_text('{"seq": 1, "ty')
+    """A pool whose one line was cut off is not empty: `runs show` says what it skipped."""
+    assert main(["runs", "show", "unattributed"]) == 0
+    assert capfd.readouterr().out.splitlines() == [
+        "run: unattributed",
+        "attribution: header",
+        "trigger: -",
+        "entrypoint: -",
+        "args: -",
+        "agent version: -",
+        "outcome: incomplete",
+        "last event: cut off when stored, not shown",
+        "",
+        "irimi shadow · run unattributed · 0 exchanges · 0.0s",
+        "",
+        "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
+    ]
 
 
 def test_runs_show_still_prints_with_a_warning_when_the_maps_do_not_load(home, capfd):

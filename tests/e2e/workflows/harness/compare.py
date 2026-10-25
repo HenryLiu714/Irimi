@@ -19,12 +19,15 @@ ROW_SIDES = {"  = ": "AB", "  - ": "A", "  ~ A ": "A", "  ? A ": "A", "  + ": "B
 # How a `~` or `?` pair's A row starts, and its B row under it.
 PAIR_A_PREFIXES = ("  ~ A ", "  ? A ")
 PAIR_B_PREFIX = "    B "
-# How a differing field starts, printed under a `~` pair whose two lines read the same.
+# How a differing field starts, printed under a `~` pair whose two lines read the same or whose
+# two writes sent the same.
 FIELD_DIFF_PREFIX = "      "
+# The line under a `~` pair whose two writes sent the same, above how their outcomes differ.
+SENT_ALIKE = f"{FIELD_DIFF_PREFIX}(both sent the same; only the outcome differs)"
 
 
 def _under_a_pair(rows: list[str], i: int) -> bool:
-    """Return whether row `i` is a field line under a `~` pair's A and B rows."""
+    """Return whether row `i` is a field line, or `SENT_ALIKE`, under a `~` pair's A and B rows."""
     while i > 0 and rows[i - 1].startswith(FIELD_DIFF_PREFIX):
         i -= 1
     return i >= 2 and rows[i - 1].startswith(PAIR_B_PREFIX) and rows[i - 2].startswith("  ~ A ")
