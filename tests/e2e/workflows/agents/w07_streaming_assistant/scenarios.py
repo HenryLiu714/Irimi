@@ -355,6 +355,7 @@ WORKFLOW = Workflow(
             setup=_held,
             doc="the trigger returns Anthropic's stream still open, as a handler returns a "
             "streaming response: the run ends first, and the stream is recorded after it",
+            serve_holds_summaries=True,
         ),
     },
 )

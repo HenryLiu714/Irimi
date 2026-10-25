@@ -39,6 +39,9 @@ class Scenario:
     serve_flags: tuple[str, ...] = ()
     # The irimi flags it runs with under `irimi shadow -- <cmd>`.
     shadow_flags: tuple[str, ...] = ()
+    # Under serve, every summary serve reads back waits until the agent has exited and the store
+    # has written what it was handed (`Result.held`).
+    serve_holds_summaries: bool = False
 
 
 @dataclass(frozen=True)

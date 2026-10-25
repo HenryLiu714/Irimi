@@ -88,6 +88,7 @@ WORKFLOW = Workflow(
             setup=_charges,
             doc="threads_8 with the ledger tools: each message's read tool on its pool thread and "
             "its write tool in the propagated refund thread, all landing in its own run",
+            serve_holds_summaries=True,
         ),
         "ledger_two_tools_8": Scenario(
             ("ledger_two_tools_8",),

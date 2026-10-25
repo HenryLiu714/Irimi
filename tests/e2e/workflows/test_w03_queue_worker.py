@@ -63,6 +63,21 @@ def test_eight_concurrent_runs_print_eight_summaries_under_serve(run_workflow, s
     assert serve.result()["ok"] == 8
 
 
+def test_serve_stores_every_run_while_each_summary_waits_to_be_read_back(run_workflow):
+    """Serve reads an ended run back off the store's writer, so a slow read holds up no event.
+
+    `ledger_threads_8` holds each read-back until the agent has exited: by then the store has
+    written all eight runs, their tool calls and ends included, and each run's block prints."""
+    serve = run_workflow(W, "ledger_threads_8", "serve")
+    held, reader = serve.held, serve.stored()
+    assert held is not None and held.settled
+    assert held.ended == set(ends(serve)) and len(held.ended) == 8
+    stored = {run_id: reader.load_run(run_id).events for run_id in held.ended}
+    assert held.event_counts == {run_id: len(events) for run_id, events in stored.items()}
+    assert all(any(isinstance(e, ToolCall) for e in events) for events in stored.values())
+    assert set(serve.run_blocks()) == held.ended
+
+
 @pytest.mark.parametrize("scenario", ["threads_8", "asyncio_8"])
 @pytest.mark.parametrize("mode", MODES)
 def test_eight_concurrent_runs_never_mix(run_workflow, mode, scenario):
