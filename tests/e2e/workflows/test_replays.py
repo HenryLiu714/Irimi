@@ -61,6 +61,8 @@ REFUSED: dict[tuple[str, str], str] = {
             "reset_before_stream",
             "tool_call_across_deltas",
             "secret_split_across_writes",
+            "secret_in_multi_line_event",
+            "secret_after_escapes",
             "gzip_bomb_stream",
             "gzip_stream",
             "two_callers",

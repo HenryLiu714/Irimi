@@ -5,6 +5,7 @@ The agent reads streams seven bytes at a time, so every event arrives split."""
 import hashlib
 import json
 import re
+from bisect import bisect_left
 from itertools import accumulate
 
 import pytest
@@ -18,8 +19,13 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.agent import HUNG_UP
 from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     ANSWER,
     CHANNEL,
+    ESCAPES_ANSWER,
+    ESCAPES_DECISION,
     LONG_ANSWER,
     SECRET,
+    SECRET_DECISION,
+    SSE_CLIENT_SECRET,
+    SSE_ESCAPED_KEY,
     pair_answer,
     pair_decision,
 )
@@ -43,6 +49,13 @@ BROKEN_STREAM_LINE = (
 )
 MESSAGE_START = b"event: message_start\n"
 MESSAGE_STOP = b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
+# The 12-character deltas of Anthropic's answer in `secret_in_stream` that carry part of SECRET.
+SECRET_DELTAS = [" is sk_live_", "CANARYstream", "secret000000", "0000. Keep i"]
+
+
+def stored_secret_deltas(hidden: str) -> list[str]:
+    """`SECRET_DELTAS` as stored: the placeholder in the first, the secret cut from the rest."""
+    return [f" is {hidden}", "", "", ". Keep i"]
 
 
 def stored_exchanges(result) -> dict[str, Exchange]:
@@ -69,9 +82,39 @@ def text_deltas(body: bytes) -> str:
     )
 
 
+def first_event(body: bytes) -> tuple[list[str], dict]:
+    """A stream's first event's lines, and the document its `data:` lines join into."""
+    lines = body.decode().split("\n\n", 1)[0].split("\n")
+    data = [line.removeprefix("data:") for line in lines if line.startswith("data:")]
+    return lines, json.loads("\n".join(data))
+
+
+def chat_deltas(body: bytes) -> list[str]:
+    """The pieces of content an OpenAI chat stream's events carry, in order."""
+    return [
+        d["choices"][0]["delta"]["content"]
+        for d in data_lines(body)
+        if "content" in d["choices"][0]["delta"]
+    ]
+
+
 def boundaries(chunks: tuple[int, ...]) -> list[int]:
     """The offsets in a streamed body where one recorded chunk ends and the next begins."""
     return list(accumulate(chunks))[:-1]
+
+
+def carried(sent: bytes, stored: bytes, cuts: list[int]) -> list[int]:
+    """Where `cuts` in a sent stream fall in its stored copy, which has as many lines.
+
+    A cut in a line stored as sent keeps its place in it; one in a changed line moves to its end."""
+    old, new = sent.splitlines(keepends=True), stored.splitlines(keepends=True)
+    old_ends, new_ends = list(accumulate(map(len, old))), list(accumulate(map(len, new)))
+    moved = set()
+    for cut in cuts:
+        line = bisect_left(old_ends, cut)
+        kept = old_ends[line] - cut if old[line] == new[line] else 0
+        moved.add(new_ends[line] - kept)
+    return sorted(moved - {len(stored)})
 
 
 def line_around(body: bytes, needle: bytes) -> tuple[int, int]:
@@ -215,18 +258,107 @@ def test_a_secret_inside_a_stream_reaches_the_caller_intact_and_never_disk(run_w
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_a_secret_a_stream_sends_in_pieces_reaches_disk_in_pieces(run_workflow, mode):
-    """A secret split across 12-character deltas is never whole on a line redaction reads."""
+def test_a_secret_a_stream_sends_in_pieces_is_stored_as_one_placeholder_in_the_first(
+    run_workflow, mode
+):
+    """A secret both streams send across 12-character deltas is stored as its placeholder.
+
+    It goes in the first delta that holds part of the secret, the secret's text is cut from the
+    others, and every other delta is stored as sent. Each event keeps its line, so the recorded
+    chunks still split the stored stream line by line. No piece of the secret reaches disk."""
     shadow = run_workflow(W, "secret_in_stream", mode)
-    anthropic = stored_exchanges(shadow)["/v1/messages"].response
-    assert anthropic is not None
-    deltas = [
-        d["delta"]["text"] for d in data_lines(anthropic.body) if d["type"] == "content_block_delta"
+    assert shadow.result()["decision"] == SECRET_DECISION
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    stored = stored_exchanges(shadow)
+    handed = {e.request.path: e for e in shadow.handed if e.response is not None}
+    sent_anthropic, sent_openai = (
+        handed[path].response.body for path in ("/v1/messages", "/v1/chat/completions")
+    )
+    anthropic = ["The test key", *SECRET_DELTAS, "t out of log", "s."]
+    openai = ["No summary n", "eeded: the k", "ey sk_live_C", "ANARYstreams", "ecret0000000"]
+    openai += ["000 stays pr", "ivate."]
+    assert [d["delta"]["text"] for d in data_lines(sent_anthropic)[2:-3]] == anthropic
+    assert chat_deltas(sent_openai) == openai
+    # What the store holds.
+    anthropic[1:5] = stored_secret_deltas(hidden)
+    openai[2:5] = [f"ey {hidden}", "", ""]
+    openai[5] = " stays pr"
+    for path, deltas in (("/v1/messages", anthropic), ("/v1/chat/completions", openai)):
+        ex = stored[path]
+        assert ex.response is not None and ex.flags == ()
+        body, sent = ex.response.body, handed[path].response.body
+        if path == "/v1/messages":
+            assert [d["delta"]["text"] for d in data_lines(body)[2:-3]] == deltas
+        else:
+            assert chat_deltas(body) == deltas
+        assert len(body.splitlines()) == len(sent.splitlines())
+        assert boundaries(ex.stream_chunks) == carried(
+            sent, body, boundaries(handed[path].stream_chunks)
+        )
+    pieces = [b"CANARYstream", b"secret000000", b"sk_live_C", b"ANARYstreams", b"ecret0000000"]
+    written = [
+        (path, piece)
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file()
+        for piece in pieces
+        if piece in path.read_bytes()
     ]
-    assert "".join(deltas) == f"The test key is {SECRET}. Keep it out of logs."
-    # KNOWN BUG (#92): each delta is redacted on its own, so the stored stream holds the whole
-    # secret for anyone who joins its deltas.
-    assert [d for d in deltas if d[:4] in ("CANA", " is ")] == [" is sk_live_", "CANARYstream"]
+    assert written == []
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_key_sent_in_pieces_after_an_escape_in_the_piece_before_is_stored_as_its_placeholder(
+    run_workflow, mode
+):
+    """A key that only the escape before it, sent in the piece before, lets start is still a key.
+
+    Anthropic sends `%`, then `20` and the whole key, which alone reads glued to the `20`; OpenAI
+    sends a letter its JSON escapes, then the key across two pieces. The agent reads both intact
+    and irimi stores each key as its placeholder, in the piece it starts in."""
+    bare = run_workflow(W, "secret_after_escapes", "bare")
+    shadow = run_workflow(W, "secret_after_escapes", mode)
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["answer"] == "".join(ESCAPES_ANSWER)
+    assert shadow.result()["decision"] == "".join(ESCAPES_DECISION)
+    assert shadow.exchange_lines() == LLM_LINES
+    handed = {e.request.path: e for e in shadow.handed if e.response is not None}
+    sent_anthropic, sent_openai = (
+        handed[path].response.body for path in ("/v1/messages", "/v1/chat/completions")
+    )
+    # Anthropic's key is whole in a piece, its `%` in the one before; OpenAI's key is in two.
+    assert ESCAPES_ANSWER[0].endswith("%") and ESCAPES_ANSWER[1] == "20" + SECRET
+    assert [piece for piece in ESCAPES_DECISION if SECRET in piece] == []
+    assert [d["delta"]["text"] for d in data_lines(sent_anthropic)[2:-3]] == ESCAPES_ANSWER
+    assert chat_deltas(sent_openai) == ESCAPES_DECISION
+    assert b'"No summary: \\u0041"' in sent_openai
+    # What the store holds.
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    stored = stored_exchanges(shadow)
+    anthropic, openai = (stored[path] for path in ("/v1/messages", "/v1/chat/completions"))
+    assert anthropic.response is not None and anthropic.flags == ()
+    assert openai.response is not None and openai.flags == ()
+    deltas = [d["delta"]["text"] for d in data_lines(anthropic.response.body)[2:-3]]
+    assert deltas == [ESCAPES_ANSWER[0], f"20{hidden}", ESCAPES_ANSWER[2]]
+    assert chat_deltas(openai.response.body) == [ESCAPES_DECISION[0], hidden, " stays private."]
+    for ex, body in ((anthropic, anthropic.response.body), (openai, openai.response.body)):
+        sent = handed[ex.request.path]
+        assert boundaries(ex.stream_chunks) == carried(
+            sent.response.body, body, boundaries(sent.stream_chunks)
+        )
+    # The agent passes Anthropic's answer on to OpenAI, whose stored request holds the placeholder.
+    assert f"%20{hidden}".encode() in openai.request.body
+    pieces = [SECRET[9:].encode(), b"CANARYstream", b"streamsecret"]
+    written = [
+        (path, piece)
+        for root in (shadow.home, shadow.cwd, shadow.tmp)
+        for path in root.rglob("*")
+        if path.is_file()
+        for piece in pieces
+        if piece in path.read_bytes()
+    ]
+    assert written == []
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -387,6 +519,60 @@ def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workf
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_an_events_json_over_several_data_lines_is_stored_redacted_in_as_many_lines(
+    run_workflow, mode
+):
+    """An event's JSON over several `data:` lines is redacted as the document the agent reads.
+
+    The served `client_secret` has no secret's shape, and the served key follows an escaped
+    letter the walk reads as glued to it. The stored event holds the walked document on its first
+    `data:` line and leaves the others empty, so the stream keeps its lines, and the chunk
+    boundary inside the secret's line moves to that line's end."""
+    bare = run_workflow(W, "secret_in_multi_line_event", "bare")
+    shadow = run_workflow(W, "secret_in_multi_line_event", mode)
+    assert bare.exit_code == shadow.exit_code == 0
+    assert shadow.result(with_time=False) == bare.result(with_time=False)
+    assert shadow.result()["caller_text"] == shadow.result()["answer"] == ANSWER
+    assert shadow.exchange_lines() == LLM_LINES
+    # Before redaction: the event as sent, the secret on a line that is not JSON alone.
+    [handed] = [e for e in shadow.handed if e.request.path == "/v1/messages"]
+    assert handed.response is not None
+    sent, sent_cuts = handed.response.body, boundaries(handed.stream_chunks)
+    sent_lines, started = first_event(sent)
+    assert started["message"]["client_secret"] == SSE_CLIENT_SECRET
+    assert started["message"]["note"] == "A" + SSE_ESCAPED_KEY
+    assert f'"\\u0041{SSE_ESCAPED_KEY}"'.encode() in sent
+    [held] = [n for n, line in enumerate(sent_lines) if SSE_CLIENT_SECRET in line]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(sent_lines[held].removeprefix("data:"))
+    at, event_end = sent.index(SSE_CLIENT_SECRET.encode()), sent.index(b"\n\n") + 2
+    assert [cut for cut in sent_cuts if cut < event_end] == [at + len(SSE_CLIENT_SECRET) // 2]
+    # What the store holds.
+    stored = stored_exchanges(shadow)["/v1/messages"]
+    assert stored.response is not None and stored.flags == ()
+    body = stored.response.body
+    lines, document = first_event(body)
+    key = redact.load_key(shadow.home)
+    hidden = redact.placeholder(key, SSE_CLIENT_SECRET)
+    note = "A" + redact.placeholder(key, SSE_ESCAPED_KEY)
+    assert document == {
+        **started,
+        "message": {**started["message"], "client_secret": hidden, "note": note},
+    }
+    compact = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    assert lines == [sent_lines[0], f"data: {compact}", *["data:"] * (len(sent_lines) - 2)]
+    # The rest of the stream is stored as it was sent, and its chunks still split it.
+    moved = len(body) - len(sent)
+    assert body[event_end + moved :] == sent[event_end:]
+    assert text_deltas(body) == ANSWER and body.endswith(MESSAGE_STOP)
+    held_end = sum(len(line) + 1 for line in lines[: held + 1])
+    assert boundaries(stored.stream_chunks) == [
+        held_end,
+        *(cut + moved for cut in sent_cuts if cut >= event_end),
+    ]
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_two_streams_at_once_are_each_stored_against_their_own_request(run_workflow, mode):
     """Two concurrent streams are each stored whole, against the request they answer.
 
@@ -518,9 +704,15 @@ def test_a_gzip_bomb_streams_to_the_agent_whole_and_is_recorded_cut(run_workflow
     assert stream.run_id == chat.run_id
     assert stream.flags == (Flag.STREAM_TRUNCATED,)
     assert stream.response is not None and stream.response.body.startswith(MESSAGE_START)
-    # In 12-character deltas the secret is never whole on a line, as in `secret_in_stream`.
-    assert text_deltas(stream.response.body) == said
-    assert stream.response.body == recorded
+    # The deltas the secret crosses are stored as in `secret_in_stream`; every other line as sent.
+    hidden = redact.placeholder(redact.load_key(shadow.home), SECRET)
+    assert text_deltas(stream.response.body) == said.replace(SECRET, hidden)
+    old, new = recorded.splitlines(keepends=True), stream.response.body.splitlines(keepends=True)
+    changed = [n for n, (line, kept) in enumerate(zip(old, new, strict=True)) if line != kept]
+    assert [json.loads(old[n][6:])["delta"]["text"] for n in changed] == SECRET_DELTAS
+    assert [json.loads(new[n][6:])["delta"]["text"] for n in changed] == stored_secret_deltas(
+        hidden
+    )
     assert stream.stream_chunks == (len(stream.response.body),)
     # The run and, under `irimi shadow`, the process run; serve mode has none.
     runs = 2 if mode == "shadow" else 1
@@ -658,13 +850,19 @@ def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(r
     assert [r.host for r in replay.internet.requests()] == ["api.smith.langchain.com"]
 
 
-def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placeholder(replayed):
-    """A secret recorded in pieces replays whole, and the request carrying it matches its record.
+def test_a_secret_a_stream_sent_in_pieces_replays_as_its_placeholder_and_matches_its_record(
+    replayed,
+):
+    """A secret a stream sent in pieces replays as its placeholder, as the store holds it.
 
-    The live request, redacted with the store's key, matches the recorded placeholder."""
+    The agent passes it on to OpenAI, and that request, redacted with the store's key, matches its
+    recording, so no model is asked again."""
     recorded, replay = replayed(W, "secret_in_stream", command=True)
-    assert SECRET in replay.result()["caller_text"]
-    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    hidden = redact.placeholder(redact.load_key(replay.home), SECRET)
+    assert SECRET in recorded.result()["caller_text"]
+    assert SECRET in recorded.result()["decision"]
+    seen = json.dumps(recorded.result(with_time=False)).replace(SECRET, hidden)
+    assert replay.result(with_time=False) == json.loads(seen)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
 

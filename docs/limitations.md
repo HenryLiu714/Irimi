@@ -49,13 +49,16 @@ all is listed under [known bypasses](security.md#known-bypasses).
 
 - **A body that is not valid UTF-8 is stored unscanned**, so a credential inside a binary body
   reaches disk as it was sent.
-- **JSON that is not one document on one line is scanned for shapes only.** A secret key's value is
-  replaced only if it also has a secret's shape when its JSON spans several lines of a body that is
-  not one document (a multi-line SSE `data:` field, a cut document), or sits inside a JSON string
-  (a streamed tool call's `partial_json`).
-- **A secret a stream sends in pieces is stored in pieces.** Each SSE event is its own line, so a
-  secret whose characters arrive across several events is never whole on any line, and each piece
-  reaches disk as it was sent.
+- **JSON that is not one document on one line or in one SSE event is scanned for shapes only.** A
+  secret key's value is replaced only if it also has a secret's shape when its JSON spans several
+  lines of a body that is not one document (a cut document, an SSE event a cut stream ends inside),
+  or sits inside a JSON string (a streamed tool call's `partial_json`).
+- **A secret a stream sends in pieces is joined only from the deltas irimi knows.** The text and
+  tool-call arguments of Anthropic Messages, OpenAI chat completions and OpenAI Responses streams
+  are joined before shapes are matched. Any other delta (a thinking block's, a refusal's, another
+  provider's format) is redacted one SSE event at a time, so a secret it sends across several
+  events reaches disk in pieces. Joined text is matched for shapes only, so a secret key's value
+  that a tool call's arguments send in pieces is stored as sent.
 - **Business data is not redacted.** Customers, amounts and messages are stored as sent; delete
   old runs with `irimi runs prune`.
 - **The key is per install.** One secret gets different placeholders on two machines, so recordings

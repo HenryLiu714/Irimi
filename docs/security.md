@@ -119,21 +119,32 @@ agent never see a placeholder.
   replaced wherever they appear: header names and values, the path and query, form fields, JSON
   strings and keys, every line of a text body (SSE included), a target URL and an operation name.
   A shape glued to a preceding letter or digit is part of a word and left alone, unless that
-  character ends an escape such as `\n` or `%20`.
+  character ends an escape such as `\n`, `\u0041` or `%20`. JSON is judged as sent, so a shape
+  after a JSON string's escaped letter (`"\u0041sk_live_…"`) is replaced too.
 - **Credential-path hosts.** On `hooks.slack.com`, and any host a map lists under
   `credential_path_hosts:`, the URL path is the secret, so the whole path is replaced wherever the
   exchange carries it.
 - **How a body is read.** A body that is one JSON document is walked as JSON, whatever its content
   type says. Otherwise a form content type is read as a form, and anything else line by line: a
   line that is one JSON document (NDJSON), or an SSE `data:` field holding one, is walked as JSON,
-  and every other line is scanned for shapes. A body nothing matched keeps its bytes.
+  and every other line is scanned for shapes. An SSE event's `data:` lines are first joined with
+  LF, as a client joins them, and walked as JSON when the join is one JSON object or array. If
+  that changes it, the redacted document goes on the event's first `data:` line and the other
+  `data:` lines are left empty: the event keeps its lines, and a client's join reads the redacted
+  document and blank lines. A body nothing matched keeps its bytes.
 - **Streams.** A streamed body is redacted joined, never chunk by chunk, so a secret split across
-  two chunks is still found on its line.
+  two chunks is still found on its line. A model's streamed text is joined too: the deltas of each
+  Anthropic content block, OpenAI chat choice or tool call, and OpenAI Responses item are joined in
+  order, and each secret shape the joined text holds is replaced whole, also one that runs across
+  several deltas or that only an earlier delta's text lets start (a `%20`, an escaped letter). Its
+  placeholder goes in the first delta that holds part of it, and its text is cut from the others;
+  each event keeps its line.
 - **Cuts never split a secret.** A body is redacted whole and only then cut to its stored size.
   Text the SDK must shorten before irimi can redact it (trigger and tool names, captured `repr`s,
   error messages) is cut at its limit, or earlier where a secret's shape crosses the limit.
 - **Failure is closed.** A part that cannot be redacted, including a JSON document with a repeated
-  key, is stored as `<redaction-failed>` and the exchange is flagged `redaction-failed`.
+  key, is stored as `<redaction-failed>` and the exchange is flagged `redaction-failed`. An SSE
+  event whose joined `data:` lines are refused that way fails its whole body.
 
 What redaction does not catch is listed in [limitations.md](limitations.md#redaction).
 

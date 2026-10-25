@@ -18,6 +18,10 @@ LONG_ERROR_KEY = "sk_live_" + "CANARYlongerror" + "0" * 4000
 # Handed back by a fake service in a response body, never given to the agent.
 CLIENT_SECRET = "CANARY" + "clientsecret000000000000"
 BOMB_SECRET = "CANARY" + "bombsecret00000000000000"
+# Handed back by W7's fake Anthropic in an event whose JSON spans several `data:` lines.
+SSE_CLIENT_SECRET = "CANARY" + "multilinedata00000000000"
+# Handed back in that event too, sent after a JSON `\u` escape of a letter (`"\u0041rk_live_…"`).
+SSE_ESCAPED_KEY = "rk_live_" + "CANARYescapedkey00000000"
 
 # A live key W7's user pastes into a question, which the stream must carry redacted.
 STREAM_SECRET = "sk_live_" + "CANARYstreamsecret0000000000"

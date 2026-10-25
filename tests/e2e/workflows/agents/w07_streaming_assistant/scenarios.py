@@ -21,6 +21,12 @@ from tests.e2e.workflows.harness.services import (
 CHANNEL = "C0CHAT"
 # Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
 SECRET = credentials.STREAM_SECRET
+# What OpenAI answers in `secret_in_stream`: the key again, so both streams send it in pieces.
+SECRET_DECISION = f"No summary needed: the key {SECRET} stays private."
+# No secret's shape: only its `client_secret` key marks it, on a `data:` line of its own.
+SSE_CLIENT_SECRET = credentials.SSE_CLIENT_SECRET
+# A key's shape the walk reads glued to a letter: the server escapes the letter before it.
+SSE_ESCAPED_KEY = credentials.SSE_ESCAPED_KEY
 ANSWER = (
     "Refunds return money to the original payment method. A partial refund leaves the rest "
     "of the charge in place, and a charge can be refunded until nothing is left."
@@ -30,6 +36,11 @@ _RULES = " ".join(f"Rule {i}: a refund goes back to the card it came from." for 
 LONG_ANSWER = f"{_RULES[:8000]} The test key is {SECRET}. {_RULES[8000:]}"
 # How many characters of text each `text_delta` of that answer carries.
 LONG_DELTA = 256
+# `secret_after_escapes`: each model's answer in the pieces it streams it in. Each sends the key
+# right after an escape the shape rule reads as a separator, and sends that escape in the piece
+# before: Anthropic a `%20` cut after its `%`, OpenAI a letter its JSON spells `\u0041`.
+ESCAPES_ANSWER = ["The test key is %", f"20{SECRET}", ". Keep it out of logs."]
+ESCAPES_DECISION = ["No summary: A", SECRET[:9], f"{SECRET[9:]} stays private."]
 # How many bytes of a gzip stream `GzipLLM` writes at a time: several writes for one short stream.
 GZIP_CHUNK = 64
 # How many bytes of a gzip stream `BombingLLM` writes at a time.
@@ -46,6 +57,18 @@ def chat_script(call: LlmCall) -> LlmTurn:
     if "summary" in question.lower():
         return LlmTurn(tool_calls=(("post_summary", {"channel": CHANNEL, "text": question}),))
     return LlmTurn(text="No summary needed.")
+
+
+def secret_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "openai":
+        return LlmTurn(text=SECRET_DECISION)
+    return chat_script(call)
+
+
+def escapes_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "openai":
+        return LlmTurn(text="".join(ESCAPES_DECISION))
+    return LlmTurn(text="".join(ESCAPES_ANSWER))
 
 
 def summarize_script(call: LlmCall) -> LlmTurn:
@@ -159,6 +182,65 @@ class MidLineWritesLLM(ScriptedLLM):
         return resp
 
 
+class MultiLineDataLLM(ScriptedLLM):
+    """Streams Anthropic's `message_start` as indented JSON, one `data:` line per line of it.
+
+    A client joins an event's `data:` lines with LF, so the agent reads one document. Its message
+    carries a `client_secret`, which no line holds as JSON of its own, and a note whose key
+    follows an escaped `A`. The event is written in two pieces cut inside the secret."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        start = json.loads(resp.chunks[0].decode().split("\ndata: ", 1)[1])
+        start["message"]["client_secret"] = SSE_CLIENT_SECRET
+        start["message"]["note"] = "A" + SSE_ESCAPED_KEY
+        indented = json.dumps(start, indent=2)
+        lines = indented.replace('"A' + SSE_ESCAPED_KEY, '"\\u0041' + SSE_ESCAPED_KEY).splitlines()
+        event = "event: message_start\n" + "".join(f"data: {line}\n" for line in lines) + "\n"
+        cut = event.index(SSE_CLIENT_SECRET) + len(SSE_CLIENT_SECRET) // 2
+        resp.chunks = [event[:cut].encode(), event[cut:].encode(), *resp.chunks[1:]]
+        return resp
+
+
+class EscapedPiecesLLM(ScriptedLLM):
+    """Streams each model's answer in the pieces `ESCAPES_ANSWER` and `ESCAPES_DECISION` name.
+
+    OpenAI's first piece spells its last letter as a JSON escape, as a server may spell any."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        events = [chunk for chunk in resp.chunks if b'"text_delta"' not in chunk]
+        deltas = [
+            _event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": piece},
+                },
+            )
+            for piece in ESCAPES_ANSWER
+        ]
+        resp.chunks = [*events[:2], *deltas, *events[2:]]
+        return resp
+
+    def _openai(self, body: dict[str, Any]) -> Resp:
+        resp = super()._openai(body)
+        if resp.chunks is None:
+            return resp
+        deltas = [
+            _sse({"choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]})
+            for piece in ESCAPES_DECISION
+        ]
+        deltas[0] = deltas[0].replace(b'A"', b'\\u0041"')
+        resp.chunks = [*deltas, *(chunk for chunk in resp.chunks if b'"content"' not in chunk)]
+        return resp
+
+
 class LockstepLLM(ScriptedLLM):
     """Holds each provider's two calls until both arrive, so the two streams interleave."""
 
@@ -248,6 +330,10 @@ def _world(world: World) -> None:
     world.llm.script = chat_script
 
 
+def _secret(world: World) -> None:
+    world.llm.script = secret_script
+
+
 def _held(world: World) -> None:
     world.llm = HeldStreamLLM(chat_script)
 
@@ -264,6 +350,14 @@ def _splitting(world: World) -> None:
 
 def _mid_line(world: World) -> None:
     world.llm = MidLineWritesLLM(long_script)
+
+
+def _multi_line(world: World) -> None:
+    world.llm = MultiLineDataLLM(chat_script)
+
+
+def _escapes(world: World) -> None:
+    world.llm = EscapedPiecesLLM(escapes_script)
 
 
 def _lockstep(world: World) -> None:
@@ -301,8 +395,9 @@ WORKFLOW = Workflow(
         ),
         "secret_in_stream": Scenario(
             ("What is the test key?", "read_all"),
-            setup=_world,
-            doc="a key-shaped secret inside the stream reaches the caller intact",
+            setup=_secret,
+            doc="a key-shaped secret inside both streams, sent in pieces, reaches the caller "
+            "intact and disk as its placeholder",
         ),
         "caller_disconnects": Scenario(
             (QUESTION, "hang_up"),
@@ -332,6 +427,20 @@ WORKFLOW = Workflow(
             ("What is the test key?", "read_all"),
             setup=_mid_line,
             doc="a 16 KB stream written in pieces that end mid-line, one of them mid-secret",
+        ),
+        "secret_in_multi_line_event": Scenario(
+            (QUESTION, "read_all"),
+            setup=_multi_line,
+            doc="Anthropic's first event spreads its JSON over several `data:` lines, a "
+            "`client_secret` on one of them and a key after an escaped letter on another: the "
+            "agent joins them, irimi stores the placeholders",
+        ),
+        "secret_after_escapes": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_escapes,
+            doc="both streams send the key in pieces right after an escape sent in the piece "
+            "before (a `%20` cut after its `%`, a JSON-escaped letter): the agent reads it "
+            "intact, irimi stores its placeholder",
         ),
         "gzip_bomb_stream": Scenario(
             ("What is the test key?", "read_all"),
