@@ -62,8 +62,9 @@ by a [body ref](#body-ref). An empty body stores nothing, and its ref is `null`.
   `body-truncated`. A stored body is always a prefix of the whole redacted body, never part of a
   secret.
 - **Streams.** A `text/event-stream` response is stored as the chunks the agent was sent, joined,
-  with each chunk's length in `stream_chunks`. A stream that is not whole (cut past 8 MiB, ended by
-  an error, or not decodable) is stored up to its last complete line and flagged
+  with each chunk's length in `stream_chunks`. A replay sends a recorded stream in one piece and
+  stores it with the lengths it was recorded with. A stream that is not whole (cut past 8 MiB,
+  ended by an error, or not decodable) is stored up to its last complete line and flagged
   `stream-truncated`; the agent still got every chunk that arrived.
 - **Redaction.** Every value in every record may hold `<redacted:` + 16 hex digits + `>` in place
   of a secret, or `<redaction-failed>` where a part could not be redacted (the exchange is then
@@ -198,7 +199,7 @@ One HTTP exchange irimi saw or made (`irimi.core.exchange.Exchange`):
 | `ended_at` | number | 2 | When irimi finished the exchange; never before `started_at`. |
 | `request` | request | 2 | What was asked, as irimi forwarded and recorded it, without `Irimi-Run`. |
 | `response` | response or `null` | 2 | What came back; `null` when nothing did (a lost connection, an unreachable target). |
-| `stream_chunks` | list of integers | 2 | The byte length of each chunk of a streamed response, in arrival order, summing to the stored body's length; `[]` when the response did not stream or its stored body is empty. |
+| `stream_chunks` | list of integers | 2 | The byte length of each chunk of a streamed response, in arrival order (a replayed stream's are its recording's), summing to the stored body's length; `[]` when the response did not stream or its stored body is empty. |
 
 ### Request
 

@@ -139,6 +139,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - A read that streams after a faked write it would have shown is recorded `overlay: partial`, and
   the summary's `↳` line under the write says the read did not show it, even when the stream
   breaks. It was recorded `overlay: null`, with no line.
+- A replay stores a recorded stream with the chunk lengths it was recorded with, so its trace
+  still shows the stream. It was stored with none, as though it had not streamed.
 
 ## [0.1.0] - 2026-10-20
 

@@ -344,10 +344,14 @@ class ShadowSession:
         response = upstream
         overlay: OverlayCoverage | None = None
         send: Response | None = None
+        stream_chunks = received.stream_chunks
         if isinstance(decision, Respond):
-            # Recorded without the stamp. A replayed read keeps the recorded read's fidelity.
+            # Recorded without the stamp. A replayed read keeps the recorded read's fidelity, and
+            # a replayed stream its chunks if its body was sent as decided (a HEAD's is not).
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
+            if response.body == decision.response.body:
+                stream_chunks = decision.stream_chunks
         # A target's read is not a Forward, so the overlay never touches it.
         elif isinstance(decision, Forward) and as_sent:
             overlay = self._unedited(plan, decision, upstream)
@@ -358,9 +362,7 @@ class ShadowSession:
             if response is not upstream:
                 # The bytes are no longer the service's, so the answer must carry a header.
                 answered_by = "overlay"
-        exchange = self._exchange(
-            plan, response, answered_by, flags, overlay, received.stream_chunks
-        )
+        exchange = self._exchange(plan, response, answered_by, flags, overlay, stream_chunks)
         # The summary files reads under writes by the same `is_authored_write` rule.
         if is_authored_write(exchange):
             self.write_log.add(exchange)

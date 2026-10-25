@@ -231,6 +231,63 @@ def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, 
     assert len(replay_stubs.llm.seen) == 1
 
 
+def test_a_replayed_stream_is_recorded_with_its_recorded_chunks_and_replays_again(
+    home, maps, replay_stubs
+):
+    """A replay sends a recorded stream in one piece and records it with the recorded chunks.
+
+    A replay of that replay is answered from it and records the same chunks again."""
+    _, llm = replay_stubs
+    url, streaming = _message(llm, stream=True)
+    events = _record_run(home, maps, lambda s: s.call("POST", url, streaming))
+    (recorded,) = events
+    assert isinstance(recorded, Exchange) and recorded.response is not None
+    assert recorded.stream_chunks and sum(recorded.stream_chunks) == len(recorded.response.body)
+
+    def ask(session):
+        session.call("POST", url, streaming)
+
+    first = _replay(replay_stubs, home, maps, events, ask)
+    replayed = StoreReader(home / "store").load_run("rep").events
+    second = _replay(replay_stubs, home, maps, replayed, ask, run_id="again")
+    for session, run_id in ((first, "rep"), (second, "again")):
+        (ex,) = session.seen
+        assert (ex.answered_by, ex.stream_chunks) == ("recording", recorded.stream_chunks)
+        (stored,) = StoreReader(home / "store").load_run(run_id).events
+        assert isinstance(stored, Exchange) and stored.stream_chunks == recorded.stream_chunks
+        assert stored.response is not None and stored.response.body == recorded.response.body
+    assert replay_stubs.llm.seen == []
+
+
+def test_an_answer_sent_without_its_body_is_recorded_without_its_chunks(home, maps, replay_stubs):
+    """An answer's chunks are recorded only while they split what was sent: a HEAD's has no body.
+
+    A policy that answers with a stream's chunks, as a replay does, decides both requests."""
+    stripe, _ = replay_stubs
+    sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\ndata: 2\n\n")
+
+    class _Streams:
+        name = "streams"
+
+        def decide(self, request, classification, write_log=(), run_id="", target=None):
+            return Decided(Respond(sse, "recording", stream_chunks=(9, 9)))
+
+        def observe_read(self, service, body):
+            pass
+
+    session = _Session(home, maps, _Streams(), "rep")
+    try:
+        assert _charge(session, stripe)[2] == sse.body
+        session.call("HEAD", f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1")
+    finally:
+        session.stop()
+    assert [(ex.request.method, ex.stream_chunks) for ex in session.seen] == [
+        ("GET", (9, 9)),
+        ("HEAD", ()),
+    ]
+    assert replay_stubs.stripe.seen == []
+
+
 def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(
     home, maps, replay_stubs
 ):

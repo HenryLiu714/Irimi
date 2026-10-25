@@ -85,6 +85,8 @@ all is listed under [known bypasses](security.md#known-bypasses).
   replay, and each `irimi replay` replays one run.
 - **Compare sees writes, not reads.** Two writes made at once can finish in either order, so a run
   that made the same two writes in the other order shows one of them as removed and added again.
+- **A recorded stream is sent in one piece.** The agent gets a replayed stream's bytes at once,
+  not event by event as they first came; the replay stores it with the recorded chunk lengths.
 
 ## The SDK
 

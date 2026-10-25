@@ -24,6 +24,7 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     pair_decision,
 )
 from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.execute import replay, replayed_run_id
 from tests.e2e.workflows.harness.internet import BOMB_LINE
 from tests.e2e.workflows.harness.invariants import check_invariants
 
@@ -697,15 +698,38 @@ def test_irimi_compare_shows_the_post_a_streamed_tool_call_made_and_nothing_else
 RECORDED_LINES = [line.replace("real    ", "recorded") + "  [from-recording]" for line in LLM_LINES]
 
 
+def stored_streams(result, run_id: str) -> dict[str, tuple[int, ...]]:
+    """The chunk lengths of each stream `run_id` stored, by request path."""
+    events = result.stored().load_run(run_id).events
+    exchanges = [e for e in events if isinstance(e, Exchange)]
+    return {e.request.path: e.stream_chunks for e in exchanges if e.stream_chunks}
+
+
 def test_both_streams_replay_from_the_recording_and_the_agent_reassembles_them(replayed):
     """A replay serves a recorded stream in one piece, and the agent reassembles it as before.
 
-    The trace post is telemetry, which a replay forwards as shadow mode does."""
+    It stores each stream with the chunks it was recorded with. The trace post is telemetry,
+    which a replay forwards as shadow mode does."""
     recorded, replay = replayed(W, "normal", command=True)
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.result()["caller_text"] == ANSWER
     assert replay.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
     assert [r.host for r in replay.internet.requests()] == ["api.smith.langchain.com"]
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert sorted(streams) == ["/v1/chat/completions", "/v1/messages"]
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
+
+
+def test_a_replay_of_a_replay_serves_both_streams_with_their_recorded_chunks(replayed, tmp_path):
+    """A replay of a replay answers both streams from the first and stores the recorded chunks."""
+    recorded, first = replayed(W, "normal", command=True)
+    second = replay(first, replayed_run_id(first), tmp_path / "again", command=True)
+    assert check_invariants(second) == []
+    assert second.result(with_time=False) == recorded.result(with_time=False)
+    assert second.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
+    assert [r.host for r in second.internet.requests()] == ["api.smith.langchain.com"]
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert stored_streams(second, replayed_run_id(second)) == streams
 
 
 def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placeholder(replayed):

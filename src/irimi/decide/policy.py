@@ -57,12 +57,16 @@ class Delegate:
 
 @dataclass(frozen=True)
 class Respond:
-    """Answer with `response`; `overlay` is the fidelity of a read answered from a recording."""
+    """Answer with `response`; `overlay` is the fidelity of a read answered from a recording.
+
+    `stream_chunks` are the chunk lengths of a recorded stream, which is sent in one piece and
+    recorded with them."""
 
     response: Response
     answered_by: AnsweredBy
     outcome: WriteOutcome = WriteOutcome()
     overlay: OverlayCoverage | None = None
+    stream_chunks: tuple[int, ...] = ()
 
 
 Decision = Forward | Delegate | Respond

@@ -97,7 +97,9 @@ A replay answers a request from the recording when a recorded exchange matches i
 - its idempotency standing: a retry matches only a recorded retry.
 
 The live request is redacted with the store's key before it is compared, so a secret matches its
-own placeholder. Each recorded exchange answers once, in recorded order.
+own placeholder. Each recorded exchange answers once, in recorded order. A recorded stream is sent
+in one piece and stored with the chunk lengths it was recorded with, so the replay's trace still
+shows it streamed.
 
 ## From the recording, and missed
 
