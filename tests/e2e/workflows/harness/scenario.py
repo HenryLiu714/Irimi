@@ -10,6 +10,8 @@ import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
+from unittest import mock
 
 from irimi.servicemaps import loader
 from tests.e2e.workflows.harness.internet import Req
@@ -41,6 +43,17 @@ class Scenario:
     shadow_flags: tuple[str, ...] = ()
     # Entered around irimi in the harness's own process, so a scenario can patch irimi there.
     inside_irimi: Callable[[], contextlib.AbstractContextManager[object]] = contextlib.nullcontext
+
+
+def raising(
+    owner: object, name: str, message: str
+) -> Callable[[], contextlib.AbstractContextManager[object]]:
+    """Return an `inside_irimi` under which `owner.name` raises `RuntimeError(message)`."""
+
+    def fails(*args: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError(message)
+
+    return lambda: mock.patch.object(owner, name, fails)
 
 
 @dataclass(frozen=True)

@@ -4,13 +4,11 @@ The scripted model reads only the prompt and tool results, so a new prompt chang
 
 from __future__ import annotations
 
-import contextlib
 import json
-from typing import Any, NoReturn
-from unittest import mock
+from typing import Any
 
 from irimi import services
-from tests.e2e.workflows.harness.scenario import Scenario, Workflow
+from tests.e2e.workflows.harness.scenario import Scenario, Workflow, raising
 from tests.e2e.workflows.harness.services import LlmCall, LlmTurn, World
 
 CHARGE = "ch_TICKET1"
@@ -79,15 +77,6 @@ def _world(world: World) -> None:
     world.llm.script = triage_script
 
 
-def _rejection_fails() -> contextlib.AbstractContextManager[object]:
-    """Make building a service's rejection raise, which irimi does once its check read is back."""
-
-    def fails(*args: object) -> NoReturn:
-        raise RuntimeError("the rejection could not be built")
-
-    return mock.patch.object(services, "fake_rejection", fails)
-
-
 def _scenario(prompt: str, doc: str, **kw: Any) -> Scenario:
     return Scenario(ARGV, env={"PROMPT": prompt}, setup=_world, doc=doc, **kw)
 
@@ -104,7 +93,8 @@ WORKFLOW = Workflow(
             "too_large",
             "too_large, with building Stripe's rejection made to raise inside irimi: the refund "
             "is answered with irimi's 502, and irimi's check read of the charge is still recorded",
-            inside_irimi=_rejection_fails,
+            # irimi builds the rejection once its check read is back.
+            inside_irimi=raising(services, "fake_rejection", "the rejection could not be built"),
         ),
         "double_refund": _scenario("double", "the model refunds twice with different keys"),
         "double_refund_quiet": _scenario(
