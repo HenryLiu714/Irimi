@@ -697,7 +697,7 @@ def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(repla
     """A replay never serves a stream recorded cut: it is a miss, sent to the model again."""
     recorded, replay = replayed(W, scenario, command=True)
     [cut] = [ex for ex in recorded.reported if ex.request.path == "/v1/messages"]
-    assert {Flag.STREAM_TRUNCATED, Flag.UPSTREAM_ERROR} & set(cut.flags)
+    assert cut.flags == CUT_STREAMS[scenario][1:]
     [stream] = [ex for ex in replay.reported if ex.request.path == "/v1/messages"]
     assert (stream.answered_by, stream.flags) == ("live", CUT_STREAMS[scenario])
     assert [ex.answered_by for ex in replay.reported if ex.request.path == "/v1/embeddings"] == [
