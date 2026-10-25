@@ -294,19 +294,27 @@ def _pairs(a: Sequence[Action], b: Sequence[Action]) -> list[tuple[int, int]]:
 
 
 def _shared_end(a: Sequence[Action], b: Sequence[Action]) -> int:
-    """Return how many identical actions both runs end with, each equal to no other action.
+    """Return the length of the longest identical end both runs share that holds every copy it has.
 
-    Every best pairing pairs such an action with its copy: either one's other partner, if it had
-    one, would not be identical. A repeated action ends the count, since the soonest pairing may
-    pair it with an earlier copy."""
+    Every best pairing pairs such an end action for action: its actions are identical only to
+    each other, and only that pairs them all. An end with a copy of one of its actions before it
+    is not counted, since the soonest pairing may pair that earlier copy."""
     data_a, data_b = [x.data for x in a], [y.data for y in b]
     made = Counter([*data_a, *data_b])
-    end = 0
-    while end < min(len(a), len(b)):
-        data = data_a[-1 - end]
-        if data != data_b[-1 - end] or made[data] != 2:
+    inside: Counter[Hashable] = Counter()
+    # How many distinct actions of the end so far have a copy before it.
+    outside = end = 0
+    for n in range(1, min(len(a), len(b)) + 1):
+        data = data_a[-n]
+        if data != data_b[-n]:
             break
-        end += 1
+        if not inside[data]:
+            outside += 1
+        inside[data] += 2
+        if inside[data] == made[data]:
+            outside -= 1
+        if not outside:
+            end = n
     return end
 
 

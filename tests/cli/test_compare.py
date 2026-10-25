@@ -802,10 +802,19 @@ def test_align_keeps_every_action_once_in_its_order_and_a_run_is_the_same_as_its
         ]
 
 
-def _best(a: list[compare.Action], b: list[compare.Action]) -> tuple[int, int, int]:
-    """Return the best in-order pairing's `same` rows, its pairs, and minus its pairs' index sum.
+def _best(
+    a: list[compare.Action], b: list[compare.Action]
+) -> tuple[tuple[int, int, int], list[tuple[int, int]]]:
+    """Return the best in-order pairing's score and its `(i, j)` pairs, by exhaustive search.
 
-    The best has the most `same` rows, then the most pairs, then the soonest pairs."""
+    The score is the `same` rows, the pairs, and minus the pairs' index sum, so the best has the
+    most `same` rows, then the most pairs, then the soonest. Of pairings as good, from each place
+    it pairs if one of them does, else passes over `b[j]` if one does, else over `a[i]`."""
+
+    @functools.cache
+    def paired(i: int, j: int) -> tuple[int, int, int]:
+        same, pairs, soon = best(i + 1, j + 1)
+        return (same + (a[i].data == b[j].data), pairs + 1, soon - i - j)
 
     @functools.cache
     def best(i: int, j: int) -> tuple[int, int, int]:
@@ -813,25 +822,28 @@ def _best(a: list[compare.Action], b: list[compare.Action]) -> tuple[int, int, i
             return (0, 0, 0)
         options = [best(i + 1, j), best(i, j + 1)]
         if a[i].key == b[j].key:
-            same, pairs, soon = best(i + 1, j + 1)
-            options.append((same + (a[i].data == b[j].data), pairs + 1, soon - i - j))
+            options.append(paired(i, j))
         return max(options)
 
-    return best(0, 0)
-
-
-def _laid_out(rows: tuple[compare.Row, ...]) -> list[tuple[str, int, int]]:
-    return [(row.mark, id(row.a), id(row.b)) for row in rows]
+    pairs: list[tuple[int, int]] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i].key == b[j].key and paired(i, j) == best(i, j):
+            pairs.append((i, j))
+            i, j = i + 1, j + 1
+        elif best(i, j + 1) == best(i, j):
+            j += 1
+        else:
+            i += 1
+    return best(0, 0), pairs
 
 
 @pytest.mark.parametrize("amounts", [3, 20])
-def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_the_soonest(
-    monkeypatch, amounts
-):
+def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_the_soonest(amounts):
     """Property test against an exhaustive search over seeded random runs of few writes.
 
-    With many amounts most actions are made once, so the shared end is often paired before the
-    table; the rows are those the whole table lays out."""
+    Half the time B is A with a write or two changed, added or dropped, so the runs often share a
+    start or an end, which `align` pairs before its table."""
     rng = random.Random(11)
 
     def action() -> compare.Action:
@@ -839,20 +851,29 @@ def test_align_pairs_the_most_identical_actions_then_the_most_of_one_key_then_th
         fields = (("body.amount", str(rng.randrange(amounts))),)
         return compare.Action(key, "", cut=rng.random() < 0.1, fields=fields)
 
-    shared_end = compare._shared_end
+    def edited(a: list[compare.Action]) -> list[compare.Action]:
+        b = [dataclasses.replace(x) for x in a]
+        for _ in range(rng.randrange(1, 3)):
+            n = rng.randrange(len(b) + 1)
+            if n == len(b) or rng.random() < 0.4:
+                b.insert(n, action())
+            elif rng.random() < 0.5:
+                b[n] = action()
+            else:
+                del b[n]
+        return b
+
     for _ in range(2000):
         a = [action() for _ in range(rng.randrange(9))]
-        b = [action() for _ in range(rng.randrange(9))]
+        b = edited(a) if rng.random() < 0.5 else [action() for _ in range(rng.randrange(9))]
         rows = compare.align(a, b)
         at_a, at_b = ({id(x): n for n, x in enumerate(side)} for side in (a, b))
         pairs = [
             (at_a[id(r.a)], at_b[id(r.b)]) for r in rows if r.a is not None and r.b is not None
         ]
         same = sum(row.mark == "same" for row in rows)
-        assert (same, len(pairs), -sum(i + j for i, j in pairs)) == _best(a, b), (a, b)
-        monkeypatch.setattr(compare, "_shared_end", lambda a, b: 0)
-        assert _laid_out(rows) == _laid_out(compare.align(a, b)), (a, b)
-        monkeypatch.setattr(compare, "_shared_end", shared_end)
+        score = (same, len(pairs), -sum(i + j for i, j in pairs))
+        assert (score, pairs) == _best(a, b), (a, b)
 
 
 def _refunded(amount: str) -> compare.Action:
@@ -927,14 +948,22 @@ def test_the_identical_actions_both_runs_start_with_pair_before_the_table_is_bui
     assert table_sizes == [(1, 3)]
 
 
-def test_the_identical_actions_made_once_both_runs_end_with_pair_before_the_table_too(table_sizes):
+def test_an_identical_end_with_every_copy_of_its_writes_pairs_before_the_table_too(table_sizes):
     """A replay that differs at its first write and then matches its recording is cheap too.
 
-    An action at the end that either run also made earlier is scored, since the soonest pairing
-    may pair the earlier copy."""
+    An end holding an action that either run also made before it is scored, since the soonest
+    pairing may pair that earlier copy."""
     shared = [_refunded(str(n)) for n in range(300)]
     a, b = [_refunded("x"), *shared], [_tool_action("b"), *shared]
     assert [row.mark for row in compare.align(a, b)] == ["only_a", "only_b"] + ["same"] * 300
+    assert table_sizes == [(1, 1)]
+    table_sizes.clear()
+    repeated = [_refunded("49") for _ in range(300)]
+    marks = [
+        row.mark
+        for row in compare.align([_refunded("x"), *repeated], [_tool_action("b"), *repeated])
+    ]
+    assert marks == ["only_a", "only_b"] + ["same"] * 300
     assert table_sizes == [(1, 1)]
     table_sizes.clear()
     assert [row.mark for row in compare.align(shared, b)] == ["only_b"] + ["same"] * 300
