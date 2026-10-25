@@ -149,6 +149,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   `404` for a route it does not have, rather than taking it for a miss in silence.
 - A read tool call cancelled under trio is a miss in a replay, as one cancelled under asyncio is,
   instead of being raised again as a `RecordedToolError`.
+- A tool's exception raised again in a replay has the original's `args`, so a `KeyError`'s
+  `args[0]` is its key rather than the key quoted, and an `OSError` has its `errno`. A tool call's
+  stored error keeps them as `args`, which a run stored earlier lacks.
 
 ## [0.1.0] - 2026-10-20
 

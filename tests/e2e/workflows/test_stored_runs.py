@@ -174,12 +174,15 @@ def test_every_stored_event_is_the_exchange_irimi_handed_its_store_redacted(
 
 
 def redacted_tool_call(call: ToolCall, key: bytes) -> ToolCall:
-    """Return `call` as the store keeps it: args, result and error redacted whole, then cut."""
+    """Return `call` as the store keeps it: args, result and error redacted whole, then cut.
+
+    The error's own args are redacted and never cut."""
     error = call.error
     if error is not None:
         kind, message = (redact.redact_json(text, key) for text in (error.type, error.message))
         assert isinstance(kind, str) and isinstance(message, str)
-        error = ErrorInfo(kind[:MAX_ERROR_TYPE], message[:MAX_ERROR_MESSAGE])
+        args = None if error.args is None else redact.redact_json(error.args, key)
+        error = ErrorInfo(kind[:MAX_ERROR_TYPE], message[:MAX_ERROR_MESSAGE], args)
     return dataclasses.replace(
         call,
         args=redact.redact_json(call.args, key),

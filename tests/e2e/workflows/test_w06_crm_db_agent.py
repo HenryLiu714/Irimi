@@ -287,7 +287,10 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
     bare = run_workflow(W, "tool_raises", "bare")
     assert shadow.exit_code == bare.exit_code == 1
     for result in (shadow, bare):
-        assert [e["key"] for e in result.events("lookup_failed")] == ["'acc_1'"]
+        assert [(e["key"], e["args"]) for e in result.events("lookup_failed")] == [
+            ("'acc_1'", ["acc_1"])
+        ]
+        assert [e["args"] for e in result.events("score_failed")] == [["acc_missing"]]
     ends = shadow.events("run.end")
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
     # Stored under the exception's full name.
@@ -296,11 +299,15 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
         "error",
         ErrorInfo("builtins.KeyError", "'acc_missing'"),
     )
-    # Every tool that raised is recorded with its error and no result, caught or not.
+    # Every tool that raised is recorded with its error and its args and no result, caught or not.
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
         ("crm.connect_with", None, connect_error(shadow)),
-        ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'")),
-        ("crm.score_account", None, ErrorInfo("builtins.KeyError", "'acc_missing'")),
+        ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        (
+            "crm.score_account",
+            None,
+            ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"]),
+        ),
     ]
     assert shadow.tool_call_lines() == [
         "tool-real     read      crm.connect_with -> raised builtins.ConnectionError",
@@ -314,12 +321,13 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
 def connect_error(shadow) -> ErrorInfo:
     """Return the stored error `connect_with` raised in `tool_raises`, its key a whole placeholder.
 
-    The message quotes the key across the 1000-character cut; the store redacts before it cuts."""
+    The message quotes the key across the 1000-character cut; the store redacts before it cuts.
+    The args, the message whole, are redacted and not cut."""
     key = CANARIES["STRIPE_API_KEY"]
     said = f"{CONNECT_RETRIES}could not connect with postgres://crm:{key}@{UNREACHABLE_HOST}/crm"
     assert said.index(key) < MAX_ERROR_MESSAGE < said.index(key) + len(key)
-    hidden = redact.placeholder(redact.load_key(shadow.home), key)
-    return ErrorInfo("builtins.ConnectionError", said.replace(key, hidden)[:MAX_ERROR_MESSAGE])
+    hidden = said.replace(key, redact.placeholder(redact.load_key(shadow.home), key))
+    return ErrorInfo("builtins.ConnectionError", hidden[:MAX_ERROR_MESSAGE], [hidden])
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -417,7 +425,7 @@ def test_a_write_stand_in_that_raises_hands_the_agent_its_own_exception_and_a_re
             run.run_id,
             {"keep": "acc_1", "drop": "acc_9"},
             None,
-            ErrorInfo("builtins.LookupError", "no such account: acc_9"),
+            ErrorInfo("builtins.LookupError", "no such account: acc_9", ["no such account: acc_9"]),
         ),
         (
             run.run_id,
@@ -802,8 +810,12 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     recorded, replay = replayed(W, "tool_raises")
     assert replay.agent_exit_code() == recorded.exit_code == 1
     assert replay.exit_code == 0
+    # Its args are the original's, so `args[0]` is the key itself, not the key quoted.
     assert replay.events("lookup_failed", with_time=False) == [
-        {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'"}
+        {"event": "lookup_failed", "error": "KeyError", "key": "'acc_1'", "args": ["acc_1"]}
+    ]
+    assert replay.events("score_failed", with_time=False) == [
+        {"event": "score_failed", "args": ["acc_missing"]}
     ]
     assert replay.tool_call_lines() == [
         "tool-recorded read      crm.connect_with -> raised builtins.ConnectionError",
@@ -812,8 +824,8 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     ]
     assert [(c.name, c.error) for c in replayed_calls(replay)] == [
         ("crm.connect_with", connect_error(recorded)),
-        ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'")),
-        ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'")),
+        ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])),
     ]
     # The run ends on the recorded type: `irimi replay` ends it with what the child said it raised.
     assert replay.one("run.end")["error"] == recorded.one("run.end")["error"] == "KeyError"

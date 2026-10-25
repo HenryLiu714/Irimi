@@ -409,7 +409,7 @@ def test_a_stand_in_that_raises_re_raises_the_same_object_and_records_its_error(
     assert caught.value is raised
     reader = irimi.finish()
     [call] = _tool_calls(reader, _only_sdk_run(reader))
-    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'")
+    assert call.error == ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])
     assert call.result is None
 
 
@@ -493,6 +493,74 @@ def test_args_and_result_together_stay_inside_one_capture_budget(posted):
     [(_, _, doc)] = posted.posts
     assert doc["args"] == {"text": half}
     assert doc["result"] == {trace.TRUNCATED_KEY: True, "bytes": len(half) + 2}
+    assert len(capture.serialized(doc)) < 2 * limits.MAX_CAPTURED_BYTES
+
+
+def _raising(exc: BaseException) -> Callable[..., Any]:
+    @sdk.read_tool(name="db.raises")
+    def raises(text: str = "") -> Any:
+        raise exc
+
+    return raises
+
+
+@pytest.mark.parametrize(
+    ("exc", "args"),
+    [
+        (KeyError("acc_1"), ["acc_1"]),
+        (OSError(2, "No such file", "f.txt"), [2, "No such file"]),
+        (ValueError(), []),
+        (LookupError(b"\xff", ("a", 1)), [{trace.REPR_KEY: "<bytes>"}, ["a", 1]]),
+        (LookupError({"body": [b"sk_live_x"]}), [{"body": [{trace.REPR_KEY: "<bytes>"}]}]),
+        (LookupError(object), [{trace.REPR_KEY: "<class 'object'>"}]),
+    ],
+    ids=["key", "os", "none", "bytes-and-a-tuple", "nested-bytes", "not-json"],
+)
+def test_a_tool_s_exception_is_recorded_with_its_args_captured(posted, exc, args):
+    """A tool call's error keeps the exception's `args`, captured as its own args are."""
+    with pytest.raises(type(exc)):
+        _raising(exc)()
+    [(_, _, doc)] = posted.posts
+    assert doc["error"]["args"] == args
+
+
+def test_a_decode_error_s_buffer_is_recorded_as_bytes_never_as_its_content(posted):
+    """Redaction cannot read base64, and the buffer a decode failed on may hold a credential."""
+    body = b'{"access_token": "sk_live_' + b"Q" * 24 + b'"}\xff'
+    with pytest.raises(UnicodeDecodeError) as raised:
+        _raising_on(body)()
+    [(_, _, doc)] = posted.posts
+    assert doc["error"]["args"] == ["utf-8", {trace.REPR_KEY: "<bytes>"}, *raised.value.args[2:]]
+
+
+def _raising_on(body: bytes) -> Callable[..., Any]:
+    @sdk.read_tool(name="db.decode")
+    def decode() -> str:
+        return body.decode()
+
+    return decode
+
+
+def test_an_exception_whose_args_cannot_be_read_is_recorded_without_them(posted):
+    class Unreadable(Exception):
+        @property
+        def args(self) -> Any:  # type: ignore[override]
+            raise RuntimeError("no args")
+
+    with pytest.raises(Unreadable):
+        _raising(Unreadable("x"))()
+    [(_, _, doc)] = posted.posts
+    assert doc["error"] == {"type": f"{__name__}.{Unreadable.__qualname__}", "message": "x"}
+
+
+def test_args_and_an_error_s_args_together_stay_inside_one_capture_budget(posted):
+    """An error's args are bounded with the call's args, as a result is, and so is the post."""
+    half = "x" * (limits.MAX_CAPTURED_BYTES // 2 + 10)
+    with pytest.raises(KeyError):
+        _raising(KeyError(half))(half)
+    [(_, _, doc)] = posted.posts
+    assert doc["args"] == {"text": half}
+    assert doc["error"]["args"] == {trace.TRUNCATED_KEY: True, "bytes": len(half) + 4}
     assert len(capture.serialized(doc)) < 2 * limits.MAX_CAPTURED_BYTES
 
 
@@ -587,7 +655,7 @@ def test_an_async_stand_in_that_raises_re_raises_the_same_object_and_records_its
     [(_, _, doc)] = posted.posts
     assert (doc["result"], doc["error"]) == (
         None,
-        {"type": "builtins.ValueError", "message": "card declined"},
+        {"type": "builtins.ValueError", "message": "card declined", "args": ["card declined"]},
     )
 
 

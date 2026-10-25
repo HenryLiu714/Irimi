@@ -8,7 +8,7 @@ import sys
 import time
 import typing
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, overload
 
 from irimi.core.calls import signature
@@ -18,7 +18,7 @@ from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.protocol.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 from irimi.sdk import _context as context
 from irimi.sdk._capture import capture, capture_call, revive, serialized
-from irimi.sdk._errors import error_info, recorded_error
+from irimi.sdk._errors import recorded_error, tool_error_info
 from irimi.sdk._runs import check_name, label, off_the_loop
 from irimi.sdk._state import state
 
@@ -365,8 +365,12 @@ class _Call:
         """Return the call with its outcome as posted, or None (warned once) if building fails."""
         try:
             captured: trace.JSONValue = None
+            error = None
             if exc is None:
                 captured = _bounded(self.args, capture(result)[0])
+            else:
+                raised = tool_error_info(exc)
+                error = replace(raised, args=_bounded(self.args, raised.args))
             call = trace.ToolCall(
                 tool_call_id=trace.new_tool_call_id(),
                 run_id=self.run_id,
@@ -375,7 +379,7 @@ class _Call:
                 ran=self.ran,
                 args=self.args,
                 result=captured,
-                error=None if exc is None else error_info(exc),
+                error=error,
                 started_at=self.started_at,
                 ended_at=time.time(),
                 awaited=self.awaited,

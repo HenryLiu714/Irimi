@@ -75,7 +75,8 @@ by a [body ref](#body-ref). An empty body stores nothing, and its ref is `null`.
 ## Records
 
 Every timestamp is wall-clock seconds since the epoch, a finite JSON number. Every field in the
-tables is present in every record; "or `null`" says when its value may be `null`.
+tables is present in every record unless its type says "or absent"; "or `null`" says when its
+value may be `null`.
 
 ### Run record
 
@@ -118,9 +119,12 @@ A run's or tool call's `error` (`trace.ErrorInfo`):
 | --- | --- | --- | --- |
 | `type` | string | 2 | The exception's `module.qualname`, at most 300 characters. |
 | `message` | string | 2 | Its `str()`, at most 1000 characters. |
+| `args` | any JSON, or absent | 3 | A tool call's only: the exception's `args`, [captured](#captured-arguments) as a list and never cut, but for `bytes`, stored as `{"__irimi_repr__": "<bytes>"}`, so a replay raises it again with them. Absent from a run's error, and from a tool call recorded before irimi kept them; a reader takes `null` as absent. |
 
-Both are redacted whole and only then cut; a secret across the cut is kept as its placeholder,
-never dropped or split.
+All three are redacted, `type` and `message` whole and only then cut; a secret across the cut is
+kept as its placeholder, never dropped or split. A replay raises a recorded error with its `args`
+when they rebuild (an `OSError`'s `errno` and `strerror` are among them, its `filename` is not),
+else with its `message` as its only argument.
 
 ### Captured arguments
 
@@ -157,8 +161,8 @@ part of it was captured by a replayable row:
 - **Size.** A repr is cut to 1000 characters outside any secret's shape, and a secret across the
   cut is marked `<redacted>`. Captured `args` over 1 MiB
   of JSON are replaced whole by `{"__irimi_truncated__": true, "bytes": n}`, where `n` is the size
-  capture had reached when it stopped; so is a tool call's `result` when `args` and `result`
-  together pass 1 MiB. Neither is replayable.
+  capture had reached when it stopped; so is a tool call's `result`, or its error's `args`, when
+  `args` and it together pass 1 MiB. None of these is replayable.
 
 ### Events
 
@@ -404,7 +408,7 @@ An event's `type` (`trace.EventType`):
 | Version | Written by | Changes |
 | --- | --- | --- |
 | 2 | irimi 0.1.0 | The first released version. |
-| 3 | irimi 0.2 | Added `irimi` to `answered_by` and the `refused` flag. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
+| 3 | irimi 0.2 | Added `irimi` to `answered_by`, the `refused` flag and an error's `args`. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
 
 ## Example
 

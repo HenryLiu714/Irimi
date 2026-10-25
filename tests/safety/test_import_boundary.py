@@ -39,8 +39,8 @@ LAYERS: list[dict[str, list[str] | None]] = [
         "config": ["__init__", "paths", "files", "ca"],
         "sdk": [
             "_context",
-            "_errors",
             "_capture",
+            "_errors",
             "_http_labels",
             "_control_client",
             "_state",

@@ -423,9 +423,13 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         try:
             flaky_lookup("acc_1")
         except KeyError as exc:
-            agentkit.obs("lookup_failed", error=type(exc).__name__, key=str(exc))
-        # Uncaught: the run ends in error.
-        score_account({"id": "acc_missing"})
+            agentkit.obs("lookup_failed", error=type(exc).__name__, key=str(exc), args=exc.args)
+        try:
+            score_account({"id": "acc_missing"})
+        except KeyError as exc:
+            # Raised again, uncaught: the run ends in error.
+            agentkit.obs("score_failed", args=exc.args)
+            raise
         return {}
     connect_with(f"postgres://crm:{agentkit.key('STRIPE_API_KEY')}@db.internal/crm")
     accounts = find_accounts(segment)

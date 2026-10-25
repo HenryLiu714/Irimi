@@ -176,10 +176,13 @@ no-op unless irimi is active, and safe to call again.
 
 ### `sdk.RecordedToolError`
 
-An exception a read tool raised in the recorded run, raised again in a replay. For a builtin such
-as `KeyError` it also subclasses that builtin, so `except KeyError` still catches it. `type_name`
-is the original's type as recorded (`builtins.KeyError`), `message` its `str`, and `args` is
-`(message,)`: the original's other attributes are not stored.
+An exception a read tool raised in the recorded run, raised again in a replay. For a builtin such as
+`KeyError` it also subclasses that builtin, so `except KeyError` still catches it. `type_name` is
+the original's type as recorded (`builtins.KeyError`), `message` its `str`, and `args` the
+original's, as JSON holds them (a tuple in them comes back as a list): a `KeyError`'s `args[0]` is
+its key, and an `OSError` has its `errno` and `strerror` back. When the recording holds no args that
+rebuild (bytes or an object's repr among them, a call recorded before irimi kept them), `args` is
+`(message,)`. Its other attributes, such as an `OSError`'s `filename`, are not stored.
 
 ### `irimi.testing`
 
