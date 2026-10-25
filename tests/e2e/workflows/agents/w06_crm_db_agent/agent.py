@@ -486,6 +486,16 @@ def decoration_errors() -> list[str]:
         def file(self, x: int) -> int:
             return x
 
+    def with_session(f: Callable[..., int]) -> Callable[..., int]:
+        @functools.wraps(f)
+        def supplied(*args: Any, **kwargs: Any) -> int:
+            return f("session", *args, **kwargs)
+
+        return supplied
+
+    def saved(session: str, x: int) -> int:
+        return x
+
     not_callable: Any = "mock_database_write"
     misused: Any = sdk  # each mistake below is a call the SDK's signature already refuses
     mistakes: dict[str, Callable[[], object]] = {
@@ -506,6 +516,10 @@ def decoration_errors() -> list[str]:
             fake=functools.wraps(real)(lambda x: x)
         )(real),
         "method_fake_without_self": lambda: observe.write_tool(fake=lambda x: x)(Desk.file),
+        # No mistake: the decorator beneath supplies `session`, so callers and the fake pass `x`.
+        "fake_for_a_supplied_argument": lambda: observe.write_tool(fake=lambda x: x)(
+            with_session(saved)
+        ),
     }
     raised = []
     for case, attempt in mistakes.items():

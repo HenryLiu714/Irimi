@@ -141,6 +141,27 @@ class _Odd:
         raise AttributeError(name)
 
 
+def _with_session(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap `f`, supplying its first argument, as a session-injecting decorator does."""
+
+    @functools.wraps(f)
+    def supplied(*args: Any, **kwargs: Any) -> Any:
+        return f("session", *args, **kwargs)
+
+    return supplied
+
+
+def _declaring(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap `f` in a pass-through wrapper that declares `f`'s signature as its own."""
+
+    @functools.wraps(f)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return f(*args, **kwargs)
+
+    wrapper.__signature__ = inspect.signature(f)  # type: ignore[attr-defined]
+    return wrapper
+
+
 # A fake that would run the write: the function, a partial or wrapper of it, or what it wraps.
 _ALIAS = "is the function itself, or a partial or wrapper of it"
 
@@ -207,6 +228,10 @@ MISTAKES: dict[str, tuple[Callable[[], Any], str]] = {
         lambda: sdk.write_tool(fake=_sync)(_noted),
         "cannot take its arguments (got an unexpected keyword argument 'note')",
     ),
+    "method_fake_without_the_instance_under_a_declaring_wrapper": (
+        lambda: sdk.write_tool(fake=_sync)(_declaring(_Desk.file)),
+        "cannot take its arguments (too many positional arguments)",
+    ),
 }
 
 
@@ -245,7 +270,10 @@ def test_a_tool_keeps_its_functions_name_signature_and_nature():
         (_Desk.file, functools.partial(lambda prefix, self, order: None, "p")),
         (_Desk.file, max),  # a builtin whose signature cannot be read: the call decides
         (_spread, lambda: None),
+        (_spread, lambda order, *, note: None),
         (_sync, _Odd()),
+        (_with_session(_Desk.file), lambda order: None),
+        (_sync, _with_session(lambda session, order: None)),
     ],
     ids=[
         "exact",
@@ -254,11 +282,16 @@ def test_a_tool_keeps_its_functions_name_signature_and_nature():
         "partial-of-another",
         "unreadable",
         "variadic-function",
+        "variadic-function-passed-more",
         "odd-getattr",
+        "a-decorator-beneath-supplies-one",
+        "a-decorator-on-the-fake-supplies-one",
     ],
 )
 def test_a_fake_that_takes_the_functions_required_arguments_is_accepted(fn, fake):
-    """Only the required arguments are tried, so a fake may take more, or fewer optional ones."""
+    """Only the required arguments are tried, so a fake may take more, or fewer optional ones.
+
+    Each signature is the object's own: a decorator that supplies an argument changes it."""
     sdk.write_tool(fake=fake, name="desk.file")(fn)
 
 

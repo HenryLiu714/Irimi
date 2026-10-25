@@ -201,18 +201,21 @@ def _refused_call(fake: Callable[..., Any], fn: Callable[..., Any]) -> str | Non
     """Return why `fake` cannot take `fn`'s required arguments, passed as `fn` declares them.
 
     None when it can, or when either signature cannot be read. Only required parameters are
-    passed, so a fake taking `*args, **kwargs`, or fewer optional ones, is never refused.
+    passed, so a fake taking `*args, **kwargs`, or fewer optional ones, is never refused. Each
+    signature is the object's own, not one it wraps: a decorator beneath may supply an argument.
     """
     try:
-        params = signature(fn).parameters.values()
-        taking = signature(fake)
+        params = list(signature(fn, follow_wrapped=False).parameters.values())
+        taking = signature(fake, follow_wrapped=False)
     except Exception:  # no signature to read, as for many builtins: the call decides
         return None
     required = [p for p in params if p.default is p.empty and p.kind not in _VARIADIC]
     args = [None for p in required if p.kind is not p.KEYWORD_ONLY]
     kwargs = {p.name: None for p in required if p.kind is p.KEYWORD_ONLY}
+    # A function taking `*args` or `**kwargs` may be passed more than it requires.
+    bind = taking.bind_partial if any(p.kind in _VARIADIC for p in params) else taking.bind
     try:
-        taking.bind(*args, **kwargs)
+        bind(*args, **kwargs)
     except TypeError as exc:
         return str(exc)
     return None
