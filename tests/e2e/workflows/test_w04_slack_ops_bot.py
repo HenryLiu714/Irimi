@@ -368,3 +368,38 @@ def test_irimi_compare_escapes_every_write_that_prints_like_another(shared_store
     # The `+` row alone, with nothing else printed alike, is not a line B's summary printed.
     alone = [*out[:5], *out[6:]]
     assert rows_not_shown(both, a, b, alone) == [out[4]]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_pairs_a_changed_post_beside_a_post_one_run_repeated(shared_store_run, mode):
+    """A posts the newline twice; B the typed backslash-n, then the newline. Both pairs line up.
+
+    A's first post pairs with B's first, changed, so neither run has a post the other lacks. A was
+    mentioned in the archived channel, so its reaction and upload are changed and the triggers'
+    args differ."""
+    repeated = shared_store_run(W, "repeated_answer")
+    both = shared_store_run(W, "typed_escape_then_two_lines", mode)
+    assert check_invariants(both) == []
+    code, out, err = compare(repeated, both)
+    a, b = (result.one("run.start")["run"] for result in (repeated, both))
+    newline = f'○ slack  post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {CHECKED}'
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b}",
+        f"  A  {ON_MENTION}",
+        f"  B  {ON_MENTION}",
+        "  (the triggers' args differ)",
+        "",
+        f"  ~ A {newline}",
+        f'    B ○ slack  post to #C0OPS: "Payouts are on schedule.\\\\nNext run at 09:00."  '
+        f"{CHECKED}",
+        f"  = {newline}",
+        "  ~ A ○ slack  add :eyes: to a message in C0OLDOPS  faked; not checked",
+        "    B ○ slack  add :eyes: to a message in C0OPS  faked; not checked",
+        "  ~ A ○ slack  upload status.csv to C0OLDOPS  faked; not checked",
+        "    B ○ slack  upload status.csv to C0OPS  faked; not checked",
+        f"  = {WEBHOOK_POST}",
+        "",
+        "  2 same · 3 changed · 0 only in A · 0 only in B",
+    ]
+    assert rows_not_shown(both, a, b, out) == []
