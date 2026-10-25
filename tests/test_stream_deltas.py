@@ -135,10 +135,17 @@ def test_an_event_that_holds_no_known_piece_gives_none(event):
 
 def test_an_index_that_is_not_a_string_or_an_integer_tells_no_text_apart():
     """Pieces whose texts cannot be told apart join into one, which hides more across them."""
-    for odd in (None, [0], {"a": 1}, 1.5):
+    for odd in (None, [0], {"a": 1}, 1.5, float("inf"), float("nan")):
         event: dict[str, Any] = {"type": "content_block_delta", "index": odd}
         event["delta"] = {"type": "text_delta", "text": "x"}
         assert deltas(event) == [Delta(("anthropic", None), ("delta", "text"), "x")]
+
+
+def test_a_whole_float_index_is_the_integer_a_client_reads_it_as():
+    event: dict[str, Any] = {"type": "content_block_delta", "index": 1.0}
+    event["delta"] = {"type": "text_delta", "text": "x"}
+    [delta] = deltas(event)
+    assert delta.text_id == ("anthropic", 1) and type(delta.text_id[1]) is int
 
 
 # What a mutated event's parts may become: JSON of every type, some of it shaped like a piece.

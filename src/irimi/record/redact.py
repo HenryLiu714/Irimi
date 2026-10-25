@@ -569,10 +569,10 @@ def _with_document(lines: list[str], document: str, key: bytes) -> list[str]:
 
 
 class _Piece(NamedTuple):
-    """A piece of a model's streamed text: its event, its place there, and its escaped letters."""
+    """A piece of a model's streamed text: its event, its path there, and its escaped letters."""
 
     event: int
-    place: int
+    path: tuple[str | int, ...]
     text: str
     escaped: frozenset[int]
 
@@ -596,20 +596,20 @@ def _redact_split_secrets(events: list[list[str]], key: bytes) -> dict[int, list
             continue
         found = stream_deltas.deltas(document)
         escaped = escaped_letters(data) if found else {}
-        for k, delta in enumerate(found):
-            piece = _Piece(n, k, delta.text, escaped.get(delta.text, frozenset()))
+        for delta in found:
+            piece = _Piece(n, delta.path, delta.text, escaped.get(delta.text, frozenset()))
             texts_of.setdefault(delta.text_id, []).append(piece)
-    texts: dict[int, dict[int, str]] = {}
+    texts: dict[int, dict[tuple[str | int, ...], str]] = {}
     for pieces in texts_of.values():
-        for n, k, text in _split_secrets(pieces, events, key):
-            texts.setdefault(n, {})[k] = text
+        for n, path, text in _split_secrets(pieces, events, key):
+            texts.setdefault(n, {})[path] = text
     return {n: _with_texts(events[n], new, key) for n, new in texts.items()}
 
 
 def _split_secrets(
     pieces: list[_Piece], events: list[list[str]], key: bytes
-) -> Iterator[tuple[int, int, str]]:
-    """Yield `(event, place, new text)` for each piece of one text that a key in the text touches.
+) -> Iterator[tuple[int, tuple[str | int, ...], str]]:
+    """Yield `(event, path, new text)` for each piece of one text that a key in the text touches.
 
     The new text is what the keys leave of the piece, with the placeholder of each that starts in
     it. A shape the piece holds alone is merged with them, so neither leaves the other's tail.
@@ -641,20 +641,19 @@ def _split_secrets(
     stops = [stop for _, stop in merged]
     for i in hit:
         near = merged[bisect_right(stops, starts[i]) : bisect_left(stops, ends[i]) + 1]
-        yield pieces[i].event, pieces[i].place, _hide_spans(joined, starts[i], ends[i], near, key)
+        yield pieces[i].event, pieces[i].path, _hide_spans(joined, starts[i], ends[i], near, key)
 
 
-def _with_texts(lines: list[str], texts: dict[int, str], key: bytes) -> list[str]:
-    """Return an event's lines redacted, with its pieces of streamed text (by place) replaced.
+def _with_texts(lines: list[str], texts: dict[tuple[str | int, ...], str], key: bytes) -> list[str]:
+    """Return an event's lines redacted, with its pieces of streamed text (by path) replaced.
 
     The pieces go in after the walk, which keeps every path. Walked, a placeholder would part the
     text after it from the key it was glued to, and could make that text a key too."""
     data = _data(lines).lstrip()
     document = json.loads(data, object_pairs_hook=_unique_members)
-    found = stream_deltas.deltas(document)
     walked = _redact_json(document, key, shapes_after_escaped_letters(data))
-    for k, text in texts.items():
-        stream_deltas.set_text(walked, found[k].path, text)
+    for path, text in texts.items():
+        stream_deltas.set_text(walked, path, text)
     return _with_document(lines, _compact(walked), key)
 
 

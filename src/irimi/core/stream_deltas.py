@@ -83,6 +83,8 @@ def _openai_chat(event: dict[str, Any]) -> list[Delta]:
 def _id(value: object) -> object:
     """Return an index or id as part of a text's id; any other value tells no text apart.
 
-    Texts that cannot be told apart join into one, which can hide more across them; each piece's
-    own shapes are still hidden by its event's walk."""
+    A whole float is the integer a client reads it as. Texts that cannot be told apart join into
+    one, which can hide more across them; each piece's own shapes are still hidden by its walk."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
     return value if isinstance(value, str | int) else None
