@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from itertools import pairwise
 from typing import Any
@@ -443,6 +444,24 @@ def test_escaped_letters_says_where_each_decoded_string_has_a_letter_its_json_es
         "d": {0},
     }
     assert secret_shapes.escaped_letters('{"a": "xAy", "b": "\\n\\u00e9"}') == {}
+    # A lone surrogate is one character, and so is each half of a pair turned round.
+    lone = '["\\ude00\\u0041", "\\ude00\\ude00\\u0042", "\\ud83d\\ud83d\\ude00\\u0043"]'
+    assert secret_shapes.escaped_letters(lone) == {
+        "\ude00A": {1},
+        "\ude00\ude00B": {2},
+        "\ud83d\U0001f600C": {2},
+    }
+
+
+def test_shape_spans_after_many_escaped_letters_in_one_word_takes_linear_time():
+    """A shape after each escaped letter of one long word would each run to the word's end.
+
+    One that starts inside a shape that already ran there adds nothing, so it is not matched."""
+    word = "Axoxa-" * 30_000
+    started = time.perf_counter()
+    spans = secret_shapes.shape_spans(word, range(0, len(word), 6))
+    assert time.perf_counter() - started < 2
+    assert spans == [(1, len(word))]
 
 
 def test_shape_spans_finds_a_shape_after_an_escaped_letter_only_where_it_is_told_one_is():
@@ -1194,6 +1213,28 @@ def test_a_key_a_piece_shows_alone_is_hidden_in_a_piece_a_split_key_touches_too(
     sent = ["q", f"{LIVE_KEY} sk_live_", "zz9 b"]
     stored = ["q", f"{_ph(LIVE_KEY)} {_ph(STRIPE_LIVE + 'zz9')}", " b"]
     assert _response_body(_content_events(sent), SSE) == _content_events(stored)
+
+
+def test_a_glued_shape_another_field_of_its_event_spells_is_hidden_in_a_piece_a_key_touches():
+    """A shape an escape glues anywhere in an event is hidden in a piece a split key rewrites.
+
+    The event's walk hides it in every string of the event, and so does the rewrite."""
+    glued = STRIPE_LIVE + "X1"
+    first = (
+        '{"type":"content_block_delta","index":0,"note":"\\u0041' + glued + '",'
+        '"delta":{"type":"text_delta","text":"B' + glued + ' and sk_live_"}}'
+    )
+    sent = f"data: {first}\n\n".encode() + _model_stream([_text_delta("abc9 ok")])
+    walked = _text_delta(f"B{_ph(glued)} and {_ph(STRIPE_LIVE + 'abc9')}")
+    walked = {
+        "type": walked["type"],
+        "index": 0,
+        "note": "A" + _ph(glued),
+        "delta": walked["delta"],
+    }
+    expected = b"data: " + json.dumps(walked, separators=(",", ":")).encode() + b"\n\n"
+    expected += _model_stream([_text_delta(" ok")], compact=(0,))
+    assert _response_body(sent, SSE) == expected
 
 
 def test_a_placeholder_does_not_make_the_text_after_it_a_key():

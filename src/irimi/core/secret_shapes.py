@@ -22,6 +22,8 @@ _BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-
 _SHAPES = "(?:" + "|".join(SECRET_PATTERNS) + ")"
 SECRET_SHAPE = re.compile(_BOUNDARY + _SHAPES)
 _UNBOUNDED_SHAPE = re.compile(_SHAPES)
+# Every character a shape can hold.
+_WORD_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # A JSON `\u` escape of an ASCII letter or digit, the one escape whose decoded character glues to a
 # shape after it: decoded JSON reads `Ask_live_…` as a word, its raw text as a shape.
 _ALNUM_ESCAPE = re.compile(r"\\u00(?:3[0-9]|[46][1-9A-Fa-f]|[57][0-9Aa])")
@@ -84,8 +86,18 @@ def shape_spans(text: str, escaped: Iterable[int] = ()) -> list[tuple[int, int]]
     `escaped` are where decoded JSON text has a letter or digit its raw text escapes
     (`escaped_letters`); a shape may follow one, as it follows the escape in raw text."""
     spans = [shape.span() for shape in SECRET_SHAPE.finditer(text)]
-    after = (_UNBOUNDED_SHAPE.match(text, at + 1) for at in escaped)
-    return spans + [shape.span() for shape in after if shape]
+    reach = -1
+    for at in sorted(escaped):
+        # One that starts inside a shape that ran to its word's end ends there too: skipping it
+        # keeps a word of many escaped letters linear.
+        if at + 1 < reach:
+            continue
+        shape = _UNBOUNDED_SHAPE.match(text, at + 1)
+        if shape:
+            spans.append(shape.span())
+            if not _WORD_CHARACTER.match(text, shape.end()):
+                reach = shape.end()
+    return spans
 
 
 # What a cut made with no redaction key, the SDK's, puts where a secret ran across it: dropping the
