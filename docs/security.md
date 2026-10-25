@@ -138,7 +138,8 @@ agent never see a placeholder.
   Text the SDK must shorten before irimi can redact it (trigger and tool names, captured `repr`s,
   error messages) is cut at its limit, or earlier where a secret's shape crosses the limit.
 - **Failure is closed.** A part that cannot be redacted, including a JSON document with a repeated
-  key, is stored as `<redaction-failed>` and the exchange is flagged `redaction-failed`.
+  key, is stored as `<redaction-failed>` and the exchange is flagged `redaction-failed`. An SSE
+  event whose joined `data:` lines are refused that way fails its whole body.
 
 What redaction does not catch is listed in [limitations.md](limitations.md#redaction).
 
