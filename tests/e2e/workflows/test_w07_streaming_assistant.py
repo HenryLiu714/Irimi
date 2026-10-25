@@ -729,6 +729,7 @@ def test_a_replay_of_a_replay_serves_both_streams_with_their_recorded_chunks(rep
     assert second.exchange_lines() == [*RECORDED_LINES, TRACE_LINE]
     assert [r.host for r in second.internet.requests()] == ["api.smith.langchain.com"]
     streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert sorted(streams) == ["/v1/chat/completions", "/v1/messages"]
     assert stored_streams(second, replayed_run_id(second)) == streams
 
 
