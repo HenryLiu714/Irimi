@@ -117,10 +117,11 @@ body was stored decoded. irimi frames the answer itself, with a `Content-Length`
 sends, and leaves out the recorded hop-by-hop headers (`Connection`, `Keep-Alive`,
 `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`). An answer to `HEAD` has no
 body, so it keeps the recorded `Content-Encoding` and `Content-Length`, which say what its `GET`
-would carry; a malformed length, or two that disagree, are left out. A recorded header that holds
-a CR, LF or NUL, or whose name holds a `:` or anything else a header name cannot, would add a
-header of its own. Only an edited recording can hold one, and irimi answers that request with its
-`502` flagged `decision-failed` instead.
+would carry; a malformed length, or two that disagree, are left out. A folded value is unfolded.
+A recorded header that still holds a CR, LF or NUL, or whose name holds a `:` or anything else a
+header name cannot, could add a header of its own, so irimi answers that request with its `502`
+flagged `decision-failed` instead. An edited recording can hold one, and so can the recording of a
+service that sent one, which the agent got as it came.
 
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes
