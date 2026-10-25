@@ -631,6 +631,7 @@ def test_a_task_a_sync_trigger_returns_makes_its_calls_in_no_run_once_its_run_ha
     reader = shadow.stored()
     records = shadow.sdk_runs()
     assert sorted(run_of(shadow, i) for i in (0, 1)) == sorted(ends)
+    assert sorted(record.run_id for record in records) == sorted(ends)
     for record in records:
         assert record.end is not None and record.end.outcome == "ok"
         assert reader.load_run(record.run_id).events == []
@@ -648,6 +649,9 @@ def test_a_task_a_sync_trigger_returns_makes_its_calls_in_no_run_once_its_run_ha
                 "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
             )
         assert not [line for line in shadow.summaries() if "○" in line]
+        assert shadow.irimi[-1] == (
+            "stopped · 6 exchanges not in any run: irimi runs show unattributed"
+        )
     else:
         assert len([line for line in shadow.summary() if "○ stripe  refund" in line]) == 2
 
@@ -695,6 +699,10 @@ def test_a_pool_worker_that_kept_an_ended_run_adds_nothing_to_it_and_its_trigger
         ("GET", "ch_Q1"),
         ("POST", "ch_Q1"),
     ]
+    if mode == "serve":
+        assert shadow.irimi[-1] == (
+            "stopped · 2 exchanges not in any run: irimi runs show unattributed"
+        )
 
 
 # -- the worker's ledger tools: tool calls under concurrency --------------------------------------
