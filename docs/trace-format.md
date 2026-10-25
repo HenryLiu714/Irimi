@@ -248,7 +248,7 @@ A tool call the proxy cannot see, reported by the SDK (`trace.ToolCall`):
 | `ran` | [ran](#vocabularies) | 2 | Which body ran. |
 | `args` | any JSON | 2 | What it was called with, bound against the real function's signature and [captured](#captured-arguments). |
 | `result` | any JSON | 2 | What it returned, captured the same way; `null` when it raised. |
-| `error` | error or `null` | 2 | What it raised. A call stopped from outside (its task cancelled, its coroutine closed) records `asyncio.exceptions.CancelledError` or `builtins.GeneratorExit`, which a replay never hands back. |
+| `error` | error or `null` | 2 | What it raised. A call stopped from outside (its task cancelled, its coroutine closed) records `asyncio.exceptions.CancelledError`, `trio.Cancelled` or `builtins.GeneratorExit`, which a replay never hands back. |
 | `started_at` | number | 2 | When the call began. |
 | `ended_at` | number | 2 | When it returned or raised. |
 | `awaited` | boolean | 2 | `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's. |

@@ -928,5 +928,7 @@ def test_a_description_is_found_anywhere_in_a_captured_value():
 
 
 def test_the_stopped_error_types_are_how_a_cancelled_or_closed_call_is_recorded():
-    stops = (asyncio.CancelledError(), GeneratorExit())
+    # trio names its public classes by the package, as `trio.Cancelled`; trio is not installed.
+    trio_cancelled = type("Cancelled", (BaseException,), {"__module__": "trio"})
+    stops = (asyncio.CancelledError(), trio_cancelled(), GeneratorExit())
     assert {ErrorInfo.from_exception(e).type for e in stops} == trace.STOPPED_ERROR_TYPES

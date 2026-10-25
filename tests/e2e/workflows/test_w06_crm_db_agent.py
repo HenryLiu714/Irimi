@@ -11,7 +11,7 @@ from irimi.core.secret_shapes import CUT_MARK
 from irimi.protocol.trace import REPR_KEY, UNATTRIBUTED, ErrorInfo, ToolCall
 from irimi.record import redact
 from irimi.sdk._capture import MAX_REPR
-from tests.e2e.workflows.agents.agentkit import LOOKUP_REFUSED_ENV
+from tests.e2e.workflows.agents.agentkit import LOOKUP_REFUSED_ENV, LOOKUP_UNROUTED
 from tests.e2e.workflows.agents.w06_crm_db_agent.agent import (
     CONNECT_RETRIES,
     DB_NAME,
@@ -240,6 +240,48 @@ def test_an_unlabelled_database_write_happens_for_real_under_shadow(run_workflow
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_a_write_tool_a_framework_unwraps_still_runs_its_fake(run_workflow, mode):
+    """`inspect.unwrap` of a write tool, sync or async, gives the tool, never its real function.
+
+    A framework that calls what it unwrapped gets the fake under irimi and the real write bare, as
+    a call of the tool itself does. What it reads off the tool is the real function's signature
+    and type hints, in every mode."""
+    bare = run_workflow(W, "framework_unwraps", "bare")
+    assert bare.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "real"),
+        ("crm.notify_owner", "real"),
+    ]
+    assert bare.result()["upserted"] == {"upserted": "acc_1"}
+    assert bare.result()["notified"] == {"queued": "acc_1"}
+    assert rows(bare)[0] == ("acc_1", "Unwrapped", "smb", "2026-01-01", 0, None)
+    assert files(bare) == ["crm.sqlite3", "outbox.jsonl"]
+    shadow = run_workflow(W, "framework_unwraps", mode)
+    assert shadow.tools() == [
+        ("crm.find_accounts", "real"),
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    assert shadow.result()["upserted"] == {"stood_in": True, "id": "acc_1"}
+    assert shadow.result()["notified"] == {"stood_in": True}
+    assert rows(shadow) == SEED
+    assert files(shadow) == ["crm.sqlite3"]
+    assert [(c.name, c.ran) for c in tool_calls(shadow) if c.kind == "write"] == [
+        ("crm.upsert_account", "shadow"),
+        ("crm.notify_owner", "shadow"),
+    ]
+    # The unwrap went past the corpus's own logging wrapper and stopped at the SDK's.
+    registered = {
+        "unwrapped": True,
+        "wraps_more": False,
+        "parameters": ["account"],
+        "hints": {"account": "dict[str, typing.Any]", "return": "dict[str, typing.Any]"},
+    }
+    for run in (bare, shadow):
+        assert run.events("registered", with_time=False) == [{"event": "registered", **registered}]
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mode):
     shadow = run_workflow(W, "tool_raises", mode)
     bare = run_workflow(W, "tool_raises", "bare")
@@ -330,10 +372,20 @@ def test_each_decoration_time_mistake_raises_type_error(run_workflow, mode):
         "generator",
         "generator_fake",
         "fake_is_the_function",
+        "fake_is_a_partial",
+        "fake_wraps_the_function",
+        "method_fake_without_self",
     ]
     assert (
         run_workflow(W, "decoration_errors", "bare").result()["raised"]
         == (shadow.result()["raised"])
+    )
+    said = {e["case"]: e["message"] for e in shadow.events("decoration_error")}
+    for case in ("fake_is_a_partial", "fake_wraps_the_function"):
+        assert "is the function itself, or a partial or wrapper of it" in said[case]
+    assert (
+        "cannot take its arguments (too many positional arguments)"
+        in (said["method_fake_without_self"])
     )
 
 
@@ -663,13 +715,22 @@ def test_enrich_replayed_answers_its_read_tools_from_the_recording(replayed):
     assert not (replay.state / DB_NAME).exists()
 
 
-def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed):
+# How `agentkit.lookup_gateway` refuses each lookup, and what the one warning quotes of the answer.
+LOOKUP_REFUSALS = {
+    "1": ("(rejected: HTTP 502: ", "the gateway has no such route"),
+    LOOKUP_UNROUTED: ("(rejected: HTTP 404: ", "no control route"),
+}
+
+
+@pytest.mark.parametrize("how", LOOKUP_REFUSALS)
+def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(replayed, how):
     """A replay whose lookups cannot reach irimi runs each read tool for real and warns once.
 
-    `agentkit.lookup_gateway` refuses the lookup route and forwards every post. The agent ends as
-    recorded, and `fetch_enrichment`'s GET is answered from the recording. Replayed by its command,
-    since the gateway and the logger are set up in the agent's `main()`."""
-    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: "1"}, command=True)
+    `agentkit.lookup_gateway` forwards every post, and answers each lookup a 502, or sends it to a
+    route irimi does not have, whose 404 is not a miss. The agent ends as recorded, and
+    `fetch_enrichment`'s GET is answered from the recording. Replayed by its command, since the
+    gateway and the logger are set up in the agent's `main()`."""
+    recorded, replay = replayed(W, "enrich", {LOOKUP_REFUSED_ENV: how}, command=True)
     assert replay.exit_code == recorded.exit_code == replay.agent_exit_code() == 0
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.tools("read") == [(name, "real") for name, _ in recorded.tools("read")]
@@ -681,7 +742,8 @@ def test_enrich_replayed_where_no_lookup_reaches_irimi_runs_each_read_for_real(r
     assert warned["message"].startswith(
         "irimi: could not look up a recorded call of tool crm.connect_with in run "
     )
-    assert "(rejected: HTTP 502: " in warned["message"]
+    status, quoted = LOOKUP_REFUSALS[how]
+    assert status in warned["message"] and quoted in warned["message"]
     assert warned["message"].endswith(
         "; the tool runs for real; further failures of this kind are not logged"
     )

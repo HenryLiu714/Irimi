@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import functools
+import inspect
 import json
 import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_type_hints
 
 from irimi import sdk
 from tests.e2e.workflows.agents import agentkit, observe
@@ -30,6 +32,7 @@ SCENARIOS = (
     "stand_in_http",
     "async_tools",
     "overlapping_writes",
+    "framework_unwraps",
 )
 STALE_BEFORE = "2025-06-01"
 # A database host the agent cannot reach: `connect_with` raises for it as a driver does, quoting
@@ -385,6 +388,24 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     if scenario == "outside_run":
         account = find_accounts(segment)[0]
         return {"upserted": upsert_account({**account, "score": 50})}
+    if scenario == "framework_unwraps":
+        # A framework that registers a tool by what `inspect.unwrap` gives, to read its signature,
+        # and then calls that.
+        registered = inspect.unwrap(upsert_account)
+        hints = get_type_hints(registered)
+        agentkit.obs(
+            "registered",
+            unwrapped=registered is not upsert_account,
+            wraps_more=hasattr(registered, "__wrapped__"),
+            parameters=list(inspect.signature(registered).parameters),
+            hints={name: repr(hint) for name, hint in hints.items()},
+        )
+        account = find_accounts(segment)[0]
+        notify = inspect.unwrap(notify_owner)
+        return {
+            "upserted": registered({**account, "name": "Unwrapped"}),
+            "notified": asyncio.run(notify(account["id"], "unwrapped")),
+        }
     if scenario == "stand_in_http":
         return {"synced": sync_industry("acc_1", "aerospace")}
     if scenario == "async_tools":
@@ -461,6 +482,20 @@ def decoration_errors() -> list[str]:
     def gen(x: int) -> Any:
         yield x
 
+    class Desk:
+        def file(self, x: int) -> int:
+            return x
+
+    def with_session(f: Callable[..., int]) -> Callable[..., int]:
+        @functools.wraps(f)
+        def supplied(*args: Any, **kwargs: Any) -> int:
+            return f("session", *args, **kwargs)
+
+        return supplied
+
+    def saved(session: str, x: int) -> int:
+        return x
+
     not_callable: Any = "mock_database_write"
     misused: Any = sdk  # each mistake below is a call the SDK's signature already refuses
     mistakes: dict[str, Callable[[], object]] = {
@@ -475,6 +510,16 @@ def decoration_errors() -> list[str]:
         # write under irimi.
         "generator_fake": lambda: observe.write_tool(fake=gen)(real),
         "fake_is_the_function": lambda: observe.write_tool(fake=real)(real),
+        # A partial of the function, or a wrapper built with `functools.wraps`, would run it too.
+        "fake_is_a_partial": lambda: observe.write_tool(fake=functools.partial(real))(real),
+        "fake_wraps_the_function": lambda: observe.write_tool(
+            fake=functools.wraps(real)(lambda x: x)
+        )(real),
+        "method_fake_without_self": lambda: observe.write_tool(fake=lambda x: x)(Desk.file),
+        # No mistake: the decorator beneath supplies `session`, so callers and the fake pass `x`.
+        "fake_for_a_supplied_argument": lambda: observe.write_tool(fake=lambda x: x)(
+            with_session(saved)
+        ),
     }
     raised = []
     for case, attempt in mistakes.items():

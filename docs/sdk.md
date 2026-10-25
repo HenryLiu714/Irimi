@@ -132,8 +132,21 @@ the recording when it can. `name` defaults to `module:qualname`.
 
 Label a function as a write the proxy cannot see, and name the fake that replaces it. Under irimi
 only `fake` runs, with the same arguments (the instance first for a method); without irimi the real
-function runs. `fake` must be callable, sync or async as the real function is, not a generator
-function and not the function itself; each mistake is a `TypeError` at decoration.
+function runs. `fake` must be callable, sync or async as the real function is, and able to take the
+real function's required arguments as it declares them, so a method's fake takes the instance
+first. It may not be a generator function, or the function itself, a `functools.partial` of it or
+a wrapper made with `functools.wraps(fn)`, any of which would run the real write under irimi. Each
+mistake is a `TypeError` at decoration. The arguments are checked against each object's own
+signature, not what it wraps, since a decorator beneath may supply one: a function behind such a
+wrapper is checked only if the wrapper sets `__signature__`.
+
+A write tool has its function's name and signature but no `__wrapped__`, so `inspect.unwrap`, and
+a framework that calls what it unwraps, gets the tool and never the real function. String
+annotations (`from __future__ import annotations`) are resolved when the tool is decorated, so
+`typing.get_type_hints` still reads them; one that names something defined later in the module
+stays a string, and needs `typing.get_type_hints(tool, vars(module))`. On Python 3.14, without that
+import, `inspect.signature(tool)` shows such a name as a `ForwardRef`, and
+`typing.get_type_hints(tool)` resolves it.
 
 | `sdk.is_active()` | Tool | What runs | What irimi records |
 | --- | --- | --- | --- |
@@ -209,7 +222,8 @@ values are captured, and which are replayable, is in
 - **Names** are strings, cut to 1000 characters outside any secret's shape; a secret across the
   cut is replaced by `<redacted>`.
 - **A sync function that returns a coroutine** keeps its run, or its tool call open, until the
-  coroutine finishes.
+  coroutine finishes. A tool's coroutine that nobody awaits never ran, so it is never recorded, and
+  Python warns that it was never awaited.
 - **A task outliving its run.** A task created inside a run keeps the run's id after the trigger
   returns, so its requests are stored in the run after its end.
 - **A request that names its own run.** An `http.client` request gets the SDK's header ahead of the
