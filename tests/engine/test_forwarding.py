@@ -143,9 +143,9 @@ def test_an_agent_that_gives_up_on_a_late_answer_is_flagged_though_its_request_i
 ):
     """An agent that times out 5 s after its request, 3 s after the headers, hung up itself.
 
-    mitmproxy's idle limit is 4 s here, so it is the headers that say the connection was busy;
-    mitmproxy holds a buffered answer back, so the agent sees nothing before its timeout."""
-    close_idle_connections_after(monkeypatch, 4)
+    mitmproxy's idle limit is 5 s here, 4 s with irimi's slack, so it is the headers that say the
+    connection was busy; mitmproxy holds a buffered answer back, so the agent sees nothing first."""
+    close_idle_connections_after(monkeypatch, 5)
     srv = serve(_LateAnswer)
     eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
     try:

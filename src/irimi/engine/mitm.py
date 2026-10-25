@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 META_KEY = "irimi"  # flow.metadata slot holding the flow's `Plan`
 STREAM_KEY = "irimi-stream"  # flow.metadata slot holding a streamed response's capture
 REQUEST_CUT_KEY = "irimi-request-cut"  # flow.metadata slot: request body cut at the cap
+# mitmproxy marks a connection busy just before irimi times the chunk or headers that made it so,
+# and closes an idle one only milliseconds past its limit, so a flow heard this close to the limit
+# may be one mitmproxy closed.
+IDLE_LIMIT_SLACK_S = 1.0
 
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
@@ -156,7 +160,7 @@ def _agent_hung_up(flow: http.HTTPFlow, capture: StreamCapture | None) -> bool:
             capture.last_chunk_at if capture is not None else 0.0,
         )
         idle_limit: float = ctx.options.tcp_timeout
-        return time.time() - heard < idle_limit
+        return time.time() - heard < idle_limit - IDLE_LIMIT_SLACK_S
     except Exception:
         return False  # unknown: reported as still connected
 

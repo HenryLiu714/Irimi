@@ -5,14 +5,17 @@ import http.client
 import itertools
 import threading
 import time
+import types
 
 import pytest
+from mitmproxy.connection import ConnectionState
 from mitmproxy.net import encoding
+from mitmproxy.test import tflow
 
 from irimi import services
 from irimi.core.exchange import Exchange, Flag
 from irimi.core.limits import MAX_STORED_BODY
-from irimi.engine import capture
+from irimi.engine import capture, mitm
 from irimi.engine.capture import StreamCapture
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
@@ -184,7 +187,7 @@ def test_an_agent_that_hangs_up_after_a_long_stream_is_flagged_though_its_header
     """A stream that ran past mitmproxy's idle limit, its chunks never idle, was the agent's to end.
 
     It is the last chunk that says the connection was busy, not the headers."""
-    close_idle_connections_after(monkeypatch, 2)
+    close_idle_connections_after(monkeypatch, 3)
     chunks = [b"data: %d\n\n" % i for i in range(8)]
     gates = [threading.Event() for _ in chunks]  # the last one holds the stream open
     srv = stream_server(chunks, gates)
@@ -194,7 +197,7 @@ def test_an_agent_that_hangs_up_after_a_long_stream_is_flagged_though_its_header
         conn, resp = open_stream(eng, srv)
         for chunk, gate in zip(chunks[:-1], gates[:-1], strict=True):
             assert resp.read(len(chunk)) == chunk
-            time.sleep(0.5)  # 3.5 s of stream in all, no gap near the 2 s limit
+            time.sleep(0.5)  # 3.5 s of stream in all, no gap near the 3 s limit
             gate.set()
         assert resp.read(len(chunks[-1])) == chunks[-1]
         resp.close()
@@ -211,7 +214,7 @@ def test_an_agent_that_hangs_up_after_a_long_stream_is_flagged_though_its_header
 
 def test_a_stream_mitmproxy_closes_for_idleness_is_not_blamed_on_the_agent(tmp_path, monkeypatch):
     """mitmproxy closes the agent's connection itself when nothing moves for its idle limit."""
-    close_idle_connections_after(monkeypatch, 1)
+    close_idle_connections_after(monkeypatch, 2)
     gates = [threading.Event(), threading.Event()]
     srv = stream_server(THREE_CHUNKS, gates)
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
@@ -230,6 +233,21 @@ def test_a_stream_mitmproxy_closes_for_idleness_is_not_blamed_on_the_agent(tmp_p
         stop_server(srv)
     (ex,) = seen
     assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+
+
+@pytest.mark.parametrize(
+    ("heard_ago", "hung_up"),
+    [(600 - mitm.IDLE_LIMIT_SLACK_S - 0.5, True), (600 - mitm.IDLE_LIMIT_SLACK_S / 2, False)],
+)
+def test_a_flow_heard_just_inside_the_idle_limit_is_not_blamed_on_the_agent(
+    monkeypatch, heard_ago, hung_up
+):
+    """mitmproxy times its idleness a moment before irimi times the flow, so the slack is its."""
+    flow = tflow.tflow()
+    flow.client_conn.state = ConnectionState.CLOSED
+    flow.request.timestamp_end = time.time() - heard_ago
+    monkeypatch.setattr(mitm.ctx, "options", types.SimpleNamespace(tcp_timeout=600), raising=False)
+    assert mitm._agent_hung_up(flow, None) is hung_up
 
 
 def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
