@@ -7,7 +7,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from http.client import HTTPConnection, HTTPException
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 from irimi import sdk
 from tests.e2e.workflows.agents import agentkit, observe
@@ -46,11 +48,50 @@ def _headers(parent_header: bool) -> dict[str, str]:
     return {"X-Parent-Run": run_id} if parent_header and run_id else {}
 
 
+def revalidate(service: str, etag: str, headers: dict[str, str]) -> None:
+    """Ask whether the stock changed since `etag`, then re-read it conditionally, on one connection.
+
+    The service answers 204 and 304, which end at their head: anything sent after one is read as
+    the next answer. Each answer's framing is logged, and whether the connection stayed open."""
+    proxy = agentkit.proxy()
+    dialled = urlsplit(proxy or service)
+    conn = HTTPConnection(dialled.hostname or "127.0.0.1", dialled.port, timeout=agentkit.timeout())
+    asks: tuple[tuple[str, str, dict[str, str]], ...] = (
+        ("changes", "/inventory/changes?" + urlencode({"since": etag}), {}),
+        ("not_modified", "/inventory", {"If-None-Match": etag}),
+    )
+    try:
+        for label, path, extra in asks:
+            url = service + path
+            conn.request("GET", url if proxy else path, headers={**headers, **extra})
+            resp = conn.getresponse()
+            body = resp.read()
+            answered_by = resp.getheader("Irimi-Answered-By")
+            agentkit.obs_http("GET", url, label, status=resp.status, answered_by=answered_by)
+            agentkit.obs(
+                "framing",
+                label=label,
+                status=resp.status,
+                content_length=resp.getheader("Content-Length"),
+                transfer_encoding=resp.getheader("Transfer-Encoding"),
+                etag=resp.getheader("ETag"),
+                body=len(body),
+                kept_alive=conn.sock is not None,
+            )
+    except (OSError, HTTPException) as err:
+        agentkit.obs("framing", label="connection_broke", error=type(err).__name__)
+    finally:
+        conn.close()
+
+
 @observe.trigger(name="inventory_agent")
-def inventory_agent(parent_header: bool) -> dict[str, Any]:
+def inventory_agent(parent_header: bool, recheck: bool = False) -> dict[str, Any]:
     service = agentkit.internal(SUBAGENT_HOST)
     headers = _headers(parent_header)
-    stock = http("GET", service + "/inventory", headers=headers, label="inventory").json()
+    listed = http("GET", service + "/inventory", headers=headers, label="inventory")
+    stock = listed.json()
+    if recheck:
+        revalidate(service, listed.headers.get("etag", ""), headers)
     if RECORD:
         agentkit.obs("policy", **load_reorder_policy())
     items = [i for i in (stock or {}).get("items", []) if i.get("qty", 0) > 0]
@@ -89,8 +130,8 @@ reservation_agent = observe.trigger(name="reservation_agent")(reserve)
 
 
 @observe.trigger(name="plan_quarter_close")
-def plan_quarter_close(parent_header: bool = False) -> dict[str, Any]:
-    stock = inventory_agent(parent_header)
+def plan_quarter_close(parent_header: bool = False, recheck: bool = False) -> dict[str, Any]:
+    stock = inventory_agent(parent_header, recheck)
     revenue = finance_agent()
     total = stock["quote"].get("total")
     if not isinstance(total, int):
@@ -122,11 +163,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--parent-header", action="store_true")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--nested-reserve", action="store_true")
+    parser.add_argument("--revalidate", action="store_true")
     args = parser.parse_args(argv)
     global RECORD, NESTED_RESERVE  # noqa: PLW0603  # the scenario's flags, set once per process
     RECORD = args.record
     NESTED_RESERVE = args.nested_reserve
-    decisions = [plan_quarter_close(args.parent_header) for _ in range(args.runs)]
+    # `--revalidate` is passed to the trigger, not set like these, so a replay of the trigger makes
+    # the checks too.
+    decisions = [plan_quarter_close(args.parent_header, args.revalidate) for _ in range(args.runs)]
     agentkit.obs("result", runs=args.runs, reserved=sum(d["reserved"] for d in decisions))
     return 0
 

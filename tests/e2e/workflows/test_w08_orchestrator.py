@@ -11,6 +11,7 @@ from irimi.servicemaps.loader import parse_service
 from irimi.servicemaps.model import MapError
 from tests.e2e.workflows.agents.w08_orchestrator.scenarios import (
     DOWN_TARGET,
+    STOCK_ETAG,
     SUBAGENT_MAP,
     UNJUSTIFIED_MAP,
 )
@@ -26,6 +27,19 @@ HOST = "subagent.internal"
 
 def decision(result):
     return {k: v for k, v in result.one("decision").items() if k not in ("event", "t")}
+
+
+def framing(result) -> dict[str, tuple]:
+    """Return `{label: (status, Content-Length, Transfer-Encoding, body bytes, kept alive)}`.
+
+    One per check `revalidate` makes; a broken connection shows as its own label."""
+    return {
+        e["label"]: tuple(
+            e.get(k)
+            for k in ("status", "content_length", "transfer_encoding", "body", "kept_alive")
+        )
+        for e in result.events("framing")
+    }
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -364,6 +378,39 @@ def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_live_204_and_304_reach_the_agent_framed_as_the_service_framed_them(run_workflow, mode):
+    """A live 204 and 304 are forwarded with the service's own head, which irimi does not rebuild.
+
+    The fake internet sends `Content-Length: 0` on both, and answers HTTP/1.0, which ends the
+    connection after each answer, bare or through irimi."""
+    shadow = run_workflow(W, "revalidate", mode)
+    bare = run_workflow(W, "revalidate", "bare")
+    live = {
+        "changes": (204, "0", None, 0, False),
+        "not_modified": (304, "0", None, 0, False),
+    }
+    assert framing(bare) == framing(shadow) == live
+    assert [e["etag"] for e in shadow.events("framing")] == [None, STOCK_ETAG]
+    assert {k: v for k, v in shadow.by_label().items() if k in live} == {
+        "changes": (204, None),
+        "not_modified": (304, None),
+    }
+    lines = shadow.exchange_lines()
+    assert "real          read      GET subagent.internal/inventory/changes -> 204" in lines
+    assert "real          read      GET subagent.internal/inventory -> 304" in lines
+    # The conditional read reached the service as the agent sent it, so the service chose 304.
+    assert [
+        (r.method, r.path, r.headers.get("if-none-match")) for r in shadow.internet.requests(HOST)
+    ] == [
+        ("GET", "/inventory", None),
+        ("GET", "/inventory/changes", None),
+        ("GET", "/inventory", STOCK_ETAG),
+        ("POST", "/quote", None),
+    ]
+    assert decision(shadow) == decision(bare) | {"reservation": decision(shadow)["reservation"]}
+
+
 # ------------------------------------------------------------------------------- replay
 
 
@@ -386,6 +433,35 @@ def test_replaying_the_second_of_two_identical_runs_replays_it_alone(
         "recording",
         "recording",
         "fake-L0",
+    ]
+    assert replay.internet.requests() == []
+    assert replay.exit_code == 0
+
+
+def test_a_replayed_204_and_304_end_at_their_head_on_a_connection_kept_alive(replayed):
+    """A replay answers the 204 and 304 from the recording with no Content-Length and no content.
+
+    The recording holds the service's `Content-Length: 0`. irimi's answers keep the connection
+    open, so the 304 is read off the same connection right after the 204's head."""
+    recorded, replay = replayed(W, "revalidate")
+    assert framing(replay) == {
+        "changes": (204, None, None, 0, True),
+        "not_modified": (304, None, None, 0, True),
+    }
+    assert [e["etag"] for e in replay.events("framing")] == [None, STOCK_ETAG]
+    assert {k: v for k, v in replay.by_label().items() if k in ("changes", "not_modified")} == {
+        "changes": (204, "recording"),
+        "not_modified": (304, "recording"),
+    }
+    served = [ex for ex in replay.reported if ex.response.status in (204, 304)]
+    assert [(ex.request.path, ex.flags) for ex in served] == [
+        ("/inventory/changes", ("from-recording",)),
+        ("/inventory", ("from-recording",)),
+    ]
+    stored = [ex for ex in recorded.reported if ex.response.status in (204, 304)]
+    assert [(ex.response.header("content-length"), ex.response.body) for ex in stored] == [
+        ("0", b""),
+        ("0", b""),
     ]
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
