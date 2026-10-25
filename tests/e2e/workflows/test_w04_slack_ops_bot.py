@@ -377,9 +377,9 @@ def test_irimi_compare_pairs_a_changed_post_beside_a_post_one_run_repeated(share
     A's first post pairs with B's first, changed, so neither run has a post the other lacks. A was
     mentioned in the archived channel, so its reaction and upload are changed and the triggers'
     args differ."""
-    repeated = shared_store_run(W, "repeated_answer")
+    repeated = shared_store_run(W, "repeated_answer", mode)
     both = shared_store_run(W, "typed_escape_then_two_lines", mode)
-    assert check_invariants(both) == []
+    assert check_invariants(repeated) == check_invariants(both) == []
     code, out, err = compare(repeated, both)
     a, b = (result.one("run.start")["run"] for result in (repeated, both))
     newline = f'○ slack  post to #C0OPS: "Payouts are on schedule.\\nNext run at 09:00."  {CHECKED}'
