@@ -1,12 +1,18 @@
-"""Build what a run prints as it runs; `printable` escapes the agent's text in every line."""
+"""Build what a run prints as it runs; `printable` escapes the agent's text in every line.
+
+A live exchange is printed through `with_stored_path`, so its path reads as `irimi runs show` reads
+it, a webhook's secret path as its placeholder.
+"""
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from irimi.core import netaddr
 from irimi.core.exchange import AnsweredBy, Exchange, Flag
 from irimi.core.netaddr import Target
 from irimi.protocol.trace import Ran, ToolCall
+from irimi.record import redact
 from irimi.servicemaps import MapIndex, has_target
 
 PROXY_ONLY_NOTICE = (
@@ -119,8 +125,19 @@ def _shown_flags(exchange: Exchange) -> list[str]:
     return shown
 
 
+def with_stored_path(exchange: Exchange, key: bytes) -> Exchange:
+    """Return a live exchange with its request path as the store keeps it, and all else as it is.
+
+    Never raises."""
+    request = exchange.request
+    path = redact.stored_path(request, key)
+    if path == request.path:
+        return exchange
+    return replace(exchange, request=replace(request, path=path))
+
+
 def exchange_line(exchange: Exchange) -> str:
-    """Return the escaped line for one finished exchange."""
+    """Return the escaped line for one finished exchange, a live one after `with_stored_path`."""
     status = exchange.response.status if exchange.response else "-"
     flags = _shown_flags(exchange)
     tail = f"  [{', '.join(flags)}]" if flags else ""

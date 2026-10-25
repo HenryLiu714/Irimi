@@ -24,7 +24,7 @@ from irimi.protocol.trace import StoredRun, trigger_args
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
-from irimi.report.terminal import exchange_line
+from irimi.report.terminal import with_stored_path
 from irimi.servicemaps import loader
 from tests.support.credentials import (
     AGENT_STRIPE_KEY,
@@ -119,13 +119,13 @@ def stored(home, monkeypatch):
     _SpyStore.built = []
     monkeypatch.setattr("irimi.record.store.writer.DirectoryStore", _SpyStore)
     printed: list[Exchange] = []
-    line = exchange_line
+    shown = with_stored_path
 
-    def printing(ex: Exchange) -> str:
+    def printing(ex: Exchange, key: bytes) -> Exchange:
         printed.append(ex)
-        return line(ex)
+        return shown(ex, key)
 
-    monkeypatch.setattr("irimi.report.terminal.exchange_line", printing)
+    monkeypatch.setattr("irimi.report.terminal.with_stored_path", printing)
 
     def the_disk() -> _Disk:
         (store,) = _SpyStore.built
@@ -752,12 +752,13 @@ def test_a_delegated_slack_webhook_stores_its_secret_path_as_one_placeholder_in_
     assert disk.files_holding(WEBHOOK_TOKEN.encode()) == []
 
 
-def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
-    home, tmp_path, monkeypatch, redact_stand_in, stored
+def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk_or_printed(
+    home, tmp_path, monkeypatch, redact_stand_in, stored, capsys, caplog
 ):
-    """irimi's 502 for an unreachable webhook target names the target, but not on disk.
+    """irimi's 502 for an unreachable webhook target names the target by its origin alone.
 
-    The agent's answer holds the secret path; the stored request, target and 502 body do not."""
+    The stored request and target hold the path's placeholder, and so does the line irimi prints;
+    the warning irimi logs and the 502 the agent gets name only the origin."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -772,7 +773,8 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
         f"hooks.slack.com={origin}",
     )
     assert (answer.status, answer.header("irimi-answered-by")) == (502, "irimi")
-    assert WEBHOOK_PATH.encode() in answer.body
+    told = json.loads(answer.body)["error"]["message"]
+    assert told.startswith(f"target {origin!r} could not be reached: ")
     disk = stored()
     (ex,) = disk.received
     assert Flag.TARGET_FAILED in ex.flags and ex.target == origin + WEBHOOK_PATH
@@ -782,12 +784,35 @@ def test_an_unreachable_webhook_target_leaves_its_secret_path_nowhere_on_disk(
     _assert_same(written, redact.redact_exchange(ex, disk.key))
     assert (written.request.path, written.target) == (hidden, origin + hidden)
     assert disk.files_holding(WEBHOOK_TOKEN.encode()) == []
-    # The 502 still names its target, as the one placeholder the path and the target hold.
-    assert ex.response is not None and written.response is not None
-    told = json.loads(ex.response.body)["error"]["message"]
-    assert json.loads(written.response.body)["error"]["message"] == told.replace(
-        WEBHOOK_PATH, hidden
+    assert written.response is not None
+    assert json.loads(written.response.body)["error"]["message"] == told
+    printed = capsys.readouterr().out
+    assert f"POST hooks.slack.com{hidden} -> 502  [target-failed]" in printed
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("irimi")] == [
+        f"irimi: {told}"
+    ]
+    assert WEBHOOK_TOKEN not in printed + caplog.text
+
+
+def test_a_webhook_post_no_route_names_prints_its_placeholder_in_the_line_and_the_summary(
+    home, tmp_path, monkeypatch, redact_stand_in, stored, capsys
+):
+    """A post to a webhook the map lists no route for is spelled as its request in the summary.
+
+    Slack's workflow webhooks carry their secret in the path as `/services/` ones do."""
+    path = f"/triggers/T0REDACT/1/{WEBHOOK_TOKEN}"
+    call = _Call(
+        "POST", "/hooks.slack.com" + path, (("content-type", "application/json"),), WEBHOOK_BODY
     )
+    (answer,) = _run_calls_under_shadow(tmp_path, monkeypatch, redact_stand_in, [call])
+    assert answer.header("irimi-answered-by") == "fake-L0"
+    hidden = "/" + redact.placeholder(stored().key, path)
+    printed = capsys.readouterr().out
+    assert f"POST hooks.slack.com{hidden} -> 200  [unclassified]" in printed
+    assert f"  ○ slack  POST hooks.slack.com{hidden}  faked; not checked (unclassified)" in (
+        printed.splitlines()
+    )
+    assert WEBHOOK_TOKEN not in printed
 
 
 def test_a_stripe_form_write_through_the_door_stores_its_card_token_and_query_key_as_placeholders(

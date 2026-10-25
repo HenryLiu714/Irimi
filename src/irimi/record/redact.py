@@ -8,7 +8,8 @@ Guarantees:
   The key is per install, so a recording does not match on another machine.
 - Fails closed: a value that cannot be redacted is stored as `<redaction-failed>` and the exchange
   is flagged `redaction-failed`. No public function raises.
-- `is_credential_header` also says which headers a target may not receive.
+- `is_credential_header` also says which headers a target may not receive, and `stored_path`
+  what a line irimi prints shows of a path.
 """
 
 import hmac
@@ -62,6 +63,7 @@ CREDENTIAL_HEADERS: frozenset[str] = frozenset({"cookie", "dd-application-key", 
 KEY_BYTES = 32
 
 REDACTION_FAILED = "<redaction-failed>"
+_PATH_FAILED = "/" + REDACTION_FAILED
 
 # Names whose value is a secret as a query parameter, a form field's last bracket segment
 # (`card[token]`) or a JSON key at any depth. Matched whole, so `max_tokens` is not one.
@@ -197,6 +199,15 @@ def redact_exchange(exchange: Exchange, key: bytes) -> Exchange:
     )
 
 
+def stored_path(request: Request, key: bytes) -> str:
+    """Return the request's path as `redact_request` stores it, for printing. Never raises."""
+    try:
+        return _redact_path(request.host, request.path, key)
+    except Exception:
+        # Not logged: the store warns when it fails on the same path.
+        return _PATH_FAILED
+
+
 def redact_request(request: Request, key: bytes) -> Request:
     """Return `request` as `redact_exchange` stores it, for replay matching. Never raises."""
     return _redact_request(request, key, _Guard(), _secret_path(request))
@@ -286,9 +297,7 @@ def _redact_request(
     return replace(
         request,
         path=guard(
-            "the request path",
-            "/" + REDACTION_FAILED,
-            partial(_redact_path, request.host, request.path, key),
+            "the request path", _PATH_FAILED, partial(_redact_path, request.host, request.path, key)
         ),
         query=guard("the query", REDACTION_FAILED, partial(_redact_urlencoded, request.query, key)),
         headers=_redact_headers(request.headers, key, guard, secret_path, is_response=False),

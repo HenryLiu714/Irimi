@@ -31,7 +31,7 @@ and whether the invariants below held.
 | W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, idempotency, `irimi compare`, most of `irimi replay`, and deleting runs mid-run |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination over a cursor irimi minted, 40 writes in one run, a block with no entrypoint to replay, look-alike fields and a key across a run name's cut |
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads |
-| W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks, posts that print alike |
+| W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks and one whose target is down, posts that print alike |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | a `bytes` trigger, the webhooks a write would fire, a live read whose response holds a credential |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, and replayed read tools |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE streams recorded chunk by chunk, hang-ups and resets mid-stream, a stream that outlives its run |
@@ -54,8 +54,8 @@ owes) and `test_control_endpoint.py` (what the SDK posts).
 - `harness/services.py` holds the fake services. They keep state, so a bare run's second refund of
   a charge is really refused, and the scripted LLM answers from a function of the prompt.
 - `harness/scenario.py`, `execute.py`, `result.py`, `invariants.py` and `compare.py` define a
-  scenario, run it in a mode, read what the run left (irimi's stdout and stderr, its store and
-  its write log), check the invariants, and read `irimi compare`'s rows. `tests/e2e/workflows/conftest.py` runs each scenario once per mode per session.
+  scenario, run it in a mode, read what the run left (irimi's stdout and stderr, its log records,
+  its store and its write log), check the invariants, and read `irimi compare`'s rows. `tests/e2e/workflows/conftest.py` runs each scenario once per mode per session.
 - `agents/agentkit.py` is what the agents share: a urllib client, configuration from the
   environment, and the observation log the tests read. `agents/observe.py` wraps the SDK's
   `trigger`, `run`, `read_tool` and `write_tool` to log which runs started and which body ran.
@@ -71,7 +71,7 @@ Every shadow run, serve run and replay of every scenario is held to these
 3. No write tool's real function ran.
 4. No canary credential, sent by the agent or handed back by a live read, reached disk where irimi
    writes, whole or as the start a cut before redaction would leave, in a file or in the name of
-   a file or directory.
+   a file or directory, or reached a line irimi printed or logged, which a CI log keeps.
 5. The agent exited as it did bare, unless the scenario is marked `diverges`.
 
 A new workflow is found by name, so it is held to these without an edit to the tests.

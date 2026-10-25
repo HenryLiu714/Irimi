@@ -848,11 +848,30 @@ def test_a_header_that_cannot_be_hashed_fails_closed_alone(caplog):
     assert "\\udcff" not in caplog.text  # the exception's message spells it this way
 
 
-def test_a_path_that_cannot_be_hashed_fails_closed_and_still_starts_with_a_slash():
-    ex = _exchange(_request(host="hooks.slack.com", path="/services/\udcff"))
-    stored = redact_exchange(ex, KEY)
+def test_a_path_that_cannot_be_hashed_fails_closed_and_still_starts_with_a_slash(caplog):
+    """The stored path and the printed one alike, and only the store warns."""
+    request = _request(host="hooks.slack.com", path="/services/\udcff")
+    assert redact.stored_path(request, KEY) == "/" + redact.REDACTION_FAILED
+    assert [r for r in caplog.records if r.name.startswith("irimi")] == []
+    stored = redact_exchange(_exchange(request), KEY)
     assert stored.request.path == "/" + redact.REDACTION_FAILED
     assert stored.flags == (Flag.REDACTION_FAILED,)
+
+
+@pytest.mark.parametrize(
+    ("host", "path", "shown"),
+    [
+        ("hooks.slack.com", "/services/T0/B0/XXXXsecret", "/" + _ph("/services/T0/B0/XXXXsecret")),
+        ("hooks.slack.com.", "/workflows/T1/A1/S3CR3T", "/" + _ph("/workflows/T1/A1/S3CR3T")),
+        ("api.stripe.com", f"/v1/keys/{LIVE_KEY_SHORT}", f"/v1/keys/{_ph(LIVE_KEY_SHORT)}"),
+        ("api.stripe.com", "/v1/charges", "/v1/charges"),
+    ],
+)
+def test_stored_path_is_the_path_the_store_keeps(host, path, shown):
+    """What a line irimi prints shows of a path is what the store keeps of it."""
+    request = _request(host=host, path=path)
+    assert redact.stored_path(request, KEY) == shown
+    assert redact_exchange(_exchange(request), KEY).request.path == shown
 
 
 def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():

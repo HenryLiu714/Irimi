@@ -122,6 +122,10 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 
 ### Fixed
 
+- A Slack incoming webhook's secret path is no longer printed. The line irimi prints per exchange,
+  and the summary, show a request's path as the store keeps it, the placeholder `irimi runs show`
+  prints, and irimi's errors and warnings about a target name it by its origin,
+  `target 'http://127.0.0.1:9' could not be reached`, not by the URL that holds the path.
 - `irimi runs show unattributed` on a store with no unattributed events says so, instead of
   printing an invented run.
 - A run's or tool's name, a captured repr and a posted error are cut outside any secret they

@@ -60,6 +60,7 @@ class Run:
     run_id: str
     config: EngineConfig
     store: RunStore
+    key: bytes  # the install's redaction key, which every line printed live redacts a path with
     lock: ServeLock | None = None  # serve mode only
     recording: ReplayIndex | None = None  # replay only
     # Faked writes and idempotency keys per run, dropped when the run ends. None lets the engine
@@ -158,7 +159,7 @@ def prepare_run(
     if serve and lock is None:
         _close_store(store)
         return None
-    return Run(index, p, run_id, config, store, lock, recording, write_log, keys)
+    return Run(index, p, run_id, config, store, key, lock, recording, write_log, keys)
 
 
 def replayed_run(mode: EngineMode) -> str | None:

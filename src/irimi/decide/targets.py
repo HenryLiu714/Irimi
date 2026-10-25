@@ -20,6 +20,11 @@ class TargetUnreachable(TargetRefused):
     """A target irimi could not reach; handled and flagged as a refusal is."""
 
 
+def not_applied(target: Target, exc: Exception) -> TargetRefused:
+    """Return the refusal for a target irimi could not check or point a request at."""
+    return TargetRefused(f"target {target.origin!r} could not be applied: {exc}")
+
+
 @dataclass(frozen=True)
 class ForwardTo:
     """The target for this request; `forward_auth` keeps its `Authorization` header."""
@@ -55,7 +60,7 @@ def refuse_self_target(target: Target, listen_port: int, local_address: str = ""
         netaddr.is_self_host(target.host) or netaddr.resolves_to_self(target.host, local_address)
     ):
         raise TargetRefused(
-            f"target {target.url!r} is irimi's own listener on port {listen_port}; "
+            f"target {target.origin!r} is irimi's own listener on port {listen_port}; "
             "point it at the address that answers the route instead"
         )
 
@@ -87,11 +92,10 @@ def resolve(request: Request, classification: Classification) -> ForwardTo | Non
     # Scope rule: every path on a credential-path host is a credential, so its target is loopback.
     if request.host in service_map.credential_hosts and not sent_to.is_loopback:
         logger.error(
-            "irimi: refusing to send %s to target %s: the request path is the credential on %s, "
-            "so its target must be loopback",
-            request.path,
-            sent_to.url,
+            "irimi: refusing to send a request on %s to target %s: every path on that host is a "
+            "credential, so its target must be loopback",
             request.host,
+            target.origin,
         )
         return None
     return ForwardTo(sent_to, forward_auth=forward_auth)

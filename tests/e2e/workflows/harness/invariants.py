@@ -11,7 +11,7 @@ from tests.e2e.workflows.harness.result import Result
 from tests.e2e.workflows.harness.services import CLIENT_SECRET_CANARY
 
 # Every credential a workflow is given is a fake, greppable canary the fake services accept by
-# prefix. A canary found on disk under irimi's home is a redaction leak.
+# prefix. A canary found on disk under irimi's home, or in what irimi printed, is a leak.
 CANARIES = {
     "STRIPE_API_KEY": credentials.STRIPE_API_KEY,
     "SLACK_BOT_TOKEN": credentials.SLACK_BOT_TOKEN,
@@ -71,6 +71,11 @@ def check_invariants(shadow: Result, bare: Result | None = None) -> list[str]:
     leaked = [found for root in roots for found in _canaries_under(root)]
     if leaked:
         problems.append(f"4. a canary reached disk where irimi writes: {leaked}")
+    # A CI log is disk too: stdout, stderr and the log records each reach it.
+    said = "\n".join([*shadow.irimi, *shadow.irimi_errors, *shadow.irimi_logs])
+    told = _canaries_in(said.encode(errors="backslashreplace"))
+    if told:
+        problems.append(f"4. a canary reached what irimi printed or logged: {told}")
     if bare is not None and not scenario.diverges and bare.exit_code != shadow.exit_code:
         problems.append(
             f"5. the agent exited {shadow.exit_code} under shadow but {bare.exit_code} bare"
@@ -96,17 +101,23 @@ def _live_answers_not_served(result: Result) -> list[str]:
 
 
 def _canaries_under(root: Path) -> list[str]:
-    """Return each canary found under `root`, whole or as its first CANARY_PART characters.
+    """Return each canary found under `root`, worded as `_canaries_in` words it, with its path.
 
     A file's or directory's name is read as well as a file's bytes: redaction never sees a name."""
-    canaries = {**CANARIES, **SERVED_CANARIES}
     found = []
     for path in root.rglob("*"):
         # No canary holds a newline, so none is found across the name and the bytes.
         data = path.name.encode() + b"\n" + (path.read_bytes() if path.is_file() else b"")
-        for name, value in canaries.items():
-            if value.encode() in data:
-                found.append(f"{name} in {path}")
-            elif value[:CANARY_PART].encode() in data:
-                found.append(f"{name}'s first {CANARY_PART} characters in {path}")
+        found += [f"{canary} in {path}" for canary in _canaries_in(data)]
+    return found
+
+
+def _canaries_in(data: bytes) -> list[str]:
+    """Return each canary in `data`, by name, whole or as its first CANARY_PART characters."""
+    found = []
+    for name, value in {**CANARIES, **SERVED_CANARIES}.items():
+        if value.encode() in data:
+            found.append(name)
+        elif value[:CANARY_PART].encode() in data:
+            found.append(f"{name}'s first {CANARY_PART} characters")
     return found

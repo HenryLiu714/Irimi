@@ -22,9 +22,8 @@ from irimi.record import redact
 from irimi.record.store.layout import SERVE_LOCK_FILE
 from irimi.report.model import RunView, for_summary
 from irimi.report.summary import NO_TRAFFIC, Live, summary_lines
-from irimi.report.terminal import exchange_line, tool_call_line
+from irimi.report.terminal import exchange_line, tool_call_line, with_stored_path
 from tests.e2e.workflows.agents.w10_flaky_upstream.scenarios import CONTROL_DOWN
-from tests.e2e.workflows.harness.invariants import CANARIES
 from tests.e2e.workflows.harness.result import TOOL_WRITE, Result
 from tests.e2e.workflows.harness.scenario import cases, workflows
 
@@ -77,18 +76,16 @@ def is_quiet(result: Result) -> bool:
 
 
 def reported(result: Result) -> list[str]:
-    """Return irimi's exchange lines, W4's webhook path swapped for the store's placeholder.
+    """Return irimi's exchange lines.
 
     Under `--quiet`, which prints none, the lines of the exchanges the engine reported."""
     lines = result.exchange_lines()
     if is_quiet(result):
         assert lines == [], lines
-        lines = [exchange_line(e) for e in result.reported]
-    secret = CANARIES["SLACK_WEBHOOK_PATH"]
-    if not any(secret in line for line in lines):
-        return lines
-    key = (result.home / paths.REDACT_KEY_NAME).read_bytes()
-    return [line.replace(secret, "/" + redact.placeholder(key, secret)) for line in lines]
+        # A run that reported nothing may have no key, which `load_key` would create.
+        key = redact.load_key(result.home) if result.reported else b""
+        lines = [exchange_line(with_stored_path(e, key)) for e in result.reported]
+    return lines
 
 
 def is_telemetry(line: str) -> bool:

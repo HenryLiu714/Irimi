@@ -66,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
             if result.irimi:
                 print("  --- irimi")
                 print("\n".join(f"  {line}" for line in result.irimi))
+            # Kept by the harness, so they reach no stderr of their own.
+            if result.irimi_logs:
+                print("  --- irimi's log")
+                print("\n".join(f"  {line}" for line in result.irimi_logs))
             writes = result.internet.writes()
             print(f"  --- writes that reached the fake services: {len(writes)}")
             for req in writes:

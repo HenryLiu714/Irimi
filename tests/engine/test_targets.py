@@ -244,7 +244,8 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     """An unreachable target is irimi's JSON 502 naming the target, never a fall back to the fake.
 
     A fall back would look like a working run; an HTML page would name neither irimi nor the
-    target to the SDK that parses it."""
+    target to the SDK that parses it. The target is named by its origin: its path can be a
+    webhook's secret."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -259,7 +260,9 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     assert status == 502
     body = json.loads(data)
     assert body["error"]["type"] == "irimi_target_failed"
-    assert target_url in body["error"]["message"]
+    assert body["error"]["message"].startswith(
+        f"target 'http://127.0.0.1:{dead}' could not be reached: "
+    )
     # irimi answered it, with an error, and the flag says why. The write keeps its classification.
     (ex,) = seen
     assert (ex.answered_by, ex.kind) == ("irimi", "write")
@@ -337,7 +340,7 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
     forward = targets.ForwardTo(netaddr.Target.parse("https://sandbox.example.com/v1"))
     refused = session._target_refusal(forward, ("127.0.0.1", 4000))
     assert isinstance(refused, targets.TargetUnreachable)
-    assert "'https://sandbox.example.com/v1' could not be reached" in str(refused)
+    assert str(refused) == "target 'https://sandbox.example.com' could not be reached: refused"
     assert dialled == [("sandbox.example.com", 443)]
 
 
@@ -371,7 +374,9 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert flow.response is not None and flow.response.content is not None
     assert flow.response.status_code == 502
     assert json.loads(flow.response.content)["error"]["type"] == "irimi_target_failed"
-    assert "own listener" in json.loads(flow.response.content)["error"]["message"]
+    assert json.loads(flow.response.content)["error"]["message"].startswith(
+        f"target 'http://127.0.0.1:{listen_port}' is irimi's own listener on port {listen_port}; "
+    )
     assert flow.response.headers[ANSWERED_BY_HEADER] == "irimi"
     # The flow was not pointed anywhere: refusing must not leave it aimed at the real service.
     assert (flow.request.host, flow.request.path) == ("127.0.0.1", "/things")
@@ -379,6 +384,51 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert META_KEY not in flow.metadata
     (ex,) = seen
     assert (ex.answered_by, ex.flags) == ("irimi", (Flag.TARGET_FAILED,))
+
+
+def test_a_target_that_cannot_be_applied_is_named_by_its_origin(tmp_path, monkeypatch, caplog):
+    """A target irimi could not point a flow at, or check, is named without its path.
+
+    A bare-origin target takes the request's path, which on a webhook is the secret."""
+    from mitmproxy.test import tflow, tutils
+
+    from irimi.engine.mitm import IrimiAddon
+
+    def broken(*args):
+        raise ValueError("boom")
+
+    maps = targeted_index(
+        tmp_path, monkeypatch, targets=[("127.0.0.1", "", "http://127.0.0.1:3999")]
+    )
+    seen: list[Exchange] = []
+    addon = IrimiAddon(
+        engine_config(tmp_path, monkeypatch, maps=maps),
+        ShadowPolicy(),
+        NullStore(),
+        NoOverlay(),
+        seen.append,
+        lambda port, error: None,
+    )
+    monkeypatch.setattr(session, "_probe_target", lambda target: None)
+    monkeypatch.setattr(IrimiAddon, "_to_target", broken)
+    flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/s3cr3t"))
+    flow.client_conn.sockname = ("127.0.0.1", 4000)
+    asyncio.run(addon.request(flow))
+
+    applied = "target 'http://127.0.0.1:3999' could not be applied: boom"
+    assert flow.response is not None and flow.response.content is not None
+    assert json.loads(flow.response.content)["error"]["message"] == applied
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("irimi")] == [
+        f"irimi: {applied}"
+    ]
+    (ex,) = seen
+    assert ex.flags == (Flag.UNCLASSIFIED, Flag.TARGET_FAILED)
+    assert ex.target == "http://127.0.0.1:3999/s3cr3t"
+
+    monkeypatch.setattr(targets, "refuse_self_target", broken)
+    forward = targets.ForwardTo(netaddr.Target.parse("http://127.0.0.1:3000/services/T/B/s3cr3t"))
+    refused = session._target_refusal(forward, ("127.0.0.1", 4000))
+    assert str(refused) == "target 'http://127.0.0.1:3000' could not be applied: boom"
 
 
 def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):

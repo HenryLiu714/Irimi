@@ -74,6 +74,8 @@ class Result:
     irimi_errors: list[str] = field(default_factory=list)
     # The engine's write log as irimi left it, once every run it decided has ended or not.
     write_log: WriteLog | None = None
+    # Every record logged while irimi ran that a user's terminal shows, as it shows it.
+    irimi_logs: list[str] = field(default_factory=list)
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Return every `event` the agent logged, in order; `with_time=False` drops timestamps."""
