@@ -1,6 +1,7 @@
 """The run's faked writes, and how they are applied to a read's document.
 
-A write sent after its run ended, from a task that outlived it, is answered but not filed.
+A write that reaches irimi after its run ended, such as one sent just before the end or by a
+client that names the run itself, is answered but not filed.
 """
 
 import threading
