@@ -41,7 +41,7 @@ all is listed under [known bypasses](security.md#known-bypasses).
 ## Serve mode
 
 - A stream the agent leaves open after its run ended is stored in the run but missing from the
-  summary already printed.
+  run's printed summary, which is the run as it stood at its end.
 - An agent whose control posts fail has its requests stored under a `header` run that lists as
   `incomplete`; the warning is on the agent's own logger, not irimi's.
 
@@ -87,6 +87,10 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - Requests from clients the SDK does not patch (`httpx2`, which the Anthropic SDK 2.x uses,
   `aiohttp`, raw sockets, subprocesses) carry no run unless the agent sets `Irimi-Run` itself
   ([sdk.md](sdk.md#which-http-clients-carry-the-run)).
+- Work that outlives its run, such as a task a sync trigger returns, is in no run once the run has
+  ended: the requests it sends and the tool calls it starts from then on are stored in the process
+  run, or as `unattributed` under serve, and its failure does not change how the run ended
+  ([sdk.md](sdk.md#threads-and-asyncio)).
 - A trigger in a script run by path (`python agent.py`) records as `__main__:…`, which replay cannot
   import; start the agent with `python -m`.
 - Captured values that are not plain data (a `Decimal`, a `datetime`, an object irimi cannot

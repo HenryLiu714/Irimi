@@ -25,12 +25,21 @@ from irimi.decide.policy import ShadowPolicy
 from irimi.engine import EngineConfig, Serve
 from irimi.engine.mitm import IrimiAddon, MitmEngine
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV
+from irimi.report.model import RunView
+from irimi.report.summary import summary_lines
 from tests.support import builders
 from tests.support.credentials import MESSAGE_SECRET, UNREADABLE_SECRET
 from tests.support.doubles import NullStore
 from tests.support.engine import ReaderGoneWhen, Served, port_of, serve_blocks, spy_on_the_store
 from tests.support.servers import stop_server
 from tests.support.waiting import eventually
+
+
+@pytest.fixture(autouse=True)
+def _no_printer_left():
+    """Every way serve stops, its summaries printer has stopped by the time it returns."""
+    yield
+    assert "irimi-summaries" not in {t.name for t in threading.enumerate() if t.is_alive()}
 
 
 def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
@@ -328,7 +337,7 @@ def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkey
 def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path):
     """`on_run_ended` runs on the writer thread once the run is whole on disk, end included.
 
-    A run that has not ended is not called back for."""
+    It gets the run's last `seq` then. A run that has not ended is not called back for."""
     import threading
 
     from irimi.record.store.reader import StoreReader
@@ -337,12 +346,11 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     root = tmp_path / "store"
     seen = []
 
-    def ended(run_id):
+    def ended(run_id, last_seq):
         stored = StoreReader(root).load_run(run_id)
         assert stored.record.end is not None
-        seen.append(
-            (run_id, threading.current_thread().name, stored.record.end.outcome, stored.events)
-        )
+        thread = threading.current_thread().name
+        seen.append((run_id, last_seq, thread, stored.record.end.outcome, stored.events))
 
     store = DirectoryStore(root, b"k" * 32, ended)
     store.start_run(builders.run_record("r1"))
@@ -350,8 +358,8 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     store.record(builders.exchange(run_id="r2"))
     store.end_run("r1", 20.0, "ok")
     store.close()
-    [(run_id, thread, outcome, events)] = seen
-    assert (run_id, thread, outcome) == ("r1", "irimi-store", "ok")
+    [(run_id, last_seq, thread, outcome, events)] = seen
+    assert (run_id, last_seq, thread, outcome) == ("r1", 1, "irimi-store", "ok")
     assert [e.run_id for e in events] == ["r1"]
 
 
@@ -368,7 +376,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     left_at_end: list[tuple] = []
     slot_of = {run_id: idempotency.slot_id(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
 
-    def on_run_ended(index, run_id):
+    def on_run_ended(index, run_id, last_seq):
         assert run is not None and run.write_log is not None and run.keys is not None
         left_at_end.append(
             (run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], builders.REFUND_PARAMS))
@@ -404,7 +412,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
 
     root = tmp_path / "store"
 
-    def ended(run_id):
+    def ended(run_id, last_seq):
         raise ValueError(f"cannot print {MESSAGE_SECRET}")
 
     store = DirectoryStore(root, b"k" * 32, ended)
@@ -419,6 +427,319 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     assert end.outcome == "ok"
     assert len(StoreReader(root).load_run("r2").events) == 1
     assert store.stats().dropped == 0
+
+
+class _HeldReads:
+    """`compose.load_stored_run`, each call noted and then held until `release` is set."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.release = threading.Event()
+        self.asked: list[str] = []
+        real = compose.load_stored_run
+
+        def held(root, run_id, **kwargs):
+            self.asked.append(run_id)
+            assert self.release.wait(30), "the read-back was never released"
+            return real(root, run_id, **kwargs)
+
+        monkeypatch.setattr(compose, "load_stored_run", held)
+
+
+def _served(tmp_path, monkeypatch, output: serve._ServeOutput) -> compose.Run:
+    """Return the run `prepare_run` opens for serve, its ends going to `output`."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    ca.generate_ca(ca.ca_paths())
+    args = cli.parse_args(["serve", "--store", str(output.store_root)])
+    run = compose.prepare_run(args, serve=True, on_run_ended=output.run_ended)
+    assert run is not None
+    return run
+
+
+def _written(run: compose.Run, count: int) -> None:
+    eventually(lambda: run.store.stats().written == count, timeout=5, message=f"{count} unwritten")
+
+
+def test_a_summary_still_being_read_back_holds_up_no_other_run_s_events(
+    tmp_path, monkeypatch, capsys
+):
+    """While one run's summary is read back, the store writes each later event as it comes.
+
+    The read-back waits until released, as one of a large run on a slow disk would."""
+    from irimi.record.store.reader import StoreReader
+
+    held = _HeldReads(monkeypatch)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    with output.summaries(), run:
+        try:
+            run.store.start_run(builders.run_record("r1"))
+            run.store.end_run("r1", 20.0, "ok")
+            eventually(lambda: held.asked == ["r1"], timeout=5)
+            for count in (1, 2, 3):
+                run.store.record(builders.exchange(run_id="r2"))
+                _written(run, count)
+            assert capsys.readouterr().out == ""
+        finally:
+            held.release.set()
+    stored = StoreReader(output.store_root).load_run("r1")
+    summary = summary_lines(RunView(stored.record, stored.events), run.index)
+    assert capsys.readouterr().out.splitlines() == ["--- run r1 ---", *summary]
+    assert len(StoreReader(output.store_root).load_run("r2").events) == 3
+
+
+def test_a_run_s_block_is_the_run_as_it_stood_when_its_end_was_written(
+    tmp_path, monkeypatch, capsys
+):
+    """An event stored in a run after its end is not in the run's block, however late the read.
+
+    The read-back here waits until the late event is on disk; `irimi runs show` still has it."""
+    from irimi.record.store.reader import StoreReader
+
+    held = _HeldReads(monkeypatch)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    with output.summaries(), run:
+        try:
+            run.store.start_run(builders.run_record("r1"))
+            run.store.record(builders.exchange(run_id="r1"))
+            run.store.end_run("r1", 20.0, "ok")
+            run.store.record(builders.exchange(run_id="r1"))
+            _written(run, 2)
+        finally:
+            held.release.set()
+    stored = StoreReader(output.store_root).load_run("r1")
+    assert len(stored.events) == 2
+    summary = summary_lines(RunView(stored.record, stored.events[:1]), run.index)
+    assert capsys.readouterr().out.splitlines() == ["--- run r1 ---", *summary]
+
+
+def test_a_summary_that_cannot_be_printed_is_one_warning_and_the_next_still_prints(
+    tmp_path, monkeypatch, capsys, caplog
+):
+    """A summary that raises logs one warning naming its type, and the next run's still prints."""
+
+    def failing(view, index):
+        if view.record.run_id == "r1":
+            raise ValueError(f"cannot print {MESSAGE_SECRET}")
+        return summary_lines(view, index)
+
+    monkeypatch.setattr("irimi.cli.serve.summary_lines", failing)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    with output.summaries(), run:
+        for run_id in ("r1", "r2"):
+            run.store.start_run(builders.run_record(run_id))
+            run.store.end_run(run_id, 20.0, "ok")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ["irimi: run r1's summary could not be printed: ValueError"]
+    assert capsys.readouterr().out.splitlines()[0] == "--- run r2 ---"
+
+
+def test_serve_waits_its_time_for_a_summary_still_being_read_back_then_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    """A summary still being read back when serve stops gets SUMMARIES_TIMEOUT_S, then a warning.
+
+    So a read that never returns cannot keep serve from exiting."""
+    monkeypatch.setattr(serve, "SUMMARIES_TIMEOUT_S", 0.2)
+    held = _HeldReads(monkeypatch)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    late = threading.Timer(5.0, held.release.set)  # long after the timeout
+    try:
+        with output.summaries(), run:
+            run.store.start_run(builders.run_record("r1"))
+            run.store.end_run("r1", 20.0, "ok")
+            eventually(lambda: held.asked == ["r1"], timeout=5)
+            late.start()
+        err = capsys.readouterr().err
+    finally:
+        late.cancel()
+        held.release.set()
+    assert err == (
+        "warning: serve stopped before printing every ended run's summary; "
+        "irimi runs list shows the runs\n"
+    )
+    # Released at last, the printer reads the run back and prints nothing.
+    eventually(lambda: "irimi-summaries" not in {t.name for t in threading.enumerate()})
+    assert capsys.readouterr() == ("", "")
+
+
+def test_serve_stops_though_its_printer_is_stuck_writing_to_a_pipe_no_one_reads(
+    tmp_path, monkeypatch, capsys
+):
+    """A printer stuck writing a summary holds serve's lock, and serve's stop still ends and warns.
+
+    Its store is closed and its lock released by then; only the process's exit waits on the pipe."""
+    monkeypatch.setattr(serve, "SUMMARIES_TIMEOUT_S", 0.2)
+    writing, unblocked = threading.Event(), threading.Event()
+
+    class _Full:
+        def write(self, text):
+            writing.set()
+            unblocked.wait(10)
+            return len(text)
+
+        def flush(self):
+            pass
+
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    monkeypatch.setattr(sys, "stdout", _Full())
+    started = time.monotonic()
+    try:
+        with output.summaries(), run:
+            run.store.start_run(builders.run_record("r1"))
+            run.store.end_run("r1", 20.0, "ok")
+            assert writing.wait(5), "the printer never wrote"
+        took = time.monotonic() - started
+    finally:
+        unblocked.set()
+    eventually(lambda: "irimi-summaries" not in {t.name for t in threading.enumerate()})
+    assert took < 5
+    assert capsys.readouterr().err == (
+        "warning: serve stopped before printing every ended run's summary; "
+        "irimi runs list shows the runs\n"
+    )
+
+
+def test_a_run_whose_end_is_written_as_serve_stops_prints_its_block(home, monkeypatch, capsys):
+    """An end still queued when serve stops is written as the store drains, and its block prints.
+
+    The store's writer here takes nothing until the store is closed."""
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
+
+    closing = threading.Event()
+    handle, close = DirectoryStore._handle, DirectoryStore.close
+
+    def gated(self, item):
+        assert closing.wait(30), "the store was never closed"
+        handle(self, item)
+
+    def closed(self):
+        closing.set()
+        close(self)
+
+    monkeypatch.setattr(DirectoryStore, "_handle", gated)
+    monkeypatch.setattr(DirectoryStore, "close", closed)
+    prepared: list[compose.Run] = []
+    prepare = compose.prepare_run
+
+    def preparing(*args, **kwargs):
+        run = prepare(*args, **kwargs)
+        assert run is not None
+        prepared.append(run)
+        return run
+
+    stop = threading.Event()
+
+    def startup(*args):
+        [run] = prepared
+        run.store.start_run(builders.run_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+        stop.set()
+
+    monkeypatch.setattr(compose, "prepare_run", preparing)
+    monkeypatch.setattr(compose, "print_startup", startup)
+    args = cli.parse_args(["serve", "--port", "0"])
+    assert serve.cmd_serve(args, stop) == exitcodes.OK
+    stored = StoreReader(home / "store").load_run("r1")
+    assert stored.record.end is not None
+    summary = summary_lines(RunView(stored.record, stored.events), prepared[0].index)
+    assert capsys.readouterr().out.splitlines() == ["--- run r1 ---", *summary]
+
+
+def test_the_store_s_close_and_the_summaries_left_share_one_stop_budget(home, monkeypatch, capsys):
+    """A stop whose store takes all of SUMMARIES_TIMEOUT_S to close gives the summaries no more.
+
+    So serve stops within the store's own bound. Serve's clock is moved on as the store closes;
+    the read-back here never returns."""
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
+
+    held = _HeldReads(monkeypatch)
+    moved = [0.0]
+    monkeypatch.setattr(serve, "monotonic", lambda: time.monotonic() + moved[0])
+    close = DirectoryStore.close
+
+    def slow(self):
+        close(self)
+        moved[0] += serve.SUMMARIES_TIMEOUT_S
+
+    monkeypatch.setattr(DirectoryStore, "close", slow)
+    prepared: list[compose.Run] = []
+    prepare = compose.prepare_run
+
+    def preparing(*args, **kwargs):
+        run = prepare(*args, **kwargs)
+        assert run is not None
+        prepared.append(run)
+        return run
+
+    stop = threading.Event()
+
+    def startup(*args):
+        [run] = prepared
+        run.store.start_run(builders.run_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+        eventually(lambda: held.asked == ["r1"], timeout=5)
+        stop.set()
+
+    monkeypatch.setattr(compose, "prepare_run", preparing)
+    monkeypatch.setattr(compose, "print_startup", startup)
+    started = time.monotonic()
+    try:
+        assert serve.cmd_serve(cli.parse_args(["serve", "--port", "0"]), stop) == exitcodes.OK
+        took = time.monotonic() - started
+    finally:
+        held.release.set()
+    assert took < serve.SUMMARIES_TIMEOUT_S / 2
+    assert capsys.readouterr() == (
+        "",
+        "warning: serve stopped before printing every ended run's summary; "
+        "irimi runs list shows the runs\n",
+    )
+    assert StoreReader(home / "store").load_run("r1").record.end is not None
+    eventually(lambda: "irimi-summaries" not in {t.name for t in threading.enumerate()})
+
+
+def test_a_store_that_cannot_open_stops_serve_with_nothing_left_running(home, capsys):
+    """A store root that is a file exits 2 with one line, no writer or printer left, and no lock."""
+    (home / "not-a-dir").write_text("")
+    args = cli.parse_args(["serve", "--port", "0", "--store", str(home / "not-a-dir")])
+    assert serve.cmd_serve(args, threading.Event()) == exitcodes.ERROR
+    err = capsys.readouterr().err
+    assert err == f"error: the trace store {home / 'not-a-dir'} is not a writable directory\n"
+    assert "irimi-store" not in {t.name for t in threading.enumerate()}
+
+
+def test_a_printer_that_cannot_start_leaves_no_store_or_lock_behind(home, monkeypatch):
+    """The printer starts before the store opens, so its failure leaves nothing to close."""
+    from irimi.record.store.lock import ServeLock
+
+    start = threading.Thread.start
+
+    def refused(self):
+        if self.name == "irimi-summaries":
+            raise RuntimeError("can't start new thread")
+        start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", refused)
+    opened = []
+    prepare = compose.prepare_run
+
+    def preparing(*args, **kwargs):
+        opened.append(args)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(compose, "prepare_run", preparing)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        serve.cmd_serve(cli.parse_args(["serve", "--port", "0"]), threading.Event())
+    assert opened == []
+    assert "irimi-store" not in {t.name for t in threading.enumerate()}
+    ServeLock.hold(home / "store").release()
 
 
 def test_one_serve_per_store_root(tmp_path):
@@ -729,11 +1050,13 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     from irimi.protocol.trace import TraceFormatError
     from irimi.record.store.reader import StoreReader
 
-    def unreadable(self, run_id, *, bodies=True):
+    def unreadable(self, run_id, *, bodies=True, last_seq=None):
         raise TraceFormatError(f"cannot read {UNREADABLE_SECRET}")
 
     monkeypatch.setattr(StoreReader, "load_run", unreadable)
-    serve._ServeOutput(tmp_path / "store").run_ended(servicemaps.MapIndex(), "r1")
+    output = serve._ServeOutput(tmp_path / "store")
+    with output.summaries():
+        output.run_ended(servicemaps.MapIndex(), "r1", None)
     out, err = capsys.readouterr()
     assert out == ""
     assert err == "warning: run r1 ended but could not be read back: TraceFormatError\n"

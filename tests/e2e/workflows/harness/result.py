@@ -46,6 +46,17 @@ TOOL_WRITE = re.compile(rf"{WRITE_MARKER} {TOOL_SERVICE}  \S+  fake ")
 WRITE_LINE_PREFIXES = (f"  {WRITE_MARKER} ", f"  {REJECTED_MARKER} ")
 
 
+@dataclass(frozen=True)
+class HeldSummaries:
+    """What serve's store held once the agent exited, while every summary waited to be read."""
+
+    settled: bool  # it had written every event and end the engine handed it
+    ended: frozenset[str]  # the runs whose end it had written
+    event_counts: dict[str, int]  # how many events each stored run held
+    waiting: tuple[str, ...]  # the runs whose read-back was being held then
+    blocks: int  # the `--- run` blocks serve had printed by then
+
+
 @dataclass
 class Result:
     workflow: Workflow
@@ -74,6 +85,8 @@ class Result:
     irimi_errors: list[str] = field(default_factory=list)
     # The engine's write log as irimi left it, once every run it decided has ended or not.
     write_log: WriteLog | None = None
+    # What the store held while serve's summaries waited (`Scenario.serve_holds_summaries`).
+    held: HeldSummaries | None = None
 
     def events(self, event: str, *, with_time: bool = True) -> list[dict[str, Any]]:
         """Return every `event` the agent logged, in order; `with_time=False` drops timestamps."""

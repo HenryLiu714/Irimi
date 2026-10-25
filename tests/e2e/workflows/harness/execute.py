@@ -33,11 +33,13 @@ from irimi.engine import Engine, OnExchange, OnTlsFailure
 from irimi.engine.control import OnToolCall
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, PROXY_ENVS
 from irimi.protocol.replay_files import replay_result_from_json, replay_result_to_json
-from irimi.protocol.trace import ToolCall
+from irimi.protocol.trace import StoredRun, ToolCall
+from irimi.record.store import RunStore
 from irimi.record.store import writer as store_writer
+from irimi.record.store.reader import StoreReader
 from tests.e2e.workflows.harness.internet import FakeInternet
 from tests.e2e.workflows.harness.invariants import CANARIES
-from tests.e2e.workflows.harness.result import Result
+from tests.e2e.workflows.harness.result import HeldSummaries, Result
 from tests.e2e.workflows.harness.scenario import (
     REPO_ROOT,
     Scenario,
@@ -54,6 +56,8 @@ SERVE_TIMEOUT_S = 60
 FAKE_HANDLER = "(process_request_thread)"
 # How long the threads a serve started have to end once it has returned.
 THREAD_EXIT_S = 5.0
+# How long a serve whose summaries are held gets to write what it was handed once the agent exits.
+HELD_STORE_S = 10.0
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 # The only variables an agent inherits from the harness, so a developer's shell cannot change a
 # run: an exported `IRIMI_ENGINE_ACTIVE=1` would make a bare run's write tools run their fakes.
@@ -197,6 +201,7 @@ def _execute(
     handed: list[Exchange] = []
     handed_events: list[Exchange | ToolCall] = []
     write_logs: list[WriteLog] = []
+    held: HeldSummaries | None = None
     result_file = workdir / "result.json"
     try:
         for host, action, match, times in scenario.faults:
@@ -232,8 +237,17 @@ def _execute(
                 )
         else:
             with _watching_the_store(reported, handed, handed_events, write_logs) as build:
-                code, irimi_out, irimi_errors = _run_serve(
-                    cmd, agent_env, cwd, tmp, internet, scenario, workdir, build, flags
+                code, irimi_out, irimi_errors, held = _run_serve(
+                    cmd,
+                    agent_env,
+                    cwd,
+                    tmp,
+                    internet,
+                    scenario,
+                    workdir,
+                    build,
+                    flags,
+                    handed_events,
                 )
     finally:
         internet.stop()
@@ -258,6 +272,7 @@ def _execute(
         _replay_result(result_file) if mode == "replay" else None,
         irimi_errors,
         write_logs[0] if write_logs else None,
+        held,
     )
 
 
@@ -385,25 +400,39 @@ def _run_serve(
     workdir: Path,
     build: EngineFactory,
     flags: tuple[str, ...] = (),
-) -> tuple[int, list[str], list[str]]:
+    handed: list[Exchange | ToolCall] | None = None,
+) -> tuple[int, list[str], list[str], HeldSummaries | None]:
     """Run `irimi serve` on a thread, the agent beside it as its own process, until it exits.
 
     A `stop` event stands in for SIGTERM, which would reach the whole test process. The agent gets
     the README's serve-mode variables and never `IRIMI_RUN`, so unlabelled requests are
-    `unattributed`."""
+    `unattributed`. A scenario that holds serve's summaries also returns what its store held."""
     buf, err = io.StringIO(), _Tee(sys.stderr)
     stop = threading.Event()
     codes: list[int] = []
     argv = ["serve", "--port", "0", *flags, *scenario.serve_flags]
     args = parse_args(argv)
     before = set(threading.enumerate())
+    stores: list[RunStore] = []
+    held: HeldSummaries | None = None
+
+    def building(
+        run: compose.Run,
+        on_exchange: OnExchange,
+        on_tool_call: OnToolCall | None = None,
+        on_tls_failure: OnTlsFailure | None = None,
+    ) -> Engine:
+        stores.append(run.store)
+        return build(run, on_exchange, on_tool_call, on_tls_failure)
+
     with (
         _as_irimi(env, cwd, tmp, internet, scenario, workdir),
         contextlib.redirect_stdout(buf),
         contextlib.redirect_stderr(err),
+        _summaries_held(scenario.serve_holds_summaries) as hold,
     ):
         serving = threading.Thread(
-            target=lambda: codes.append(args.func(args, stop, engine_factory=build)),
+            target=lambda: codes.append(args.func(args, stop, engine_factory=building)),
             name="irimi-serve",
         )
         serving.start()
@@ -415,11 +444,17 @@ def _run_serve(
                 serving.join(timeout=SERVE_TIMEOUT_S)
                 if serving.is_alive() or codes in ([], [0]):
                     raise AssertionError(f"irimi serve printed no banner: {codes}")
-                return codes[0], buf.getvalue().splitlines(), err.getvalue().splitlines()
+                return codes[0], buf.getvalue().splitlines(), err.getvalue().splitlines(), None
             agent_env = _serve_env(env, port, ca.ca_paths().cert)
             done = subprocess.run(cmd, env=agent_env, cwd=cwd, timeout=180, check=False)
             code = runner.exit_code_for(done.returncode)
+            if hold is not None:
+                [store] = stores
+                obs = Path(env["WORKFLOW_OBS"])
+                held = _held_store(store, handed or [], obs, compose.store_root(args), hold, buf)
         finally:
+            if hold is not None:
+                hold.release.set()
             stop.set()
             serving.join(timeout=SERVE_TIMEOUT_S)
     if serving.is_alive() or codes != [0]:
@@ -433,7 +468,75 @@ def _run_serve(
     left = [t.name for t in started if t.is_alive()]
     if left:
         raise AssertionError(f"irimi serve left threads running: {left}")
-    return code, buf.getvalue().splitlines(), err.getvalue().splitlines()
+    return code, buf.getvalue().splitlines(), err.getvalue().splitlines(), held
+
+
+class _Hold:
+    """Serve's summary read-backs, each waiting until `release` is set."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.waiting: list[str] = []  # the run ids whose read-back waits now
+        self._load = compose.load_stored_run
+
+    def held(self, root: Path, run_id: str, **kwargs: Any) -> StoredRun:
+        self.waiting.append(run_id)
+        try:
+            self.release.wait(SERVE_TIMEOUT_S)
+        finally:
+            self.waiting.remove(run_id)
+        return self._load(root, run_id, **kwargs)
+
+
+@contextlib.contextmanager
+def _summaries_held(hold: bool) -> Iterator[_Hold | None]:
+    """Make each summary serve reads back wait until the hold yielded is released, if `hold`."""
+    if not hold:
+        yield None
+        return
+    held = _Hold()
+    try:
+        with mock.patch.object(compose, "load_stored_run", held.held):
+            yield held
+    finally:
+        held.release.set()
+
+
+def _held_store(
+    store: RunStore,
+    handed: list[Exchange | ToolCall],
+    obs: Path,
+    root: Path,
+    hold: _Hold,
+    out: io.StringIO,
+) -> HeldSummaries:
+    """Return what `store` holds once it has written all it was handed, or after HELD_STORE_S.
+
+    All it was handed is every event, and the end of each run the agent logged ending. Also what
+    `hold` held then and how many blocks serve had printed to `out`."""
+    logged = [json.loads(line) for line in obs.read_text().splitlines() if line.strip()]
+    ends = {o["run"] for o in logged if o["event"] == "run.end"}
+    reader = StoreReader(root)
+    deadline = time.monotonic() + HELD_STORE_S
+    while not (settled := _settled(store, handed, ends, reader)) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    records = reader.list_runs()
+    return HeldSummaries(
+        settled,
+        frozenset(r.run_id for r in records if r.end is not None),
+        {r.run_id: len(reader.load_run(r.run_id, bodies=False).events) for r in records},
+        tuple(hold.waiting),
+        sum(line.startswith("--- run ") for line in out.getvalue().splitlines()),
+    )
+
+
+def _settled(
+    store: RunStore, handed: list[Exchange | ToolCall], ends: set[str], reader: StoreReader
+) -> bool:
+    stats = store.stats()
+    if stats.written + stats.dropped < len(handed):
+        return False
+    return ends <= {r.run_id for r in reader.list_runs() if r.end is not None}
 
 
 class _Tee(io.StringIO):

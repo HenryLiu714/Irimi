@@ -30,10 +30,9 @@ MARKER = "KNOWN" + " BUG"
 MARKER_FORM = re.compile(MARKER + r"(?: \(#\d+(?:, #\d+)*\))?: \S")
 RETIRED_MARKER = "LOOKS" + " WRONG"
 # Serve prints a run's block once its end is on disk, so an event stored later is not in it.
-# KNOWN BUG (#125): each block says less than its run holds: W3 `task_outlives_trigger`'s task
-# calls after its run ends, and W7 `hand_off`'s stream is recorded after the run's end.
+# KNOWN BUG (#125): each block says less than its run holds: W7 `hand_off`'s stream is recorded
+# after the run's end.
 LATE_EVENTS = {
-    ("w03_queue_worker", "task_outlives_trigger"),
     ("w07_streaming_assistant", "hand_off"),
 }
 # A control post that ends a run, as W9 makes one by hand: `<listener>/_irimi/runs/<id>/end`.

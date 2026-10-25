@@ -58,7 +58,7 @@ endpoint.
 | prints | stream, then one summary | stream, then a summary per SDK run as it ends | stream, then the replay report |
 
 When the store reports a run ended, the composition root drops that run's write log and
-idempotency entries, then (under serve) prints its summary. A run is never visible to another.
+idempotency entries, then (under serve) queues its summary. A run is never visible to another.
 
 ## Threads
 
@@ -68,6 +68,7 @@ idempotency entries, then (under serve) prints its summary. A run is never visib
 | engine | mitmproxy's asyncio loop: every hook, the control endpoint, `ShadowSession.record` | block: no network or disk I/O |
 | workers | `ShadowSession.plan` via `asyncio.to_thread`: the policy, irimi's check read, target probes | touch a flow or the store directly; the plan is carried back to the loop |
 | store writer | `DirectoryStore`'s queue: redaction, then every file write | raise into a caller |
+| summaries | under serve, each ended run read back as it stood at its end, and its summary printed | hold the store writer |
 
 `runner.start_engine` runs the engine on its own thread and waits for its listener. Exchanges are
 recorded on the engine thread, check reads included, so the store's queue has one producer per

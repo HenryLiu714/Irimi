@@ -3,6 +3,7 @@
 `tests/cli/test_replay.py` drives them together through the real command."""
 
 import asyncio
+import contextvars
 import json
 import os
 import signal
@@ -129,6 +130,17 @@ def test_the_adopted_run_is_current_when_it_is_instrumented(posts, monkeypatch):
     handle("T1")
     asyncio.run(handle_async("T2"))
     assert seen == [REPLAY, REPLAY]
+
+
+@sdk.trigger
+def keeps_its_context(ticket: str) -> contextvars.Context:
+    return contextvars.copy_context()
+
+
+def test_an_adopted_run_stays_current_in_a_context_that_kept_it(posts, instrumented):
+    """A context that kept an adopted run stays in it: `irimi replay` ends that run, not the SDK."""
+    assert keeps_its_context("T1").run(sdk.current_run_id) == REPLAY
+    assert posts.posts == []
 
 
 @sdk.trigger

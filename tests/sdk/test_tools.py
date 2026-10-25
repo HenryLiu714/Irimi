@@ -3,6 +3,7 @@
 A write tool's real function raises `RealWriteRan` wherever a test says it must not run."""
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import json
@@ -277,6 +278,22 @@ def test_a_tool_called_in_no_run_with_no_process_run_is_stored_unattributed(irim
     [call] = _tool_calls(reader, trace.UNATTRIBUTED)
     assert (call.run_id, call.name, call.ran) == (trace.UNATTRIBUTED, f"{__name__}:look_up", "real")
     assert reader.list_runs() == []
+
+
+def test_a_tool_called_in_a_context_that_kept_an_ended_run_is_posted_to_the_process_run(
+    posted, monkeypatch
+):
+    """A context copied inside a run keeps its id once it ends, but its tool calls are not in it."""
+    monkeypatch.setenv(RUN_ENV, ENGINE_RUN)
+    with sdk.run("r") as r:
+        assert r is not None
+        kept = contextvars.copy_context()
+        assert kept.run(sdk.current_run_id) == r.id
+    kept.run(mark_refunded, 1)
+    assert [(run_id, action) for run_id, action, _ in posted.posts][-1] == (
+        ENGINE_RUN,
+        "tool-calls",
+    )
 
 
 def test_a_tool_call_is_posted_to_its_runs_route_with_no_run_id_in_the_body(posted):

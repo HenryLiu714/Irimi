@@ -30,7 +30,7 @@ and whether the invariants below held.
 |---|---|---|---|
 | W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, idempotency, `irimi compare`, most of `irimi replay`, and deleting runs mid-run |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination over a cursor irimi minted, 40 writes in one run, a block with no entrypoint to replay, look-alike fields and a key across a run name's cut |
-| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads |
+| W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads, work that outlives its run |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks, posts that print alike |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | a `bytes` trigger, the webhooks a write would fire, a live read whose response holds a credential |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, and replayed read tools |

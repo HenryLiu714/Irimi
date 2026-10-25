@@ -625,9 +625,14 @@ def exchange_from_json(d: Mapping[str, Any], get_body: GetBody) -> Exchange:
     )
 
 
+def seq_from_json(d: Mapping[str, Any]) -> int:
+    """Return an `events.jsonl` line's `seq`, reading none of its record."""
+    return _int(d, "seq")
+
+
 def event_from_json(d: Mapping[str, Any], get_body: GetBody) -> tuple[int, Event]:
     """Return an `events.jsonl` line's `seq` and record."""
-    seq = _int(d, "seq")
+    seq = seq_from_json(d)
     kind: EventType = read_one_of(d, "type", EventType)
     if kind == "exchange":
         return seq, exchange_from_json(d, get_body)
