@@ -245,6 +245,8 @@ REPLAYS = [
     ("w01_ticket_triage", "retried_refund", {}, False),
     ("w01_ticket_triage", "verified_refund", {"PROMPT": "verify_only"}, False),
     ("w01_ticket_triage", "verified_refund", {"PROMPT": "verify_twice"}, False),
+    ("w01_ticket_triage", "verified_refund", {"PROMPT": "verify_retry"}, False),
+    ("w01_ticket_triage", "verified_refund", {"PROMPT": "verify_resent"}, False),
     ("w01_ticket_triage", "checked_charge", {"PROMPT": "verify"}, False),
     ("w01_ticket_triage", "late_lookup", {"PROMPT": "verify"}, True),
     ("w02_nightly_reconcile", "refund_then_page", {}, True),
