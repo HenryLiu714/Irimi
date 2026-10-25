@@ -151,17 +151,24 @@ def _to_mitm_response(r: Response) -> http.Response:
     # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
     # (`rot13`, `utf-8`); the body then goes out as it is, as mitmproxy's own fallback sends it.
     try:
-        return http.Response.make(r.status, r.body, _fields(r.headers))
+        built = http.Response.make(r.status, r.body, _fields(r.headers))
     except TypeError:
         fields = [(k, v) for k, v in _fields(r.headers) if k.lower() != b"content-encoding"]
-        return http.Response.make(r.status, r.body, fields)
+        built = http.Response.make(r.status, r.body, fields)
+    # A 1xx, 204 or 304 ends at its head (RFC 9112 6.3), but `make` gives it a Content-Length,
+    # and mitmproxy ends a chunked one with a last chunk the client reads as its next response.
+    if r.status < 200 or r.status in (204, 304):
+        built.headers.pop("transfer-encoding", None)
+        return _without_content(built)
+    return built
 
 
 def _without_content(response: http.Response) -> http.Response:
-    """Return `response` fit to answer HEAD: no content and no Content-Length.
+    """Return `response` with no content and no Content-Length, for HEAD or a no-content status.
 
-    A HEAD answer carries no content (RFC 9110 9.3.2), which the client would read as its next
-    response, and no Content-Length, since it is not what a GET would get (8.6).
+    The client reads any content after such a head as its next response (RFC 9112 6.3). A 1xx or
+    204 must not send a Content-Length, and a HEAD answer's or a 304's must be what a GET would
+    get (RFC 9110 8.6).
     """
     response.raw_content = b""
     response.headers.pop("content-length", None)

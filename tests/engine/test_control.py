@@ -136,10 +136,11 @@ def engine(tmp_path, monkeypatch):
 
 
 def _ok(response):
-    """A 204 with the control stamp and nothing else to say."""
+    """A 204 with the control stamp and nothing else to say, so no Content-Length either."""
     status, headers, body = response
     assert (status, body) == (204, b"")
     assert STAMP in headers
+    assert [name for name, _ in headers if name == "content-length"] == []
 
 
 def test_a_start_a_tool_call_and_an_end_are_one_sdk_run_on_disk(engine):

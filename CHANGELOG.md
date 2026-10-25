@@ -128,6 +128,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   sends after it ended, and its idempotency key, are no longer kept.
 - irimi's own answer to a `HEAD` carries no body, so the next response on a kept-alive connection
   is read whole.
+- A `204`, `304` or `1xx` that irimi sends (every control endpoint `204`, a replayed answer)
+  carries no `Content-Length` and no body, as RFC 9110 requires.
 - A base-URL request whose path starts with `//` names no host and is refused.
 - An argument no command takes is refused with the usage of the command it was typed to, with a
   hint for `--serve` and for a command typed without its `--`.
