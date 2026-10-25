@@ -21,6 +21,7 @@ from urllib.parse import urlencode, urlsplit
 from irimi.protocol.env import CONTROL_ENV, RUN_ENV
 from tests.e2e.workflows.agents import agentkit
 from tests.e2e.workflows.agents.agentkit import Response, base, http, slack, stripe
+from tests.e2e.workflows.agents.credentials import RUN_ID_KEY
 
 CHARGE = "ch_GAUNTLET"
 CUSTOMER = "cus_GAUNTLET"
@@ -114,7 +115,9 @@ def big_reads() -> None:
 
 
 def headers() -> None:
-    """Send irimi's own headers from the agent; both must be stripped before anything leaves."""
+    """Send irimi's own headers from the agent; both must be stripped before anything leaves.
+
+    Neither run id names a run: one is a path, and one has a key's shape."""
     stripe(
         "GET",
         f"/v1/refunds?charge={CHARGE}",
@@ -122,6 +125,7 @@ def headers() -> None:
         label="forged_rewrote",
     )
     stripe("GET", f"/v1/charges/{CHARGE}", headers={"Irimi-Run": "../../etc"}, label="bad_run_id")
+    stripe("GET", f"/v1/charges/{CHARGE}", headers={"Irimi-Run": RUN_ID_KEY}, label="key_run_id")
 
 
 def self_addressed() -> None:
@@ -437,6 +441,7 @@ def _refusals(control: str) -> None:
         ("refuse_get", "GET", "/runs/ctl-refused-get/start", None, None),
         ("refuse_route", "POST", "/runs/ctl-refused-route/nope", ended, None),
         ("refuse_dotdot", "POST", "/runs/../x/start", started, None),
+        ("refuse_key_shaped", "POST", f"/runs/{RUN_ID_KEY}/start", _start_doc("key"), None),
         ("refuse_unattributed", "POST", "/runs/unattributed/end", ended, None),
         ("refuse_nan", "POST", "/runs/ctl-refused-nan/end", {**ended, "ended_at": math.nan}, None),
         ("refuse_missing", "POST", "/runs/ctl-refused-missing/start", started, None),

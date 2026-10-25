@@ -313,6 +313,14 @@ REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
         400,
         "'../x' cannot name a run",
     ),
+    # A key-shaped id would name a directory that redaction never sees.
+    (
+        "POST",
+        "/_irimi/runs/sk_live_x/start",
+        _start_body(1.0),
+        400,
+        "'sk_live_x' cannot name a run",
+    ),
     (
         "POST",
         "/_irimi/runs/unattributed/end",

@@ -28,7 +28,7 @@ class StoreLayout:
         self.serve_lock = root / SERVE_LOCK_FILE
 
     def run_dir(self, run_id: str) -> Path:
-        """Return `run_id`'s directory; the caller has checked it with `trace.is_valid_run_id`."""
+        """Return `run_id`'s directory; the caller has checked it with `trace.is_stored_run_id`."""
         return self.runs / run_id
 
     def blob(self, sha256: str) -> Path:

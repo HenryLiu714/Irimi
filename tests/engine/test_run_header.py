@@ -1,5 +1,7 @@
 """`Irimi-Run` attributes an exchange to a run and never travels past irimi."""
 
+import pytest
+
 from irimi.core.exchange import Flag
 from irimi.decide import targets
 from tests.support.engine import (
@@ -161,16 +163,19 @@ def test_every_other_header_is_forwarded_untouched(engine, upstream):
 # ---------------------------------------------------------------- a run id names a directory
 
 
-def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(engine, upstream):
-    """A run header of `../x` is stripped, and the exchange keeps the engine's run id.
+@pytest.mark.parametrize("run_id", ["../x", "sk_live_x"])
+def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(
+    engine, upstream, run_id
+):
+    """A run header of `../x` or `sk_live_x` is stripped, and the exchange keeps the engine's run.
 
-    `../x` would name a directory outside the trace store."""
+    `../x` would name a directory outside the trace store, and `sk_live_x` one named by a key."""
     eng, seen = engine
     status, _ = via_proxy(
         eng.listen_port(),
         "GET",
         f"http://127.0.0.1:{upstream}/hello",
-        extra_headers={"Irimi-Run": "../x"},
+        extra_headers={"Irimi-Run": run_id},
     )
     assert status == 200
     ((_, received),) = upstream.seen

@@ -213,6 +213,16 @@ def test_invariant_4_reads_a_store_a_run_was_given_outside_its_home(shared_store
     ]
 
 
+def test_invariant_4_finds_a_canary_that_names_a_directory(shared_store_run, tmp_path):
+    """A run id becomes a directory name, and redaction never sees a name."""
+    shadow = shared_store_run("w01_ticket_triage", "full_refund")
+    named = tmp_path / "runs" / CANARIES["RUN_ID_KEY"]
+    named.mkdir(parents=True)
+    assert check_invariants(dataclasses.replace(shadow, store=tmp_path)) == [
+        f"4. a canary reached disk where irimi writes: ['RUN_ID_KEY in {named}']"
+    ]
+
+
 @pytest.mark.parametrize("name", [*CANARIES, *SERVED_CANARIES])
 def test_invariant_4_finds_the_start_of_a_canary_a_cut_left_on_disk(
     shared_store_run, tmp_path, name

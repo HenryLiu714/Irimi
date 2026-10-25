@@ -15,8 +15,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from irimi.protocol.trace import UNATTRIBUTED, RunRecord
-from irimi.record.store.layout import EVENTS_FILE, RUN_FILE, StoreLayout, names_a_run_dir
+from irimi.protocol.trace import UNATTRIBUTED, RunRecord, is_stored_run_id
+from irimi.record.store.layout import EVENTS_FILE, RUN_FILE, StoreLayout
 from irimi.record.store.lock import ServeLock, WriterLock
 from irimi.record.store.reader import StoreReader
 
@@ -46,7 +46,7 @@ def stored_run_ids(root: Path, run_ids: Iterable[str]) -> tuple[list[str], list[
         if run_id == UNATTRIBUTED:
             found = layout.unattributed_events.parent.is_dir()
         else:
-            found = names_a_run_dir(run_id) and run_id in names
+            found = is_stored_run_id(run_id) and run_id in names
         (held if found else missing).append(run_id)
     return held, missing
 

@@ -27,6 +27,7 @@ from irimi.record import redact
 from irimi.record.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.report.runs import MAX_TRIGGER_SHOWN, RUN_LIST_HEADER, event_line
 from irimi.report.terminal import WIDE_BIND_NOTICE, exchange_line
+from tests.e2e.workflows.agents.credentials import RUN_ID_KEY
 from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     AGENT_VERSION,
     ALLOWED_BASE_URL_HOST,
@@ -232,16 +233,27 @@ def test_irimis_own_headers_sent_by_the_agent_never_leave(run_workflow, mode):
     ] == [
         ["irimi-rewrote"],
         ["irimi-run"],
+        ["irimi-run"],
     ]
     shadow = run_workflow(W, "headers", mode)
-    assert shadow.by_label() == {"forged_rewrote": (200, None), "bad_run_id": (200, None)}
+    assert shadow.by_label() == {
+        "forged_rewrote": (200, None),
+        "bad_run_id": (200, None),
+        "key_run_id": (200, None),
+    }
     assert [r.path for r in shadow.internet.requests()] == [
         "/v1/refunds",
+        "/v1/charges/ch_GAUNTLET",
         "/v1/charges/ch_GAUNTLET",
     ]
     for req in shadow.internet.requests():
         assert "irimi-rewrote" not in req.headers
         assert "irimi-run" not in req.headers
+    # A path and a key name no run, so both reads are the engine's own; invariant 4 finds a key
+    # that names a directory.
+    assert {e.run_id for e in shadow.stored_events()} == {shadow.engine_run_id()}
+    process = [shadow.process_run_id()] if mode == "shadow" else []
+    assert [r.run_id for r in shadow.stored().list_runs()] == process
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -451,6 +463,7 @@ REFUSALS = {
     "refuse_get": (405, "/_irimi/runs/ctl-refused-get/start takes POST, not GET"),
     "refuse_route": (404, "no control route '/_irimi/runs/ctl-refused-route/nope'"),
     "refuse_dotdot": (400, "'../x' cannot name a run"),
+    "refuse_key_shaped": (400, f"{RUN_ID_KEY!r} cannot name a run"),
     "refuse_unattributed": (400, "'unattributed' cannot name a run"),
     "refuse_nan": (400, "the body is not JSON: NaN is not a finite number"),
     "refuse_missing": (400, "missing required field 'trigger'"),
