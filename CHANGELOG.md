@@ -125,6 +125,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - A write whose decision fails after irimi's check read, answered with irimi's `502` flagged
   `decision-failed`, no longer drops that read: the read that reached the service is recorded and
   printed after the `502`.
+- A write that reuses an idempotency key with other parameters, whose idempotency error cannot be
+  built, is answered with irimi's `502` flagged `decision-failed`. It was faked afresh as a
+  success that the service would have refused.
 - A Slack incoming webhook's secret path is no longer printed. The line irimi prints per exchange,
   and the summary, show a request's path as the store keeps it, the placeholder `irimi runs show`
   prints, and irimi's errors and warnings about a target name it by its origin,

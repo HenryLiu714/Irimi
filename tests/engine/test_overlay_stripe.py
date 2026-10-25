@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from irimi import services
 from irimi.core.exchange import Flag
 from irimi.decide import idempotency
 from irimi.protocol.headers import ANSWERED_BY_HEADER, REWROTE_HEADER
@@ -246,6 +247,34 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
 
     _, _, data = read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
     assert json.loads(data)["amount_refunded"] == 100
+
+
+def test_a_reused_key_whose_refusal_cannot_be_built_is_irimis_502_not_a_refund(
+    stripe_stub, monkeypatch
+):
+    """A reused key whose `idempotency_error` cannot be built is refused with irimi's 502.
+
+    Faked afresh, it would answer 200 where Stripe refuses, and the overlay would apply it."""
+    proxy, stub, seen = stripe_stub
+    status, _, _ = _keyed_refund(proxy, stub, "k-2")
+    assert status == 200
+
+    def fails(classification, body):
+        raise RuntimeError("the refusal could not be built")
+
+    monkeypatch.setattr(services, "fake_rejection", fails)
+    status, headers, data = _keyed_refund(proxy, stub, "k-2", amount=250)
+    assert status == 502
+    assert headers[ANSWERED_BY_HEADER] == "irimi"
+    assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
+    first, refused = [ex for ex in seen if ex.request.method == "POST"]
+    assert Flag.IDEMPOTENCY_CONFLICT not in first.flags
+    assert refused.flags == (Flag.UNCLASSIFIED, Flag.DECISION_FAILED)
+    assert (refused.answered_by, refused.issued_by) == ("irimi", "agent")
+
+    _, _, data = read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/charges/ch_REAL1")
+    assert json.loads(data)["amount_refunded"] == 100
+    assert "POST" not in [method for method, _ in stub.seen], "a faked write reached Stripe"
 
 
 def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):

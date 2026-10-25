@@ -227,24 +227,36 @@ def _recall(
 ) -> tuple[idempotency.Slot | None, Decided | None]:
     """Return `(slot, answer already given)` for this write, before any check or mint.
 
-    A retry gets the first answer's bytes, no precondition read and no write-log entry. Never
-    raises: a failed store falls through to the ordinary answer.
+    A retry gets the first answer's bytes, no precondition read and no write-log entry. A failed
+    store falls through to the ordinary answer, but an answer the key calls for that cannot be
+    built raises: faking the write afresh would turn the service's refusal into a success.
     """
-    slot: idempotency.Slot | None = None
+    slot, first, refusal = _standing(store, request, classification, run_id)
+    if refusal is not None:
+        return slot, _conflict_answer(classification, refusal)
+    if first is not None:
+        return slot, _retry_answer(first, classification.service)
+    return slot, None
+
+
+def _standing(
+    store: idempotency.Store, request: Request, classification: Classification, run_id: str
+) -> tuple[idempotency.Slot | None, idempotency.FirstAnswer | None, services.Rejection | None]:
+    """Return this write's slot, its key's first answer, and the service's refusal of a reused key.
+
+    Never raises: a failed store gives `(None, None, None)`, so the write is answered afresh.
+    """
     try:
         slot = idempotency.slot_for(request, classification, run_id)
-        if slot is not None:
-            first, conflicted = store.get(slot.id, slot.params)
-            if conflicted:
-                refusal = idempotency.conflict(classification.service, slot.idempotency_key)
-                if refusal is not None:
-                    return slot, _conflict_answer(classification, refusal)
-            elif first is not None:
-                return slot, _retry_answer(first, classification.service)
+        if slot is None:
+            return None, None, None
+        first, conflicted = store.get(slot.id, slot.params)
+        if not conflicted:
+            return slot, first, None
+        return slot, None, idempotency.conflict(classification.service, slot.idempotency_key)
     except Exception:
         logger.exception("irimi: the idempotency store failed; answering this write afresh")
-        slot = None
-    return slot, None
+        return None, None, None
 
 
 def idempotency_standing(
@@ -255,12 +267,12 @@ def idempotency_standing(
     `idempotent-replay` for a retry, `idempotency-conflict` for a reused key. A replay matches a
     recorded write only with the same flag. Never raises.
     """
-    _, known = _recall(store, request, classification, run_id)
-    if known is None:
-        return ""
-    if Flag.IDEMPOTENCY_CONFLICT in known.flags:
+    _, first, refusal = _standing(store, request, classification, run_id)
+    if refusal is not None:
         return Flag.IDEMPOTENCY_CONFLICT
-    return Flag.IDEMPOTENT_REPLAY
+    if first is not None:
+        return Flag.IDEMPOTENT_REPLAY
+    return ""
 
 
 def remember_answer(
