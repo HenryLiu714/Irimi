@@ -141,6 +141,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - `irimi compare` says when a changed pair's two writes sent the same, such as a refund irimi
   could check in one run and not the other, and lists what differs, instead of showing two lines
   that read as a change the agent made.
+- `irimi runs show`, `irimi compare` and `irimi replay` say when a run's last event was cut off
+  when stored, by a crash, instead of reading the run as whole. `irimi compare` says when the
+  store dropped events of a run, as `irimi replay` does, and both exit 1 for a run read in part.
 
 ## [0.1.0] - 2026-10-20
 

@@ -693,11 +693,33 @@ def test_a_store_abandoned_without_close_leaves_an_incomplete_run_that_still_rea
 
     run = StoreReader(root).load_run("r1")
     assert run.record.end is None  # incomplete
-    assert _paths(run) == [f"/n{n}" for n in range(5)]
+    assert (_paths(run), run.cut_tail) == ([f"/n{n}" for n in range(5)], False)
 
     with open(root / "runs/r1/events.jsonl", "a") as f:
         f.write('{"seq": 6, "type": "exchange", "run_id": "r1", "servi')  # a crash mid-write
-    assert _paths(StoreReader(root).load_run("r1")) == [f"/n{n}" for n in range(5)]
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == ([f"/n{n}" for n in range(5)], True)
+
+
+def test_a_last_line_whole_but_for_its_newline_is_read_and_is_not_cut_off(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange("r1", "/a"))
+    s.close()
+    events = root / "runs/r1/events.jsonl"
+    events.write_bytes(events.read_bytes().rstrip(b"\n"))
+    run = StoreReader(root).load_run("r1")
+    assert (_paths(run), run.cut_tail) == (["/a"], False)
+
+
+def test_the_unattributed_pool_says_when_a_crash_cut_off_its_last_event(root, key):
+    s = DirectoryStore(root, key)
+    s.record(_exchange(trace.UNATTRIBUTED, "/a"))
+    s.close()
+    assert not StoreReader(root).load_run(trace.UNATTRIBUTED).cut_tail
+    with open(root / "unattributed" / "events.jsonl", "a") as f:
+        f.write('{"seq": 2, "ty')
+    pool = StoreReader(root).load_run(trace.UNATTRIBUTED)
+    assert (_paths(pool), pool.cut_tail) == (["/a"], True)
 
 
 def test_a_restarted_store_resumes_seq_after_truncating_a_half_line(root, key):

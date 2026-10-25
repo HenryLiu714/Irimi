@@ -2,7 +2,8 @@
 
 Actions (`RunSummary.actions`) compare by data: key, `outcome` and `fields`, never printed text.
 The pairing has the most identical actions, then the most pairs of one key, so a refund of
-another amount is one changed write. An action whose body was cut when stored is never `same`.
+another amount is one changed write. An action whose body was cut when stored is never `same`,
+and a run the store gave back in part is never the same.
 """
 
 import hashlib
@@ -133,17 +134,46 @@ class Row:
 
 
 @dataclass(frozen=True)
+class Unread:
+    """What the store did not give back of a run; either may have been a write."""
+
+    dropped: int = 0  # events it dropped (`RunRecord.dropped_events`)
+    cut_tail: bool = False  # a last event cut off (`StoredRun.cut_tail`)
+
+    @classmethod
+    def of(cls, run: StoredRun) -> "Unread":
+        return cls(run.record.dropped_events, run.cut_tail)
+
+    def lines(self, name: str) -> list[str]:
+        """Return a note for each part of the run, named `name`, the store did not give back."""
+        lines = []
+        if self.dropped:
+            lines.append(
+                f"  the store dropped {self.dropped} of {name}'s events, which are not compared"
+            )
+        if self.cut_tail:
+            lines.append(f"  {name}'s last event was cut off when stored, so it is not compared")
+        return lines
+
+
+@dataclass(frozen=True)
 class Comparison:
     rows: tuple[Row, ...]
+    unread: tuple[Unread, Unread] = (Unread(), Unread())  # A's and B's
 
     def count(self, mark: Mark) -> int:
         return sum(1 for row in self.rows if row.mark == mark)
 
     @property
     def exit_code(self) -> int:
-        """Return `exitcodes.OK` when every row is `same`, else `DIFFERENT` (a `cut` row too)."""
-        same = all(row.mark == "same" for row in self.rows)
+        """Return `exitcodes.OK` when every row is `same` and both runs were read whole."""
+        whole = self.unread == (Unread(), Unread())
+        same = whole and all(row.mark == "same" for row in self.rows)
         return exitcodes.OK if same else exitcodes.DIFFERENT
+
+    def unread_lines(self, a: str, b: str) -> list[str]:
+        """Return the notes of what the store did not give back of A, named `a`, and B, `b`."""
+        return [*self.unread[0].lines(a), *self.unread[1].lines(b)]
 
     def lines(self) -> list[str]:
         """Return every row, a blank line and the totals; the totals alone if neither run wrote."""
@@ -378,7 +408,7 @@ def _pair(x: Action, y: Action) -> Row:
 
 def compare_runs(a: StoredRun, b: StoredRun, index: MapIndex | None) -> Comparison:
     """Compare `a`'s writes against `b`'s; `index` supplies `human:` and `compare_ignores:`."""
-    return Comparison(align(actions(a, index), actions(b, index)))
+    return Comparison(align(actions(a, index), actions(b, index)), (Unread.of(a), Unread.of(b)))
 
 
 def header_lines(a: RunRecord, b: RunRecord) -> list[str]:

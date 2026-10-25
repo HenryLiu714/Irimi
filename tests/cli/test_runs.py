@@ -552,6 +552,29 @@ def test_runs_show_prints_the_header_every_event_and_the_summary(home, capfd):
     ]
 
 
+def test_runs_show_says_a_crash_cut_off_the_run_s_last_event_and_shows_the_rest(home, capfd):
+    _hand_built_incomplete_run(home / "store", redact.load_key(home))
+    with open(home / "store" / "runs" / "handbuilt" / "events.jsonl", "a") as f:
+        f.write('{"seq": 9, "type": "exchange", "run_id": "handbuilt", "servi')
+    assert main(["runs", "show", "handbuilt"]) == 0
+    out, err = capfd.readouterr()
+    assert err == ""
+    assert out.splitlines() == [
+        "run: handbuilt",
+        "attribution: sdk",
+        "trigger: refund_ticket",
+        "entrypoint: agent:refund_ticket",
+        'args: {"ticket":"T-1"}',
+        "agent version: 2.0.1",
+        "outcome: incomplete",
+        "last event: cut off when stored, not shown",
+        "",
+        *HANDBUILT_EVENTS,
+        "",
+        *_handbuilt_summary("refund $49.00 on ch_1", ["  money: $49.00 in faked writes"]),
+    ]
+
+
 def test_runs_show_prints_an_error_run_s_error_and_exit_code(home, capfd):
     run_id = _shadow(capfd, "import sys", "sys.exit(3)")
     assert main(["runs", "show", run_id]) == 0

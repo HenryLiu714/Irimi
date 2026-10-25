@@ -24,6 +24,8 @@ NOT_SET = "-"
 # Python 3.14's `json.loads` reads deeper nesting than `json.dumps` writes back, so a damaged
 # `run.json` would raise RecursionError out of `runs show`.
 ARGS_TOO_DEEP = "(nested too deeply to show)"
+# `irimi runs show`'s line for a run whose last event's line was cut off; the store skips it.
+CUT_TAIL = "last event: cut off when stored, not shown"
 
 
 def run_status(record: RunRecord) -> str:
@@ -178,6 +180,8 @@ def run_show_lines(run: StoredRun, index: MapIndex | None) -> list[str]:
     """Return `irimi runs show`'s output: header block, events in `seq` order, then the summary."""
     events = [event_line(event) for event in run.events]
     lines = run_header_lines(run.record)
+    if run.cut_tail:
+        lines.append(CUT_TAIL)
     if events:
         lines += ["", *events]
     return [*lines, "", *summary_lines(RunView(run.record, run.events), index)]

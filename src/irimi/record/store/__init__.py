@@ -8,7 +8,8 @@ Guarantees:
 - Files are 0600 and directories 0700: redaction hides credentials, not business data.
 - A run id that cannot name a directory is stored in `unattributed/`.
 - A failed write leaves no damage: a line the disk refused half-way is truncated, a torn blob is
-  rewritten, and a run.json is synced before its rename. A crash's half line is skipped on read.
+  rewritten, and a run.json is synced before its rename. A crash's half line is skipped on read,
+  and the run read back says so.
 """
 
 from dataclasses import dataclass

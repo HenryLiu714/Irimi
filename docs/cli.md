@@ -147,6 +147,8 @@ the command printed live in these places:
   the cut, and a write irimi refused is spelled as its request, with
   `refused by irimi: its body is too large to read whole`.
 - **Dropped events** are missing; the record's `dropped events:` line says how many.
+- **A last event cut off** is missing too: a half-written last line (a crash's, or one still
+  being written) is skipped, and `last event: cut off when stored, not shown` says so.
 - **Labelled runs.** Live, a shadow summary covers every exchange the process made. Stored, each run
   holds only its own events: the process run holds only requests that named no run, and each SDK
   run holds its own. All of a process's runs together, the unattributed events included, make the
@@ -205,7 +207,7 @@ The variables irimi sets for its child are in
 | Code | Meaning |
 | --- | --- |
 | 0 | success; for `compare` and `replay`, every write is the same |
-| 1 | `compare` and `replay`: a write differs |
+| 1 | `compare` and `replay`: a write differs or could not be compared |
 | 2 | irimi could not do it, or was invoked wrongly (a bare `irimi` too) |
 | 126 | `shadow`: the command was found but could not be run |
 | 127 | `shadow`: the command was not found |

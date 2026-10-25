@@ -158,8 +158,15 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   even when they name different objects, such as updates to two customers. Of pairings as good,
   the earliest writes pair, so of a write one run made twice the later copy is the extra one.
 - **A body cut when stored is `?`.** Such a write is never `same`, even compared with itself.
-- **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and 2
-  when a run is not in the store or cannot be read. Both runs must be in one store.
+- **A run read in part.** A run whose events the store dropped, or whose last line is half
+  written (a crash, or a run still being written), is read without them, and the header says so:
+  `the store dropped 2 of B's events, which are not compared`, or
+  `B's last event was cut off when stored, so it is not compared`. A missing event may have been a
+  write, so such a comparison is never the same. A replay says the same of the recording or the
+  replay.
+- **Exit code.** As `diff(1)`'s: 0 when every write is `=` and both runs were read whole, 1
+  otherwise, `?` included, and 2 when a run is not in the store or cannot be read. Both runs must
+  be in one store.
 
 Comparing two separate recorded runs is not a replay: each ran against the services as they were
 then, so a difference can come from their data changing or the model sampling another answer, not
@@ -175,7 +182,7 @@ only from the agent.
 | Code | `irimi replay` |
 | --- | --- |
 | 0 | every write is the same |
-| 1 | a write differs, or was cut when stored, or events were dropped |
+| 1 | a write differs or was cut when stored, or a run was read in part |
 | 2 | irimi could not do it: the replay was refused, could not start or call the agent, or its run could not be read back |
 | 130, 143 | stopped by SIGINT or SIGTERM |
 | 141 | whatever read irimi's output went away |

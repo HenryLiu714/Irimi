@@ -253,7 +253,8 @@ def _remove(args: argparse.Namespace, root: Path, run_ids: list[str], *, dry_run
 def cmd_compare(args: argparse.Namespace) -> int:
     """`irimi compare RUN_A RUN_B`: two stored runs' writes side by side.
 
-    Exits as diff(1) does: 0 same, 1 different, 2 when a run cannot be read.
+    Exits as diff(1) does: 0 same, 1 different (or a run read in part), 2 when a run cannot be
+    read.
     """
     root = compose.store_root(args)
     stored = []
@@ -265,6 +266,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         stored.append(compose.load_stored_run(root, run_id))
     a, b = stored
     comparison = compare.compare_runs(a, b, compose.maps_for_stored_runs())
-    for line in [*compare.header_lines(a.record, b.record), "", *comparison.lines()]:
+    header = [*compare.header_lines(a.record, b.record), *comparison.unread_lines("A", "B")]
+    for line in [*header, "", *comparison.lines()]:
         print(line)
     return comparison.exit_code

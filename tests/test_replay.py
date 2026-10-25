@@ -374,6 +374,23 @@ def test_a_run_the_store_dropped_events_of_is_never_called_the_same():
     assert outcome.exit_code == exitcodes.DIFFERENT
 
 
+@pytest.mark.parametrize("which", ["recording", "replay"])
+def test_a_run_whose_last_event_a_crash_cut_off_is_never_called_the_same(which):
+    """The store read the run without its half-written last line, which may have been a write."""
+    source, replayed = _run(_record(), []), _new([])
+    if which == "recording":
+        source = replace(source, cut_tail=True)
+    else:
+        replayed = replace(replayed, cut_tail=True)
+    outcome = replay_report.outcome(source, replayed, replay_report.Ended(0), None)
+    assert outcome.lines()[2:5] == [
+        f"  {replay_report.NO_DIVERGENCE}",
+        "  0 from the recording · 0 missed",
+        f"  the {which}'s last event was cut off when stored, so it is not compared",
+    ]
+    assert outcome.exit_code == exitcodes.DIFFERENT
+
+
 def test_a_result_is_the_outcome_s_and_a_refusal_holds_its_reason():
     outcome = replay_report.outcome(_run(_record(), []), _new([]), replay_report.Ended(0), None)
     assert outcome.result() == ReplayResult("src", "new", 0, None, tuple(outcome.lines()))

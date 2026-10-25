@@ -605,6 +605,58 @@ def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(
     ]
 
 
+def test_a_run_whose_last_event_a_crash_cut_off_says_so_and_is_never_the_same(home, capfd):
+    """The store reads B without its half-written last line, which may have been a write.
+
+    So compare says so under the header and exits 1, though every write it read is the same."""
+    _store(home, {"a": (_record("a"), [_refund()]), "b": (_record("b"), [_refund()])})
+    with open(home / "store" / "runs" / "b" / "events.jsonl", "a") as f:
+        f.write('{"seq": 2, "type": "exchange", "run_id": "b", "servi')
+    assert main(["compare", "a", "b"]) == 1
+    assert capfd.readouterr().out.splitlines() == [
+        HEADER,
+        *LABELS,
+        "  B's last event was cut off when stored, so it is not compared",
+        "",
+        f"  = {REFUND}",
+        "",
+        "  1 same · 0 changed · 0 only in A · 0 only in B",
+    ]
+    assert main(["compare", "b", "b"]) == 1
+    assert capfd.readouterr().out.splitlines()[3:6] == [
+        "  A's last event was cut off when stored, so it is not compared",
+        "  B's last event was cut off when stored, so it is not compared",
+        "",
+    ]
+    assert main(["compare", "a", "a"]) == 0
+
+
+def test_a_run_the_store_dropped_events_of_says_so_and_is_never_the_same(home, capfd):
+    """A dropped event may have been a write too, so compare says so and exits 1.
+
+    A run with a last event cut off as well says both, in that order."""
+    _store(home, {"a": (_record("a"), [_refund()]), "b": (_record("b"), [_refund()])})
+    # The store counts its own drops, so the record is rewritten to say three.
+    (home / "store" / "runs" / "b" / "run.json").write_text(
+        json.dumps(trace.run_to_json(_record("b", dropped_events=3)))
+    )
+    assert main(["compare", "a", "b"]) == 1
+    assert capfd.readouterr().out.splitlines()[3:7] == [
+        "  the store dropped 3 of B's events, which are not compared",
+        "",
+        f"  = {REFUND}",
+        "",
+    ]
+    with open(home / "store" / "runs" / "b" / "events.jsonl", "a") as f:
+        f.write('{"seq": 2, "ty')
+    assert main(["compare", "a", "b"]) == 1
+    assert capfd.readouterr().out.splitlines()[3:6] == [
+        "  the store dropped 3 of B's events, which are not compared",
+        "  B's last event was cut off when stored, so it is not compared",
+        "",
+    ]
+
+
 def test_a_cut_write_no_write_of_its_key_pairs_with_is_only_in_its_run(home, capfd):
     cut = _post("hi")
     cut = dataclasses.replace(cut, flags=(Flag.BODY_TRUNCATED,))

@@ -17,7 +17,7 @@ SIGTERM = 143
 
 MEANINGS = {
     OK: "every write is the same",
-    DIFFERENT: "a write differs",
+    DIFFERENT: "a write differs or could not be compared",
     ERROR: "irimi could not do it, or was invoked wrongly",
     CANNOT_EXEC: "the command was found but could not be run",
     NOT_FOUND: "the command was not found",
