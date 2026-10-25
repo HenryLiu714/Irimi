@@ -144,8 +144,11 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   query, the scope headers and the body less `compare_ignores:`. A write tool compares its
   arguments. When a changed pair prints alike, the fields that differ are listed under it, as
   `args.body` is above.
-- **Pairing.** Identical writes line up first; the writes between them pair by operation, so a
-  refund of another amount is one changed write, not one removed and one added.
+- **Pairing.** Writes line up in order, with as many identical pairs as the two runs allow, then
+  as many pairs of one operation, so a refund of another amount is one changed write, not one
+  removed and one added, even beside a refund one run made twice. Writes of one operation pair
+  even when they name different objects, such as updates to two customers. Of pairings as good,
+  the earliest writes pair, so of a write one run made twice the later copy is the extra one.
 - **A body cut when stored is `?`.** Such a write is never `same`, even compared with itself.
 - **Exit code.** As `diff(1)`'s: 0 when every write is `=`, 1 when any is not, `?` included, and 2
   when a run is not in the store or cannot be read. Both runs must be in one store.

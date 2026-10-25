@@ -128,6 +128,15 @@ WORKFLOW = Workflow(
             doc="typed_escape_answer, then two_line_answer's text as a follow-up in the same run: "
             "beside two_line_answer, one post both made and one that prints alike only B made",
         ),
+        "repeated_answer": Scenario(
+            ("archived_channel",),
+            env={"SLACK_POST_CHANNEL": OPS, FOLLOW_UP_ENV: TWO_LINES},
+            setup=_answering(TWO_LINES),
+            doc="a mention in the archived channel, the bot pinned to C0OPS: two_line_answer's "
+            "text posted twice there, as the answer and as the follow-up. The reaction and upload "
+            "go to the archived channel, so beside a mention in C0OPS the posts have no identical "
+            "writes after them to line up by",
+        ),
         "duplicate_delivery": Scenario(
             ("duplicate_delivery",),
             setup=_workspace,
