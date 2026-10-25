@@ -509,10 +509,10 @@ def test_a_replayed_204_and_304_end_at_their_head_on_a_connection_kept_alive(rep
     assert replay.exit_code == 0
 
 
-def test_a_recorded_header_edited_to_hold_crlf_is_refused_not_served(run_workflow, tmp_path):
-    """A hand-edited recording whose 304 ETag holds CRLF would add a `Set-Cookie` to its answer.
+def _replay_edited(run_workflow, tmp_path, method, status, edit):
+    """Replay a copy of a `revalidate` recording, one answer's headers put through `edit`.
 
-    irimi answers that check 502 `decision-failed` instead, and the rest of the replay as before."""
+    The answer edited is the one to `method` with `status`."""
     recorded = run_workflow(W, "revalidate", "shadow")
     home = tmp_path / "home"
     shutil.copytree(recorded.home, home)
@@ -523,15 +523,38 @@ def test_a_recorded_header_edited_to_hold_crlf_is_refused_not_served(run_workflo
     edited = []
     for line in events.read_text().splitlines():
         event = json.loads(line)
-        if event["type"] == "exchange" and event["response"]["status"] == 304:
-            event["response"]["headers"] = [
-                [k, f"{v}\r\nSet-Cookie: session=forged" if k == "etag" else v]
-                for k, v in event["response"]["headers"]
-            ]
+        answer = (event.get("request", {}).get("method"), event.get("response", {}).get("status"))
+        if event["type"] == "exchange" and answer == (method, status):
+            event["response"]["headers"] = [edit(k, v) for k, v in event["response"]["headers"]]
         edited.append(json.dumps(event))
     assert edited != events.read_text().splitlines()
     events.write_text("\n".join(edited) + "\n")
-    replay_run = replay(dataclasses.replace(recorded, home=home), run_id, tmp_path / "replay")
+    return replay(dataclasses.replace(recorded, home=home), run_id, tmp_path / "replay")
+
+
+def _forge_in_value(k, v):
+    return [k, f"{v}\r\nSet-Cookie: session=forged" if k == "etag" else v]
+
+
+def _forge_in_name(k, v):
+    return ["set-cookie: session=forged; etag" if k == "etag" else k, v]
+
+
+@pytest.mark.parametrize(
+    ("edit", "reason"),
+    [
+        (_forge_in_value, "the 'etag' header holds a CR, LF or NUL"),
+        (_forge_in_name, "the header name 'set-cookie: session=forged; etag' is not a token"),
+    ],
+)
+def test_a_recorded_header_edited_to_hold_crlf_is_refused_not_served(
+    run_workflow, tmp_path, edit, reason
+):
+    """A hand-edited recording whose 304 ETag holds CRLF would add a `Set-Cookie` to its answer.
+
+    So would an ETag renamed to hold a colon. irimi answers that check 502 `decision-failed`
+    instead, and the rest of the replay as before."""
+    replay_run = _replay_edited(run_workflow, tmp_path, "GET", 304, edit)
     assert check_invariants(replay_run) == []
     status, length, _, kept_alive = framing(replay_run)["not_modified"]
     assert (status, int(length) > 0, kept_alive) == (502, True, True)
@@ -545,8 +568,31 @@ def test_a_recorded_header_edited_to_hold_crlf_is_refused_not_served(run_workflo
     [refused] = [ex.response for ex in replay_run.reported if "decision-failed" in ex.flags]
     assert refused is not None and refused.status == 502
     assert json.loads(refused.body)["error"]["message"] == (
-        "irimi could not decide how to answer this request: the 'etag' header holds a CR, LF or NUL"
+        f"irimi could not decide how to answer this request: {reason}"
     )
+    assert replay_run.internet.requests() == []
+
+
+def test_a_recorded_head_whose_lengths_disagree_is_replayed_without_one(run_workflow, tmp_path):
+    """httpx, requests and aiohttp refuse an answer naming two lengths, even to HEAD.
+
+    The answer to HEAD may name none, so the replay sends it with none, and the connection is
+    still used for nothing else after it."""
+    replay_run = _replay_edited(
+        run_workflow,
+        tmp_path,
+        "HEAD",
+        200,
+        lambda k, v: [k, f"{v}, 96" if k.lower() == "content-length" else v],
+    )
+    assert check_invariants(replay_run) == []
+    assert framing(replay_run) == {
+        "changes": (204, None, None, True),
+        "not_modified": (304, None, None, True),
+        "size": (200, None, None, True),
+    }
+    [head] = [ex for ex in replay_run.reported if ex.request.method == "HEAD"]
+    assert (head.response.header("content-length"), head.flags) == (None, ("from-recording",))
     assert replay_run.internet.requests() == []
 
 
