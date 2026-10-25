@@ -1,16 +1,15 @@
 """Compare two stored runs write by write, for `irimi compare` and `irimi replay`.
 
 Actions (`RunSummary.actions`) compare by data: key, `outcome` and `fields`, never printed text.
-Identical actions anchor first; the stretches between pair by key, so a refund of another amount
-is one changed write. An action whose body was cut when stored is never `same`.
+The pairing has the most identical actions, then the most pairs of one key, so a refund of
+another amount is one changed write. An action whose body was cut when stored is never `same`.
 """
 
-import difflib
 import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Callable, Hashable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import parse_qsl
@@ -243,37 +242,95 @@ def _fields(values: dict[str, JSONValue]) -> tuple[Field, ...] | None:
 
 
 def align(a: Sequence[Action], b: Sequence[Action]) -> tuple[Row, ...]:
-    """Line up `a` and `b`, each action in one row: identical actions by data, the rest by key."""
+    """Line up `a` and `b` in order, each action in one row: most identical pairs, then most pairs.
+
+    Pairs are of one key. Between two pairs, the actions only `a` has come before those only `b`
+    has."""
     rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, lambda action: action.data):
-        if tag == "equal":
-            rows += [Row("same", one, other) for one, other in zip(x, y, strict=True)]
+    i = j = 0
+    for x, y in _pairs(a, b):
+        rows += _unpaired(a[i:x], b[j:y])
+        rows.append(_pair(a[x], b[y]))
+        i, j = x + 1, y + 1
+    return (*rows, *_unpaired(a[i:], b[j:]))
+
+
+def _unpaired(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
+    return [*(Row("only_a", x, None) for x in a), *(Row("only_b", None, y) for y in b)]
+
+
+# How `_pairs` moves on from `(i, j)`; a tie pairs, else passes over `b[j]`.
+_SKIP_A, _SKIP_B, _PAIR = range(3)
+
+
+def _pairs(a: Sequence[Action], b: Sequence[Action]) -> list[tuple[int, int]]:
+    """Return the `(i, j)` of each pair `align` makes.
+
+    One identical pair outweighs all the other pairs the runs could make, so a repeated action
+    pairs with the copy that leaves its neighbours a pair. Of pairings as good, the one whose
+    pairs come soonest wins, so a repeat beside its copy is the extra one. Past the identical
+    actions both runs start with, the cost is the product of what is left of each, in time and
+    bytes."""
+    # Every best pairing pairs the identical actions both runs start with.
+    start = 0
+    while start < min(len(a), len(b)) and a[start].data == b[start].data:
+        start += 1
+    pairs = [(n, n) for n in range(start)]
+    steps = _steps(a[start:], b[start:])
+    i = j = start
+    while i < len(a) and j < len(b):
+        step = steps[i - start][j - start]
+        if step == _PAIR:
+            pairs.append((i, j))
+            i, j = i + 1, j + 1
+        elif step == _SKIP_B:
+            j += 1
         else:
-            rows += _by_key(x, y)
-    return tuple(rows)
+            i += 1
+    return pairs
 
 
-def _by_key(a: Sequence[Action], b: Sequence[Action]) -> list[Row]:
-    """Line up unanchored actions by key; an unmatched stretch is all `only_a`, then `only_b`."""
-    rows: list[Row] = []
-    for tag, x, y in _opcodes(a, b, lambda action: action.key):
-        if tag == "equal":
-            rows += [_pair(one, other) for one, other in zip(x, y, strict=True)]
-        else:
-            rows += [Row("only_a", one, None) for one in x]
-            rows += [Row("only_b", None, other) for other in y]
-    return rows
+def _steps(a: Sequence[Action], b: Sequence[Action]) -> list[bytearray]:
+    """Return the best first step from each `(i, j)`, scoring `a[i:]` against `b[j:]`."""
+    key_a, key_b = _interned(a, b, lambda action: action.key)
+    data_a, data_b = _interned(a, b, lambda action: action.data)
+    # Every pair scores how soon it comes, `(len(a) - i) + (len(b) - j)`; a pair of one key
+    # outweighs all of that, and an identical pair all the other pairs.
+    most = min(len(a), len(b))
+    one_key = most * (len(a) + len(b)) + 1
+    identical = (most + 1) * one_key
+    # `after[j]` scores `a[i + 1:]` against `b[j:]`, and `here[j]` scores `a[i:]`.
+    after = [0] * (len(b) + 1)
+    steps: list[bytearray] = []
+    for i in reversed(range(len(a))):
+        here = [0] * (len(b) + 1)
+        row = bytearray(len(b))
+        soon = len(a) - i + len(b)
+        for j in reversed(range(len(b))):
+            best, step = after[j], _SKIP_A
+            if here[j + 1] >= best:
+                best, step = here[j + 1], _SKIP_B
+            if key_a[i] == key_b[j]:
+                kind = identical if data_a[i] == data_b[j] else one_key
+                paired = after[j + 1] + kind + soon - j
+                if paired >= best:
+                    best, step = paired, _PAIR
+            here[j], row[j] = best, step
+        steps.append(row)
+        after = here
+    return steps[::-1]
 
 
-def _opcodes(
+def _interned(
     a: Sequence[Action], b: Sequence[Action], by: Callable[[Action], Hashable]
-) -> Iterator[tuple[str, Sequence[Action], Sequence[Action]]]:
-    """Yield `difflib` opcodes over `a` and `b` compared `by`, with the stretches each spans.
+) -> tuple[list[int], list[int]]:
+    """Return each action's `by` as an int, equal where `by` is equal."""
+    ids: dict[Hashable, int] = {}
 
-    Autojunk is off: forty identical writes are forty writes, not noise."""
-    matcher = difflib.SequenceMatcher(a=[by(x) for x in a], b=[by(y) for y in b], autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        yield tag, a[i1:i2], b[j1:j2]
+    def interned(action: Action) -> int:
+        return ids.setdefault(by(action), len(ids))
+
+    return [interned(x) for x in a], [interned(y) for y in b]
 
 
 def _pair(x: Action, y: Action) -> Row:
