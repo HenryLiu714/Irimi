@@ -63,18 +63,22 @@ class StoreReader:
             key=lambda r: (r.started_at is None, -(r.started_at or 0.0), r.run_id),
         )
 
-    def load_run(self, run_id: str, *, bodies: bool = True) -> StoredRun:
+    def load_run(
+        self, run_id: str, *, bodies: bool = True, last_seq: int | None = None
+    ) -> StoredRun:
         """Return one run, events in `seq` order; `UNATTRIBUTED` gives the unattributed events.
 
         Raises RunNotFound for an unknown id, TraceFormatError for damage (an unparsable line
         other than a crash's last one, a missing or resized blob), and OSError for a run irimi may
         not read. `bodies=False` checks each blob's size but reads none, for callers that only
-        count events.
+        count events. `last_seq` leaves out every event after that `seq`, unread.
         """
         get_body = self._get_body if bodies else self._check_body
         if run_id == UNATTRIBUTED:
             events = self.layout.unattributed_events
-            return StoredRun(RunRecord.header(UNATTRIBUTED), self._events(events, get_body))
+            return StoredRun(
+                RunRecord.header(UNATTRIBUTED), self._events(events, get_body, last_seq)
+            )
         if not trace.is_valid_run_id(run_id):
             raise RunNotFound(run_id)
         directory = self.layout.run_dir(run_id)
@@ -84,13 +88,15 @@ class StoreReader:
         # On a case-insensitive filesystem `run1` opens `Run1/`: that is another run, not this one.
         if record.run_id != run_id:
             raise RunNotFound(run_id)
-        return StoredRun(record, self._events(directory / EVENTS_FILE, get_body))
+        return StoredRun(record, self._events(directory / EVENTS_FILE, get_body, last_seq))
 
-    def _events(self, path: Path, get_body: trace.GetBody) -> list[Event]:
+    def _events(self, path: Path, get_body: trace.GetBody, last_seq: int | None) -> list[Event]:
         numbered = []
         for line, d in _lines(path):
             # Every refusal names its file and line, so it can be found among thousands of events.
             try:
+                if last_seq is not None and trace.seq_from_json(d) > last_seq:
+                    continue
                 numbered.append(trace.event_from_json(d, get_body))
             except TraceFormatError as exc:
                 raise TraceFormatError(f"{path}, line {line}: {exc}") from exc

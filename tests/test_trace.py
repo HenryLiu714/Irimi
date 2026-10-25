@@ -591,6 +591,7 @@ _DECODERS = {
     "run_end_from_json": protocol_control.run_end_from_json,
     "exchange_from_json": lambda d: trace.exchange_from_json(d, _never),
     "event_from_json": lambda d: trace.event_from_json(d, _never),
+    "seq_from_json": trace.seq_from_json,
 }
 
 

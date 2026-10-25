@@ -1,8 +1,12 @@
 """`irimi serve`: the engine as a sidecar, with no child process."""
 
 import argparse
+import contextlib
+import logging
+import queue
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +20,12 @@ from irimi.report.model import RunView
 from irimi.report.summary import summary_lines, tls_failure_lines
 from irimi.servicemaps import MapIndex
 
+logger = logging.getLogger(__name__)
+
 # How often the main thread checks for a recorded signal or a stop.
 SERVE_POLL_S = 0.1
+# How long serve waits, once its store has closed, for the summaries still to print.
+SUMMARIES_TIMEOUT_S = 10.0
 
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
@@ -58,7 +66,9 @@ def cmd_serve(
 class _ServeOutput:
     """What serve prints: a line per exchange and tool call, and each run's summary when it ends.
 
-    Called from the engine and store writer threads; one lock keeps lines from interleaving.
+    Called from the engine, store writer and summaries threads; one lock keeps lines from
+    interleaving. A summary is read back and printed on a thread of its own (`summaries`), so the
+    store writes on.
     """
 
     def __init__(self, store_root: Path, quiet: bool = False) -> None:
@@ -69,11 +79,15 @@ class _ServeOutput:
         # No run's summary shows a failed handshake, so serve warns once per host itself.
         self.ca_cert: Path | None = None
         self._tls_warned: set[str] = set()
+        # Each ended run whose summary waits for the printer; None stops it.
+        self._ended: queue.SimpleQueue[tuple[MapIndex, str, int | None] | None] = (
+            queue.SimpleQueue()
+        )
+        self._summaries_given_up = False  # set under `_printing` when serve stops waiting
 
     def say(self, lines: list[str], *, err: bool = False) -> None:
         with self._printing:
-            for line in lines:
-                print(line, file=sys.stderr if err else sys.stdout, flush=True)
+            _print(lines, err)
 
     def exchange(self, ex: Exchange) -> None:
         if ex.run_id == UNATTRIBUTED:
@@ -94,19 +108,75 @@ class _ServeOutput:
         [line] = tls_failure_lines({host: 1}, self.ca_cert)
         self.say([f"warning: {line.strip()}"], err=True)
 
-    def run_ended(self, index: MapIndex, run_id: str) -> None:
-        """Print the run's summary from the store, on the writer thread after its end is written.
+    def run_ended(self, index: MapIndex, run_id: str, last_seq: int | None) -> None:
+        """Queue the run's summary; the store calls this on its writer once the end is written."""
+        self._ended.put((index, run_id, last_seq))
+
+    @contextlib.contextmanager
+    def summaries(self) -> Iterator[None]:
+        """Print each ended run's summary on a thread of serve's own until the block exits.
+
+        On exit it prints those still queued, for up to SUMMARIES_TIMEOUT_S.
+        """
+        printer = threading.Thread(
+            target=self._print_summaries, name="irimi-summaries", daemon=True
+        )
+        printer.start()
+        try:
+            yield
+        finally:
+            self._ended.put(None)
+            printer.join(SUMMARIES_TIMEOUT_S)
+            if printer.is_alive():
+                self._give_up_summaries()
+
+    def _give_up_summaries(self) -> None:
+        """Warn that summaries went unprinted; the printer prints nothing after this."""
+        # A printer stuck writing to a full pipe holds the lock, so it is waited on only briefly.
+        locked = self._printing.acquire(timeout=SERVE_POLL_S)
+        try:
+            self._summaries_given_up = True
+            warning = "warning: serve stopped before printing every ended run's summary"
+            _print([f"{warning}; irimi runs list shows the runs"], err=True)
+        finally:
+            if locked:
+                self._printing.release()
+
+    def _say_summary(self, lines: list[str], *, err: bool = False) -> None:
+        with self._printing:
+            if not self._summaries_given_up:
+                _print(lines, err)
+
+    def _print_summaries(self) -> None:
+        while (ended := self._ended.get()) is not None:
+            index, run_id, last_seq = ended
+            try:
+                self._print_summary(index, run_id, last_seq)
+            except Exception as exc:
+                # The type only: a message may quote what it choked on.
+                logger.warning(
+                    "irimi: run %s's summary could not be printed: %s", run_id, type(exc).__name__
+                )
+
+    def _print_summary(self, index: MapIndex, run_id: str, last_seq: int | None) -> None:
+        """Print the run's summary from the store, as the run stood when its end was written.
 
         A read failure warns with the exception type only: its message may quote unredacted data.
         """
         try:
-            stored = compose.load_stored_run(self.store_root, run_id)
+            stored = compose.load_stored_run(self.store_root, run_id, last_seq=last_seq)
         except CliError as exc:
             why = type(exc.__cause__).__name__
-            self.say([f"warning: run {run_id} ended but could not be read back: {why}"], err=True)
+            warning = f"warning: run {run_id} ended but could not be read back: {why}"
+            self._say_summary([warning], err=True)
             return
         summary = summary_lines(RunView(stored.record, stored.events), index)
-        self.say([f"--- run {run_id} ---", *summary])
+        self._say_summary([f"--- run {run_id} ---", *summary])
+
+
+def _print(lines: list[str], err: bool) -> None:
+    for line in lines:
+        print(line, file=sys.stderr if err else sys.stdout, flush=True)
 
 
 def _run_serve(
@@ -118,29 +188,32 @@ def _run_serve(
     """Run the engine from start to stop; `signalled` holds each signal that arrived."""
     output = _ServeOutput(compose.store_root(args), args.quiet)
     died = threading.Event()
-    run = compose.prepare_run(args, serve=True, on_run_ended=output.run_ended)
-    if run is None:
-        return exitcodes.ERROR
-    with run:
-        output.ca_cert = run.ca.cert
-        engine = engine_factory(run, output.exchange, output.tool_call, output.tls_failure)
-        if signalled:  # stopped before it served: no engine to start, no banner to print
-            return exitcodes.OK
-        handle = compose.start_engine(engine)
-        if handle is None:
+    # The printer starts first and stops last, so each end the store writes as it closes still
+    # prints, before the stop line.
+    with output.summaries():
+        run = compose.prepare_run(args, serve=True, on_run_ended=output.run_ended)
+        if run is None:
             return exitcodes.ERROR
-        try:
-            if not signalled:  # a banner for a proxy already stopping would say it serves
-                host, port = run.config.listen_host, handle.port()
-                compose.print_startup("serve", args, run.index, None, host, port, run.ca.cert)
-            threading.Thread(
-                target=runner.watch_engine, args=(handle.thread, stop, died), daemon=True
-            ).start()
-            while not signalled and not stop.wait(SERVE_POLL_S):
-                pass
-        finally:
-            stop.set()  # before the engine stops, so `watch_engine` sees serve stopping it
-            handle.stop()
+        with run:
+            output.ca_cert = run.ca.cert
+            engine = engine_factory(run, output.exchange, output.tool_call, output.tls_failure)
+            if signalled:  # stopped before it served: no engine to start, no banner to print
+                return exitcodes.OK
+            handle = compose.start_engine(engine)
+            if handle is None:
+                return exitcodes.ERROR
+            try:
+                if not signalled:  # a banner for a proxy already stopping would say it serves
+                    host, port = run.config.listen_host, handle.port()
+                    compose.print_startup("serve", args, run.index, None, host, port, run.ca.cert)
+                threading.Thread(
+                    target=runner.watch_engine, args=(handle.thread, stop, died), daemon=True
+                ).start()
+                while not signalled and not stop.wait(SERVE_POLL_S):
+                    pass
+            finally:
+                stop.set()  # before the engine stops, so `watch_engine` sees serve stopping it
+                handle.stop()
     if output.unattributed:
         count = output.unattributed
         exchanges = "1 exchange" if count == 1 else f"{count} exchanges"

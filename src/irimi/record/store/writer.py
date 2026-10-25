@@ -68,8 +68,9 @@ SYNC_IDLE_S = 1.0
 CLOSE_TIMEOUT_S = 10.0
 DROP_WARNING_EVERY = 1000
 
-# Called on the writer thread with a run's id once its end is written.
-OnRunEnded = Callable[[str], None]
+# Called on the writer thread once a run's end is written, with its id and the `seq` of the last
+# event it held then: 0 for none, None (read it whole) when the store could not open the run.
+OnRunEnded = Callable[[str, int | None], None]
 
 
 class RunAttribution:
@@ -162,7 +163,7 @@ class DirectoryStore:
 
         `on_run_ended` runs on the writer thread after a run's end is written, so the run's
         events are on disk, and also when writing the end failed; it blocks the queue while it
-        runs, and what it raises is logged.
+        runs, and what it raises is logged. It gets the run's last `seq`, to read the run as ended.
         `replay_of` is the stored run a replay answers from (`RunAttribution`).
         """
         private_dir(root)
@@ -364,8 +365,10 @@ class DirectoryStore:
 
     def _end(self, end: _EndRun) -> None:
         # The run has ended even if its end was not written: the engine drops its write log.
+        last_seq: int | None = None
         try:
             run = self._run_dir(end.run_id)
+            last_seq = run.next_seq - 1
             record = run.record or self._attribution.header(end.run_id)
             error = redact.redact_error(end.error, self._key)
             self._write_record(
@@ -375,7 +378,7 @@ class DirectoryStore:
         finally:
             if self._on_run_ended is not None:
                 try:
-                    self._on_run_ended(end.run_id)
+                    self._on_run_ended(end.run_id, last_seq)
                 except Exception as exc:
                     # The type only: a message may quote what it choked on.
                     logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
