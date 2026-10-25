@@ -413,6 +413,8 @@ def test_a_shape_after_a_json_strings_escaped_letter_is_replaced_wherever_json_i
     assert _body(overlapping, JSON) == f'["{_ph(LIVE_KEY_SHORT + "A" + LIVE_KEY)}"]'.encode()
     twice = f'["\\u0041{LIVE_KEY} \\u0062{LIVE_KEY}"]'.encode()
     assert _body(twice, JSON) == f'["A{_ph(LIVE_KEY)} b{_ph(LIVE_KEY)}"]'.encode()
+    keyed = f'{{"\\u0041{LIVE_KEY}": 1}}'.encode()
+    assert _body(keyed, JSON) == f'{{"A{_ph(LIVE_KEY)}":1}}'.encode()
 
 
 def test_only_an_escaped_letter_or_digit_glues_to_the_shape_after_it():
