@@ -548,8 +548,7 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
 ):
     """A stream the trigger returns unread is stored in its run, after the run ended.
 
-    In `hand_off` the request goes out inside the run and the stream ends after it, as W3's
-    `task_outlives_trigger` calls do.
+    In `hand_off` the request goes out inside the run and the stream ends after it.
 
     KNOWN BUG (#125): under serve mode the run's block, printed once its end is on disk and before
     the stream is, says the run made no exchange, while the stored run and `irimi runs show` hold

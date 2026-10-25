@@ -494,7 +494,8 @@ async def _process(message: dict[str, Any]) -> None:
 def schedule(message: dict[str, Any]) -> asyncio.Task[None]:
     """Start the work as a task and return it; the run ends when `schedule` returns.
 
-    The task was created inside the run, so its context keeps the run's id for its requests."""
+    The task was created inside the run, so its context keeps the run, which has ended before the
+    task runs a step."""
     return asyncio.get_running_loop().create_task(_process_later(message))
 
 

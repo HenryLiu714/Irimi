@@ -612,49 +612,44 @@ def test_runs_that_share_one_pooled_connection_never_mix(run_workflow, mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_a_task_a_sync_trigger_returns_files_its_calls_in_the_run_that_already_ended(
+def test_a_task_a_sync_trigger_returns_makes_its_calls_in_no_run_once_its_run_has_ended(
     run_workflow, mode
 ):
-    """A task a sync trigger returns files its calls in the run, which has already ended `ok`.
+    """A task a sync trigger returns runs after its run has ended, so its calls are in no run.
 
-    The run is not handed to a task, but the task's context holds the run id, so the SDK labels
-    its read and refund with it.
-
-    KNOWN BUG (#111): every one of the task's exchanges is stored after its run's `ended_at`, in
-    a run that reads back `ok` though its work had not started."""
+    The run is not handed to a task. The task's context still holds the run's id, but a run the
+    process has ended is current nowhere, so the SDK labels none of the task's calls: they land in
+    the engine's own run, and each run is stored as it ended, `ok` and empty."""
     shadow = run_workflow(W, "task_outlives_trigger", mode)
     ends = {e["run"]: e["t"] for e in shadow.events("run.end")}
-    assert len(ends) == 2 and set(ends) == set(shadow.by_run())
-    for call in shadow.calls():
-        assert call["t"] > ends[call["run"]], call
-    found = stored_by_charge(shadow, lambda args: args["message"])
-    assert sorted(found) == ["ch_Q0", "ch_Q1"]
+    assert len(ends) == 2
+    calls = shadow.calls()
+    assert sorted((c["label"], c["run"]) for c in calls) == [
+        (f"{kind}:ch_Q{i}", None) for kind in ("read", "refund") for i in (0, 1)
+    ]
+    assert min(c["t"] for c in calls) > max(ends.values())
     reader = shadow.stored()
-    for record in found.values():
-        assert record.end.outcome == "ok" and record.end.ended_at is not None
-        events = reader.load_run(record.run_id).events
-        assert sorted((e.request.method, e.request.path) for e in events) == [
-            ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
-            ("GET", f"/v1/charges/{record.trigger.args['message']['charge']}"),
-            ("POST", "/v1/refunds"),
-        ]
-        assert min(e.started_at for e in events) > record.end.ended_at
-    assert reader.load_run(shadow.engine_run_id()).events == []
+    records = shadow.sdk_runs()
+    assert sorted(run_of(shadow, i) for i in (0, 1)) == sorted(ends)
+    for record in records:
+        assert record.end is not None and record.end.outcome == "ok"
+        assert reader.load_run(record.run_id).events == []
+    engine = [e for e in reader.load_run(shadow.engine_run_id()).events if isinstance(e, Exchange)]
+    # Each charge's read, irimi's check read and its refund.
+    assert sorted((e.request.method, charge_named(e)) for e in engine) == sorted(
+        [("GET", f"ch_Q{i}") for i in (0, 1) for _ in range(2)]
+        + [("POST", f"ch_Q{i}") for i in (0, 1)]
+    )
     assert shadow.exchange_lines().count(REFUND_LINE) == 2
-    # Each refund is faked, but filed under no run: its run had ended, and irimi keeps nothing
-    # for a run that has ended, however long it serves.
-    assert shadow.write_log is not None
-    assert [shadow.write_log.for_run(record.run_id) for record in found.values()] == [(), ()]
     if mode == "serve":
-        # Serve mode prints each run's block once its end is on disk, which is before the
-        # task has run a step.
-        # KNOWN BUG (#125): each block says the run made no call and its refund is in no block,
-        # though the stored run holds it (`test_invariants.py`'s `LATE_EVENTS`).
-        for record in found.values():
+        # Each run's block is the run as stored: no call. The refunds are in no run's block.
+        for record in records:
             assert shadow.run_blocks()[record.run_id][-1] == (
                 "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
             )
         assert not [line for line in shadow.summaries() if "○" in line]
+    else:
+        assert len([line for line in shadow.summary() if "○ stripe  refund" in line]) == 2
 
 
 # -- the worker's ledger tools: tool calls under concurrency --------------------------------------
@@ -975,20 +970,13 @@ PAIRS = {
         ),
         [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
     ),
-    # The returned task's calls are stored in its run after the run ends (the known bug above),
-    # so compare, reading the store, shows refunds serve's block left out. See #111.
-    "task_outlives_trigger": (
-        (0, 1),
-        (label("schedule"), label("schedule")),
-        [f"  ~ A {refund_text(0)}", f"    B {refund_text(1)}"],
-    ),
 }
 
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", PAIRS)
 def test_irimi_compare_of_two_runs_one_process_made(run_workflow, scenario, mode):
-    """Compare of failed, cancelled, refused or outliving runs compares each as stored."""
+    """Compare of failed, cancelled or refused runs compares each as stored."""
     (i, j), (label_a, label_b), rows = PAIRS[scenario]
     shadow = run_workflow(W, scenario, mode)
     a, b = run_of(shadow, i), run_of(shadow, j)

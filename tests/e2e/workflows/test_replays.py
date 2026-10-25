@@ -126,7 +126,7 @@ ALONE: dict[tuple[str, str], Alone] = {
         "a method: a run does not record its instance, so `replay_child` cannot call it",
         (_METHOD, 2, None),
     ),
-    (W3, "task_outlives_trigger"): _alone(_LOOP, (_SAME_ALONE.format(1), 1, (0, 0, 1, 0))),
+    (W3, "task_outlives_trigger"): _alone(_LOOP, (_SAME_ALONE.format(1), 0, (0, 0, 0, 0))),
     (W3, "unpropagated_thread"): _alone(_THREAD, (_SAME_ALONE.format(0), 1, (0, 0, 0, 1))),
     (W3, "ledger_unpropagated"): _alone(_THREAD, (_SAME_ALONE.format(0), 1, (0, 0, 0, 2))),
     (W5, "replayed_event"): _alone(

@@ -15,8 +15,9 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import typing
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -343,6 +344,55 @@ def test_a_trigger_cancelled_while_its_start_is_posted_leaves_no_run_current(mon
         assert asyncio.run(main()) == (True, None)
 
 
+def test_an_async_start_that_fails_leaves_its_run_current_in_no_context(monkeypatch):
+    """A run whose start failed posts no end, but a context copied during the start is in no run."""
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    kept: list[contextvars.Context] = []
+
+    class Failing:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            kept.append(contextvars.copy_context())
+            raise ValueError("no start")
+
+    monkeypatch.setattr(state, "reporter", Failing())
+    with pytest.raises(ValueError, match="no start"):
+        asyncio.run(handle_async("ch_1"))
+    assert kept[0].run(sdk.current_run_id) is None
+    assert sdk.current_run_id() is None
+
+
+def test_an_async_run_cancelled_before_its_end_is_posted_is_still_current_in_no_context(
+    monkeypatch,
+):
+    """A task cancelled while its end waits for the executor still ends its run in every context.
+
+    The loop's one executor thread is busy, so the end's post never runs."""
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    posts: list[str] = []
+    monkeypatch.setattr(state, "reporter", _Posts(posts))
+    kept: list[contextvars.Context] = []
+    release = threading.Event()
+
+    @sdk.trigger
+    async def occupies_the_executor() -> None:
+        kept.append(contextvars.copy_context())
+        asyncio.get_running_loop().run_in_executor(None, release.wait, 10)
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
+        task = asyncio.create_task(occupies_the_executor())
+        while not kept:
+            await asyncio.sleep(0)
+        task.cancel()  # waiting behind `release.wait` for the end's post
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        release.set()
+
+    asyncio.run(main())
+    assert posts == ["start"]
+    assert kept[0].run(sdk.current_run_id) is None
+
+
 def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(monkeypatch):
     """An interrupt or cancellation while the end is posted propagates, and the run is left.
 
@@ -492,12 +542,62 @@ def test_a_thread_loses_the_run_unless_its_work_is_propagated(irimi):
     }
 
 
+def _inherit(context: contextvars.Context) -> None:
+    """Start a pool worker in a copy of `context`, as a free-threaded build starts every thread."""
+    for var, value in context.items():
+        var.set(value)
+
+
+def test_a_pool_worker_that_kept_an_ended_run_is_in_no_run_and_its_trigger_starts_its_own(irimi):
+    """A pool worker started inside a run keeps that run's context for its whole life.
+
+    Once the run has ended, work there is in no run, and a trigger called there starts its own run
+    instead of joining the ended one."""
+    with sdk.run("first") as first:
+        assert first is not None
+        pool = ThreadPoolExecutor(1, initializer=_inherit, initargs=(contextvars.copy_context(),))
+        assert pool.submit(sdk.current_run_id).result() == first.id
+    with pool:
+        assert pool.submit(sdk.current_run_id).result() is None
+        second = pool.submit(handle, 2).result()
+        assert pool.submit(sdk.current_run_id).result() is None
+    assert second is not None and second != first.id
+    found = {r.run_id: (r.trigger.name, r.end.outcome) for r in irimi.sdk_runs() if r.trigger}
+    assert found == {first.id: ("first", "ok"), second: (f"{HERE}:handle", "ok")}
+
+
+def test_a_run_is_in_no_context_by_the_time_its_end_is_taken(irimi, monkeypatch):
+    """A run ends before its `ended_at` is read: nothing labelled after that time is in it."""
+    kept: list[contextvars.Context] = []
+    seen: list[str | None] = []
+
+    def clock() -> float:
+        if kept:
+            seen.append(kept[0].run(sdk.current_run_id))
+        return time.time()
+
+    monkeypatch.setattr(runs, "time", types.SimpleNamespace(time=clock))
+    with sdk.run("watched") as watched:
+        assert watched is not None
+        kept.append(contextvars.copy_context())
+        assert kept[0].run(sdk.current_run_id) == watched.id
+    assert seen == [None]
+    [run] = irimi.sdk_runs()
+    assert (run.run_id, run.end.outcome) == (watched.id, "ok")
+
+
 def test_propagate_takes_the_context_when_it_is_called_not_when_its_wrapper_runs(irimi):
+    def in_second(work: Callable[[], str | None]) -> tuple[str | None, str | None]:
+        with sdk.run("second"):
+            return work(), sdk.current_run_id()
+
     with sdk.run("first"):
         first = sdk.current_run_id()
         work = sdk.propagate(sdk.current_run_id)
-    with sdk.run("second"):
-        assert work() == first != sdk.current_run_id()
+        seen, second = contextvars.Context().run(in_second, work)
+    assert seen == first != second
+    # Once that run has ended, the context it took is in no run.
+    assert work() is None
 
 
 def test_one_propagated_wrapper_may_run_on_two_threads_at_once(irimi):
@@ -611,7 +711,9 @@ def test_instrument_is_called_once_per_new_run_and_never_for_a_joined_one(irimi,
 def test_a_start_interrupted_while_posted_leaves_no_run_current(irimi, monkeypatch):
     """An interrupt while a sync start is posted leaves the run, so the next trigger is its own.
 
-    `with` calls no `__exit__` here, so the scope leaves the run itself."""
+    `with` calls no `__exit__` here, so the scope leaves the run itself, and a context copied while
+    the start was posted is in no run either."""
+    kept: list[contextvars.Context] = []
 
     class Interrupted:
         def __init__(self) -> None:
@@ -620,12 +722,14 @@ def test_a_start_interrupted_while_posted_leaves_no_run_current(irimi, monkeypat
         def post(self, run_id: str, action: str, doc: Any) -> None:
             if not self.raised:
                 self.raised = True
+                kept.append(contextvars.copy_context())
                 raise KeyboardInterrupt
 
     monkeypatch.setattr(state, "reporter", Interrupted())
     with pytest.raises(KeyboardInterrupt):
         handle(1)
     assert sdk.current_run_id() is None
+    assert kept[0].run(sdk.current_run_id) is None
     first, second = handle(2), handle(3)
     assert None not in (first, second) and first != second
 
@@ -777,6 +881,35 @@ def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_corouti
         "error",
         ErrorInfo("builtins.ValueError", "bad charge"),
     )
+
+
+async def _settle_keeping(kept: list[contextvars.Context]) -> str | None:
+    kept.append(contextvars.copy_context())  # copied inside the coroutine the run moved into
+    return await _settle("ch_1")
+
+
+@sdk.trigger
+def settle_and_keep(kept: list[contextvars.Context]) -> Any:
+    kept.append(contextvars.copy_context())  # copied before the run moves into the coroutine
+    return _settle_keeping(kept)
+
+
+def test_a_run_handed_to_its_coroutine_ends_in_every_context_copied_before_or_after(irimi):
+    """A run handed to a coroutine is still one run: its end reaches contexts copied on both sides.
+
+    A task the coroutine starts, or one made before the hand-off, is in no run once the run ends."""
+    kept: list[contextvars.Context] = []
+
+    async def main() -> tuple[str | None, str | None]:
+        made = settle_and_keep(kept)
+        before = kept[0].run(sdk.current_run_id)
+        return before, await made
+
+    before, ran_in = asyncio.run(main())
+    assert ran_in is not None and before == ran_in
+    assert [k.run(sdk.current_run_id) for k in kept] == [None, None]
+    [run] = irimi.sdk_runs()
+    assert (run.run_id, run.end.outcome) == (ran_in, "ok")
 
 
 class Handlers:
