@@ -271,12 +271,12 @@ def test_a_gzip_body_that_ends_early_keeps_its_start_and_says_it_was_cut():
 
 
 def test_many_gzip_members_decode_in_time_linear_in_the_body():
-    """Four megabytes of empty members decode in seconds; copying the rest per member takes hours.
+    """19 MiB of empty members decode in about a second; copying the rest per member takes minutes.
 
     zlib copies a member's unread input when it ends, so irimi hands it the body in steps."""
     started = time.monotonic()
-    assert decode_body(gzip.compress(b"") * 200_000, "gzip") == Decoded(b"", False)
-    assert time.monotonic() - started < 30
+    assert decode_body(gzip.compress(b"") * 1_000_000, "gzip") == Decoded(b"", False)
+    assert time.monotonic() - started < 20
 
 
 @pytest.mark.parametrize(

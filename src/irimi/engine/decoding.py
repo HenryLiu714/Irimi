@@ -149,7 +149,7 @@ def _zstd(body: bytes, limit: int) -> tuple[bytes, bool]:
 
 
 _AWS_CHUNKED = "aws-chunked"
-_CHUNK_LINE = re.compile(rb"([0-9A-Fa-f]{1,16})(?:;[^\r\n]*)?\r\n")
+_CHUNK_LINE = re.compile(rb"([0-9A-Fa-f]{1,16})(?:;[^\r\n]*+)?\r\n")
 
 
 def _aws_chunked(body: bytes, limit: int) -> tuple[bytes, bool]:
