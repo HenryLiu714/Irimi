@@ -18,6 +18,7 @@ from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.protocol import trace
 from irimi.protocol.trace import ErrorInfo, Event, RunRecord, StoredRun, ToolCall, Trigger
 from irimi.record import redact
+from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.replay import compare
 from irimi.replay.index import compared_body
@@ -570,7 +571,7 @@ def test_two_writes_whose_bodies_were_cut_are_not_compared_and_not_called_the_sa
             f"  = {TOOL}",
             "",
             "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
-            "(a body was cut when stored)",
+            "(a write was not stored whole)",
         ],
     )
 
@@ -589,7 +590,7 @@ def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(
             f"  = {TOOL}",
             "",
             "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
-            "(a body was cut when stored)",
+            "(a write was not stored whole)",
         ],
     )
     # Nor is a cut write the same as itself: a run compared with itself says so.
@@ -601,8 +602,66 @@ def test_a_cut_pair_whose_lines_read_the_same_is_still_not_compared_and_exits_1(
         f"  = {TOOL}",
         "",
         "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
-        "(a body was cut when stored)",
+        "(a write was not stored whole)",
     ]
+
+
+def _unredactable(text: str) -> Exchange:
+    """A post whose JSON names `text` twice, so the store cannot redact its body and flags it."""
+    post = _post(text)
+    body = b'{"channel": "C1", "text": "", "text": ' + json.dumps(text).encode() + b"}"
+    return dataclasses.replace(post, request=dataclasses.replace(post.request, body=body))
+
+
+def test_two_posts_irimi_could_not_redact_are_not_compared_though_their_lines_read_the_same(
+    home, capfd
+):
+    """A write stored as `<redaction-failed>` is `?`, as a cut one is: its body says nothing.
+
+    The two posts' texts differ, and a run's post is `?` compared with itself too."""
+    a, b = _unredactable("deploy started"), _unredactable("deploy finished")
+    unknown = '○ slack  post to #?: "?"  faked; not checked'
+    not_compared = (
+        "  0 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
+        "(a write was not stored whole)"
+    )
+    code, lines = _compare(home, capfd, [a, _tool()], [b, _tool()])
+    assert (code, lines[3:]) == (
+        1,
+        [
+            f"  ? A {unknown}",
+            f"    B {unknown}",
+            f"  = {TOOL}",
+            "",
+            not_compared.replace("  0 same", "  1 same"),
+        ],
+    )
+    [stored, _] = StoreReader(home / "store").load_run("b").events
+    assert isinstance(stored, Exchange) and stored.flags == (Flag.REDACTION_FAILED,)
+    assert main(["compare", "b", "b"]) == 1
+    assert capfd.readouterr().out.splitlines()[4:] == [
+        f"  ? A {unknown}",
+        f"    B {unknown}",
+        f"  = {TOOL}",
+        "",
+        not_compared.replace("  0 same", "  1 same"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "unredacted",
+    [{"args": redact.REDACTION_FAILED}, {"error": ErrorInfo(redact.REDACTION_FAILED, "boom")}],
+    ids=["args", "error-type"],
+)
+def test_a_stand_in_whose_args_or_error_irimi_could_not_redact_is_not_compared(unredacted):
+    """A tool call's args or error type stored as `<redaction-failed>` say nothing to compare."""
+    tool = dataclasses.replace(_tool(), **unredacted)
+    comparison = compare.compare_runs(_run([tool]), _run([tool]), None)
+    assert (comparison.exit_code, comparison.lines()[-1]) == (
+        exitcodes.DIFFERENT,
+        "  0 same · 0 changed · 0 only in A · 0 only in B · 1 not compared "
+        "(a write was not stored whole)",
+    )
 
 
 def test_a_run_whose_last_event_a_crash_cut_off_says_so_and_is_never_the_same(home, capfd):

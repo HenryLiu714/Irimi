@@ -2,8 +2,8 @@
 
 Actions (`RunSummary.actions`) compare by data: key, `outcome` and `fields`, never printed text.
 The pairing has the most identical actions, then the most pairs of one key, so a refund of
-another amount is one changed write. An action whose body was cut when stored is never `same`,
-and a run the store gave back in part is never the same.
+another amount is one changed write. An action not stored whole is never `same`, and a run the
+store gave back in part is never the same.
 """
 
 import hashlib
@@ -20,6 +20,7 @@ from irimi import services
 from irimi.core import exitcodes
 from irimi.core.exchange import Flag
 from irimi.protocol.trace import JSONValue, RunRecord, StoredRun, canonical_json, trigger_args
+from irimi.record import redact
 from irimi.replay.index import compared_body
 from irimi.report import model
 from irimi.report.model import RunView, WriteEntry
@@ -33,9 +34,11 @@ from irimi.servicemaps import MapIndex, path_params
 EXCHANGE_KEY = "exchange"
 TOOL_KEY = "tool"
 ARGS_DIFFER = "(the triggers' args differ)"
-# Noted for a pair either side of which is flagged `body-truncated`; the flag does not say which
-# body was cut, so a cut response counts too.
-CUT_NOTE = "a body was cut when stored"
+# Noted for a pair either side of which was not stored whole (`Action.cut`).
+CUT_NOTE = "a write was not stored whole"
+# Flags that say part of an exchange was not stored as it was: cut, or stored as
+# `<redaction-failed>`. Neither says which part, so a cut response counts too.
+NOT_WHOLE_FLAGS = frozenset({Flag.BODY_TRUNCATED, Flag.REDACTION_FAILED})
 # Printed under a changed pair whose two writes sent the same, above how their outcomes differ, so
 # a check irimi made in one run and could not in the other does not read as the agent's change.
 SENT_ALIKE = "(both sent the same; only the outcome differs)"
@@ -70,7 +73,9 @@ class Action:
 
     key: tuple[str, ...]  # (EXCHANGE_KEY, service, operation), or (TOOL_KEY, the tool's name)
     sentence: str  # the summary's line for it, without the indent and unescaped
-    cut: bool = False  # its exchange is flagged `body-truncated`
+    # Not stored whole: flagged as `NOT_WHOLE_FLAGS` names, or a tool's args or error type stored
+    # as `<redaction-failed>`.
+    cut: bool = False
     outcome: tuple[Field, ...] = ()
     # None for data JSON cannot hold (nested too deep or not finite); such an action equals nothing.
     fields: tuple[Field, ...] | None = ()
@@ -202,6 +207,7 @@ def actions(run: StoredRun, index: MapIndex | None) -> list[Action]:
             Action(
                 (TOOL_KEY, action.name),
                 tool_write_sentence(action),
+                cut=redact.REDACTION_FAILED in (action.args, error),
                 outcome=_named({"raised": error}),
                 fields=_fields(_spread("args", action.args)),
             )
@@ -261,7 +267,7 @@ def _exchange_action(entry: WriteEntry) -> Action:
     return Action(
         (EXCHANGE_KEY, exchange.service, exchange.operation),
         write_sentence(entry),
-        Flag.BODY_TRUNCATED in exchange.flags,
+        not NOT_WHOLE_FLAGS.isdisjoint(exchange.flags),
         _named(outcome),
         fields,
     )

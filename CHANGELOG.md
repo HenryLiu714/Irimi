@@ -144,6 +144,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - `irimi runs show`, `irimi compare` and `irimi replay` say when a run's last event was cut off
   when stored, by a crash, instead of reading the run as whole. `irimi compare` says when the
   store dropped events of a run, as `irimi replay` does, and both exit 1 for a run read in part.
+- `irimi compare` shows a write that irimi could not redact when storing it as `?`, not compared,
+  as it does a write whose body was cut, instead of comparing its `<redaction-failed>` placeholder.
 
 ## [0.1.0] - 2026-10-20
 

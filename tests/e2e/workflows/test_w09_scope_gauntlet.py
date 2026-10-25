@@ -36,8 +36,10 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     ENTRYPOINT,
     ERROR_KEY,
     HEAD_HOST,
+    LONG_INTEGER,
     LONG_MESSAGE_CHARS,
     OVERSIZED_BODY_BYTES,
+    POST_TEXT_ENV,
     REFUSED_BASE_URL_HOST,
 )
 from tests.e2e.workflows.agents.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
@@ -975,8 +977,8 @@ def test_a_replay_refuses_a_cut_write_again_and_answers_the_rest_from_its_record
     code, out, err = replay.compare_runs(recorded.process_run_id(), replay.process_run_id())
     assert (code, err) == (1, [])
     assert out[-1] == (
-        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
-        "stored)"
+        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a write was not "
+        "stored whole)"
     )
 
 
@@ -1265,8 +1267,8 @@ def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_sa
         f"    B {CUT_REFUND}",
         f"  = {PLAIN_REFUND}",
         "",
-        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a body was cut when "
-        "stored)",
+        "  1 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a write was not "
+        "stored whole)",
     ]
     assert rows_not_shown(other, a, b, out) == []
     # The two refunds the agents sent were not the same: their bodies' hashes differ.
@@ -1277,6 +1279,62 @@ def test_irimi_compare_will_not_call_two_cut_refunds_of_different_amounts_the_sa
         if e["label"] == label
     ]
     assert len(sent) == len(set(sent)) == 2
+
+
+# How the summary prints `unredactable_post`'s post, live and stored: no reader can parse its body.
+UNREADABLE_POST = '○ slack  post to #?: "?"  faked; could not check: irimi made no check read'
+
+
+def _unreadable_post(text: str) -> bytes:
+    """Return the body `unredactable_post` sends for `text`."""
+    return f'{{"channel": "C0GAUNT", "text": "{text}", "n": {LONG_INTEGER}}}'.encode()
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_post_irimi_could_not_redact_is_stored_as_the_placeholder_and_flagged(run_workflow, mode):
+    """Its body is stored as `<redaction-failed>`, never in part, and the exchange says so."""
+    result = run_workflow(W, "unredactable_post", mode)
+    assert check_invariants(result) == []
+    [post] = [e for e in result.stored_events() if isinstance(e, Exchange)]
+    assert (post.request.body, post.flags) == (
+        redact.REDACTION_FAILED.encode(),
+        (Flag.REDACTION_FAILED,),
+    )
+    [sent] = [e for e in result.reported if e.kind == "write"]
+    assert (sent.answered_by, sent.flags) == ("fake-L1", ())
+    assert sent.request.body == _unreadable_post("deploy started")
+
+
+def test_a_post_irimi_could_not_redact_replayed_with_another_text_is_not_called_the_same(
+    replayed,
+):
+    """Both stored bodies are `<redaction-failed>`, which say nothing of the text, so it is `?`.
+
+    The recorded post cannot answer the replay's, which misses and is faked again; the replay
+    exits 1."""
+    recorded, replay = replayed(W, "unredactable_post", {POST_TEXT_ENV: "deploy finished"})
+    assert check_invariants(replay) == []
+    [source] = recorded.stored().list_runs()
+    assert source.trigger is not None and source.trigger.argv is not None
+    [post] = [e for e in replay.reported if e.kind == "write"]
+    assert (post.answered_by, post.flags) == ("fake-L1", (Flag.REPLAY_MISS,))
+    assert post.request.body == _unreadable_post("deploy finished")
+    assert replay.replay_result() == [
+        f"irimi replay · {source.run_id} -> {replay.process_run_id()}",
+        f"  re-ran {shlex.join(source.trigger.argv)} (argv only: environment, cwd and stdin are "
+        "not recorded)",
+        "  agent exited 0",
+        "  diverged at the agent's 1st call: faked         write     POST "
+        "slack.com/api/chat.postMessage -> 200  [replay-miss, redaction-failed]",
+        "  0 from the recording · 1 missed",
+        "",
+        f"  ? A {UNREADABLE_POST}",
+        f"    B {UNREADABLE_POST}",
+        "",
+        "  0 same · 0 changed · 0 only in A · 0 only in B · 1 not compared (a write was not "
+        "stored whole)",
+    ]
+    assert replay.replay is not None and replay.replay.exit_code == 1
 
 
 def test_irimi_compare_of_one_key_used_three_times_under_shadow_against_serve(shared_store_run):

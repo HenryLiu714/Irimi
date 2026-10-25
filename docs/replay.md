@@ -157,7 +157,9 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   removed and one added, even beside a refund one run made twice. Writes of one operation pair
   even when they name different objects, such as updates to two customers. Of pairings as good,
   the earliest writes pair, so of a write one run made twice the later copy is the extra one.
-- **A body cut when stored is `?`.** Such a write is never `same`, even compared with itself.
+- **A write not stored whole is `?`.** A body cut when stored, or a part of the exchange irimi
+  could not redact and stored as `<redaction-failed>` (for a write tool, its arguments or error
+  type), leaves nothing to compare. Such a write is never `same`, even compared with itself.
 - **A run read in part.** A run whose events the store dropped, or whose last line is half
   written (a crash, or a run still being written), is read without them, and the header says so:
   `the store dropped 2 of B's events, which are not compared`, or
@@ -182,7 +184,7 @@ only from the agent.
 | Code | `irimi replay` |
 | --- | --- |
 | 0 | every write is the same |
-| 1 | a write differs or was cut when stored, or a run was read in part |
+| 1 | a write differs or was not stored whole, or a run was read in part |
 | 2 | irimi could not do it: the replay was refused, could not start or call the agent, or its run could not be read back |
 | 130, 143 | stopped by SIGINT or SIGTERM |
 | 141 | whatever read irimi's output went away |
