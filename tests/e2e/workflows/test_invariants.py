@@ -29,9 +29,11 @@ MARKER = "KNOWN" + " BUG"
 MARKER_FORM = re.compile(MARKER + r"(?: \(#\d+(?:, #\d+)*\))?: \S")
 RETIRED_MARKER = "LOOKS" + " WRONG"
 # The scenarios that store an event in a run after its end, so serve prints that run again, late:
-# W7 `hand_off`'s stream is recorded after its run's end.
+# W7 `hand_off`'s stream is recorded after its run's end, and W9 `control_hazards` labels a read
+# with a run it ended by hand.
 PRINTS_LATE = {
     ("w07_streaming_assistant", "hand_off"),
+    ("w09_scope_gauntlet", "control_hazards"),
 }
 # A control post that ends a run, as W9 makes one by hand: `<listener>/_irimi/runs/<id>/end`.
 END_POST = re.compile(r"/_irimi/runs/([^/]+)/end$")

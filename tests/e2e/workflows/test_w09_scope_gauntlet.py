@@ -786,14 +786,16 @@ def test_a_run_ended_over_the_control_endpoint_no_longer_lists_as_incomplete(run
 def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_workflow, mode):
     """A start re-posted after its run ended is answered 204 and dropped by the store.
 
-    The run keeps its first trigger, end and read. It lost nothing, so the drop counts in health's
-    `dropped`, not in the run's `dropped_events`."""
+    The run keeps its first trigger and end, and stores both reads, the one labelled after the
+    re-posted start too, answered live. It lost nothing, so the drop counts in health's `dropped`,
+    not in the run's `dropped_events`."""
     shadow = run_workflow(W, "control_hazards", mode)
     assert shadow.by_label() == {
         "restarted_start": (204, "control"),
         "restarted_read": (200, None),
         "restarted_end": (204, "control"),
         "restarted_again": (204, "control"),
+        "restarted_late_read": (200, None),
         "process_start": (400, "control"),
         "process_tool": (204, "control"),
         "process_end": (400, "control"),
@@ -802,10 +804,13 @@ def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_w
     }
     stored = shadow.stored().load_run("ctl-restarted")
     assert stored.record == sdk_record(shadow, "ctl-restarted", "restarted_start", "restarted_end")
-    assert [event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")]
+    assert [event_line(e) for e in stored.events] == [read_line(f"/v1/charges/{CHARGE}")] * 2
+    assert stored.record.end is not None
+    late = stored.events[-1]
+    assert isinstance(late, Exchange) and late.started_at > stored.record.end.ended_at
     [line] = [f for f in listed(shadow) if f[0] == "ctl-restarted"]
-    assert line[3:] == ["ok", "sdk", "ctl-restarted", "1 exchange", "0 writes"]
-    assert shown(shadow, "ctl-restarted")[:8] == [
+    assert line[3:] == ["ok", "sdk", "ctl-restarted", "2 exchanges", "0 writes"]
+    assert shown(shadow, "ctl-restarted") == [
         "run: ctl-restarted",
         "attribution: sdk",
         "trigger: ctl-restarted",
@@ -814,6 +819,14 @@ def test_a_start_re_posted_after_its_end_is_dropped_and_the_run_kept_whole(run_w
         f"agent version: {AGENT_VERSION}",
         "outcome: ok",
         "",
+        read_line(f"/v1/charges/{CHARGE}"),
+        read_line(f"/v1/charges/{CHARGE}"),
+        "",
+        "irimi shadow · run ctl-restarted · 2 exchanges · <elapsed>",
+        "",
+        "  api.stripe.com  2 reads",
+        "",
+        "  2 exchanges · 2 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
     # An empty queue means the writer is done with the start; `written` is not pinned, since the
     # last tool call's line may not be written yet.
@@ -872,7 +885,8 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     """Under serve, irimi's own run is `unattributed`: tool calls may be posted to it, not its ends.
 
     A start or end for it is refused 400 by the run-id check. The re-posted start is dropped, so
-    the run's printed block is the one `irimi runs show` ends in."""
+    the run's end block holds its first read, and the read labelled after it prints the run again,
+    late, whole, as `irimi runs show` ends."""
     serve = run_workflow(W, "control_hazards", "serve")
     assert [e["id"] for e in serve.events("process_run")] == [trace.UNATTRIBUTED]
     refused = control_refusal(f"{trace.UNATTRIBUTED!r} cannot name a run")
@@ -889,21 +903,31 @@ def test_under_serve_irimis_own_run_is_unattributed_and_only_its_tool_calls_are_
     ]
     assert [r.run_id for r in serve.stored().list_runs()] == ["ctl-restarted"]
     assert [line for line in serve.irimi if line.startswith("--- run ")] == [
-        "--- run ctl-restarted ---"
+        "--- run ctl-restarted ---",
+        "--- run ctl-restarted (late) ---",
     ]
-    [block] = serve.run_blocks().values()
-    assert [ELAPSED.sub(" · <elapsed>", line) for line in block] == [
+    [(at_end, ended), (again, late)] = [
+        ((run_id, is_late), [ELAPSED.sub(" · <elapsed>", line) for line in lines])
+        for run_id, is_late, lines in serve.printed_blocks()
+    ]
+    assert (at_end, again) == (("ctl-restarted", False), ("ctl-restarted", True))
+    assert ended == [
         "irimi shadow · run ctl-restarted · 1 exchange · <elapsed>",
         "",
         "  api.stripe.com  1 read",
         "",
         "  1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
-    [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
-    assert line[3] == "ok"
-    assert shown(serve, "ctl-restarted")[-len(block) :] == [
-        ELAPSED.sub(" · <elapsed>", line) for line in block
+    assert late == [
+        "irimi shadow · run ctl-restarted · 2 exchanges · <elapsed>",
+        "",
+        "  api.stripe.com  2 reads",
+        "",
+        "  2 exchanges · 2 real · 0 answered by irimi (0 faked writes) · 0 sent to targets",
     ]
+    [line] = [f for f in listed(serve) if f[0] == "ctl-restarted"]
+    assert line[3:] == ["ok", "sdk", "ctl-restarted", "2 exchanges", "0 writes"]
+    assert shown(serve, "ctl-restarted")[-len(late) :] == late
 
 
 def argv(result) -> list[str]:
