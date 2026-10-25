@@ -136,12 +136,13 @@ class _ServeOutput:
         finally:
             self._ended.put(None)
             stop_by = monotonic() + SUMMARIES_TIMEOUT_S if self._stop_by is None else self._stop_by
-            printer.join(max(0.0, stop_by - monotonic()))
+            # An idle printer still gets a moment to take the sentinel, so it is not warned about.
+            printer.join(max(SERVE_POLL_S, stop_by - monotonic()))
             if printer.is_alive():
                 self._give_up_summaries()
 
     def _give_up_summaries(self) -> None:
-        """Warn that summaries went unprinted; the printer prints nothing after this."""
+        """Warn that summaries went unprinted; the printer starts no block after this."""
         # A printer stuck writing to a full pipe holds the lock, so it is waited on only briefly.
         locked = self._printing.acquire(timeout=SERVE_POLL_S)
         try:

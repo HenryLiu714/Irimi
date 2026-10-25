@@ -57,8 +57,9 @@ each run's summary under `--- run <id> ---` when the SDK ends the run: the same 
 never holds up the store. A client that refuses irimi's certificate sends no request for a summary
 to show, so serve warns on stderr instead, once per host, naming the CA to point it at. A streamed
 answer is recorded when its stream closes, so a stream the agent leaves open after its run ends is
-stored in the run but missing from the summary already printed. On stop, if any requests named no
-run, irimi prints `stopped · N exchanges not in any run: irimi runs show unattributed`.
+stored in the run but missing from its printed summary, the run as it ended. On stop, if any
+requests named no run, irimi prints `stopped · N exchanges not in any run: irimi runs show
+unattributed`.
 
 ## Binding, stopping and the store
 
