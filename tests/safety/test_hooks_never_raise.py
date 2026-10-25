@@ -289,3 +289,56 @@ def test_no_hook_raises_when_a_collaborator_does(case, tmp_path, monkeypatch):
     """A hook whose collaborator raises returns, and a write is answered by irimi, not forwarded."""
     seen: list[Exchange] = []
     case(tmp_path, monkeypatch, seen)
+
+
+class _RewritingOverlay:
+    """Overlays every read with a body of its own, so its answer is rebuilt from its headers."""
+
+    def __call__(
+        self, write_log, classification, read_request, upstream_response, translated_from=None
+    ):
+        return Overlaid(Response(200, upstream_response.headers, b'{"overlaid": true}'), "full")
+
+    def rewrite(self, write_log, classification, read_request):
+        return None
+
+
+class _ForgingPolicy:
+    name = "forging"
+
+    def decide(self, request, classification, write_log=(), run_id="", target=None):
+        return Decided(
+            Respond(Response(200, (("set-cookie: s=1; etag", '"v1"'),), b"{}"), "fake-L0")
+        )
+
+
+def _request_answered_with_a_name_that_is_not_a_token(tmp_path, monkeypatch, seen):
+    addon = bare_addon(tmp_path, monkeypatch, _ForgingPolicy(), on_exchange=seen.append)
+    flow = bare_flow(b"GET", b"/hello")
+    asyncio.run(addon.request(flow))
+    assert flow.response is not None and flow.response.status_code == 502
+    assert "set-cookie" not in flow.response.headers
+    assert Flag.DECISION_FAILED in seen[-1].flags
+
+
+def _response_overlaid_over_a_value_that_is_not_one_line(tmp_path, monkeypatch, seen):
+    addon = bare_addon(tmp_path, monkeypatch, overlay=_RewritingOverlay(), on_exchange=seen.append)
+    flow = _live_read_after_a_write(addon)
+    flow.response.headers["x-note"] = "a\0b"
+    addon.response(flow)
+    # The overlaid answer cannot be built, so the agent gets the service's answer as it came.
+    assert flow.response.content == b"hello from upstream"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _request_answered_with_a_name_that_is_not_a_token,
+        _response_overlaid_over_a_value_that_is_not_one_line,
+    ],
+    ids=lambda case: case.__name__.lstrip("_"),
+)
+def test_no_hook_raises_on_a_header_irimi_cannot_send(case, tmp_path, monkeypatch):
+    """A header no answer irimi builds may hold is refused, never raised out of the hook."""
+    seen: list[Exchange] = []
+    case(tmp_path, monkeypatch, seen)

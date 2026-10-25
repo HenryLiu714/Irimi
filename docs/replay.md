@@ -112,6 +112,17 @@ A write is never forwarded in a replay. A recorded read made after a recorded wr
 replay has not made is stale: it would show a write that did not happen, so it is never served,
 and reaching one diverges the replay. irimi's check reads are answered from the recording too.
 
+A recorded answer is sent with the headers it was recorded with, less its `Content-Encoding`: the
+body was stored decoded. irimi frames the answer itself, with a `Content-Length` of the body it
+sends, and leaves out the recorded hop-by-hop headers (`Connection`, `Keep-Alive`,
+`Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`). An answer to `HEAD` has no
+body, so it keeps the recorded `Content-Encoding` and `Content-Length`, which say what its `GET`
+would carry; a malformed length, or two that disagree, are left out. A folded value is unfolded.
+A recorded header that still holds a control character other than a tab (a CR or LF would start
+another header), or whose name holds a `:` or anything else a header name cannot, is not sent:
+irimi answers that request with its `502` flagged `decision-failed` instead. An edited recording can hold one, and so can the recording of a
+service that sent one, which the agent got as it came.
+
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes
 never count. The line under it counts the agent's exchanges and read tools answered from the

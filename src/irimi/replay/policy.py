@@ -27,11 +27,11 @@ logger = logging.getLogger(__name__)
 # The recorded answer's flags a replayed answer keeps. Classifier flags come from this request's
 # classification; engine flags (truncation, upstream errors) describe only the recorded exchange.
 _ANSWER_FLAGS = frozenset({Flag.FIXTURE_FAILED, Flag.IDEMPOTENT_REPLAY, Flag.IDEMPOTENCY_CONFLICT})
-# Recorded headers that no longer describe the served body, which was stored decoded and whole
-# (mitmproxy sets the length), plus the recorded stamp, which `wire.stamp` replaces.
-_RECORDED_ONLY_HEADERS = frozenset(
-    {"content-encoding", "content-length", "transfer-encoding", ANSWERED_BY_HEADER}
-)
+# The recorded stamp, which `wire.stamp` replaces, and Content-Encoding, since the body was stored
+# decoded; the engine frames the answer. An answer to HEAD has no body, so its Content-Encoding
+# still says what its GET would carry.
+_RECORDED_ONLY_HEADERS = frozenset({"content-encoding", ANSWERED_BY_HEADER})
+_RECORDED_ONLY_TO_HEAD = frozenset({ANSWERED_BY_HEADER})
 
 
 class ReplayPolicy:
@@ -119,7 +119,7 @@ class ReplayPolicy:
         )
         answer = Decided(
             Respond(
-                _as_served(recorded.response),
+                _as_served(recorded.response, request.method),
                 answered_by,
                 WriteOutcome(recorded.precondition, recorded.would_fire),
                 overlay=recorded.overlay if kind == "read" else None,
@@ -133,7 +133,8 @@ class ReplayPolicy:
         return replace(answer, flags=(*answer.flags, Flag.FROM_RECORDING))
 
 
-def _as_served(recorded: Response) -> Response:
-    """Return the recorded response less `_RECORDED_ONLY_HEADERS`, as a replay sends it."""
-    headers = tuple((k, v) for k, v in recorded.headers if k.lower() not in _RECORDED_ONLY_HEADERS)
+def _as_served(recorded: Response, method: str) -> Response:
+    """Return the recorded response as a replay sends it in answer to `method`."""
+    dropped = _RECORDED_ONLY_TO_HEAD if method == "HEAD" else _RECORDED_ONLY_HEADERS
+    headers = tuple((k, v) for k, v in recorded.headers if k.lower() not in dropped)
     return Response(status=recorded.status, headers=headers, body=recorded.body)

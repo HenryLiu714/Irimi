@@ -2,6 +2,10 @@
 
 The labels are the calls in `tests/e2e/workflows/agents/w08_orchestrator/agent.py`."""
 
+import dataclasses
+import json
+import shutil
+
 import pytest
 import yaml
 
@@ -11,10 +15,13 @@ from irimi.servicemaps.loader import parse_service
 from irimi.servicemaps.model import MapError
 from tests.e2e.workflows.agents.w08_orchestrator.scenarios import (
     DOWN_TARGET,
+    HOP_BY_HOP,
+    STOCK_ETAG,
     SUBAGENT_MAP,
     UNJUSTIFIED_MAP,
 )
 from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.execute import replay, replayed_run_id
 from tests.e2e.workflows.harness.invariants import check_invariants
 
 W = "w08_orchestrator"
@@ -26,6 +33,28 @@ HOST = "subagent.internal"
 
 def decision(result):
     return {k: v for k, v in result.one("decision").items() if k not in ("event", "t")}
+
+
+def framing(result) -> dict[str, tuple]:
+    """Return `{label: (status, Content-Length, Transfer-Encoding, kept alive)}`.
+
+    One per check `revalidate` makes. `http.client` reads no content after a 204, a 304 or an
+    answer to HEAD, so bytes sent after one show as a `connection_broke` label or a wrong next
+    answer."""
+    return {
+        e["label"]: tuple(
+            e.get(k) for k in ("status", "content_length", "transfer_encoding", "kept_alive")
+        )
+        for e in result.events("framing")
+    }
+
+
+def hop_by_hop(result) -> dict[str, list[str]]:
+    """Return `{label: the hop-by-hop headers it carried}`, one per check `revalidate` makes."""
+    return {
+        e["label"]: [name for name in e["names"] if name in HOP_BY_HOP]
+        for e in result.events("framing")
+    }
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -364,6 +393,53 @@ def test_a_down_target_s_closing_lines_say_the_tool_write_did_not_happen_either(
     assert len((bare.state / "decisions.jsonl").read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_live_204_and_304_reach_the_agent_framed_as_the_service_framed_them(run_workflow, mode):
+    """A live 204, 304 and HEAD are forwarded with the service's own head, which irimi keeps.
+
+    The fake internet sends `Content-Length: 0` on the 204 and 304 and the GET's length on the
+    HEAD, and answers HTTP/1.0, which ends the connection after each answer, bare or through
+    irimi. The 204's hop-by-hop headers reach the agent too."""
+    shadow = run_workflow(W, "revalidate", mode)
+    bare = run_workflow(W, "revalidate", "bare")
+    live = {
+        "changes": (204, "0", None, False),
+        "not_modified": (304, "0", None, False),
+        "size": (200, "95", None, False),  # the length of the GET's JSON
+    }
+    assert framing(bare) == framing(shadow) == live
+    assert (
+        hop_by_hop(bare)
+        == hop_by_hop(shadow)
+        == {
+            "changes": sorted(HOP_BY_HOP),
+            "not_modified": [],
+            "size": [],
+        }
+    )
+    assert [e["etag"] for e in shadow.events("framing")] == [None, STOCK_ETAG, STOCK_ETAG]
+    assert {k: v for k, v in shadow.by_label().items() if k in live} == {
+        "changes": (204, None),
+        "not_modified": (304, None),
+        "size": (200, None),
+    }
+    lines = shadow.exchange_lines()
+    assert "real          read      GET subagent.internal/inventory/changes -> 204" in lines
+    assert "real          read      GET subagent.internal/inventory -> 304" in lines
+    assert "real          read      HEAD subagent.internal/inventory -> 200" in lines
+    # The conditional read reached the service as the agent sent it, so the service chose 304.
+    assert [
+        (r.method, r.path, r.headers.get("if-none-match")) for r in shadow.internet.requests(HOST)
+    ] == [
+        ("GET", "/inventory", None),
+        ("GET", "/inventory/changes", None),
+        ("GET", "/inventory", STOCK_ETAG),
+        ("HEAD", "/inventory", None),
+        ("POST", "/quote", None),
+    ]
+    assert decision(shadow) == decision(bare) | {"reservation": decision(shadow)["reservation"]}
+
+
 # ------------------------------------------------------------------------------- replay
 
 
@@ -389,6 +465,138 @@ def test_replaying_the_second_of_two_identical_runs_replays_it_alone(
     ]
     assert replay.internet.requests() == []
     assert replay.exit_code == 0
+
+
+def test_a_replayed_204_and_304_end_at_their_head_on_a_connection_kept_alive(replayed):
+    """A replay answers the 204 and 304 from the recording with no Content-Length and no content.
+
+    The recording holds the service's `Content-Length: 0`. irimi's answers keep the connection
+    open, so each check is read off the same connection right after the one before. The answer
+    to HEAD keeps the recorded GET length, and the 204 none of its hop-by-hop headers, so its
+    `Connection: close` does not end the connection."""
+    recorded, replay = replayed(W, "revalidate")
+    assert framing(replay) == {
+        "changes": (204, None, None, True),
+        "not_modified": (304, None, None, True),
+        "size": (200, "95", None, True),
+    }
+    assert hop_by_hop(replay) == {"changes": [], "not_modified": [], "size": []}
+    assert [e["etag"] for e in replay.events("framing")] == [None, STOCK_ETAG, STOCK_ETAG]
+    checks = ("changes", "not_modified", "size")
+    assert {k: v for k, v in replay.by_label().items() if k in checks} == {
+        "changes": (204, "recording"),
+        "not_modified": (304, "recording"),
+        "size": (200, "recording"),
+    }
+    served = [ex for ex in replay.reported if ex.response.status in (204, 304)]
+    assert [(ex.request.path, ex.flags) for ex in served] == [
+        ("/inventory/changes", ("from-recording",)),
+        ("/inventory", ("from-recording",)),
+    ]
+    stored = [ex for ex in recorded.reported if ex.response.status in (204, 304)]
+    assert [(ex.response.header("content-length"), ex.response.body) for ex in stored] == [
+        ("0", b""),
+        ("0", b""),
+    ]
+    heads = [
+        (ex.response.header("content-length"), ex.response.body, ex.flags)
+        for result in (recorded, replay)
+        for ex in result.reported
+        if ex.request.method == "HEAD"
+    ]
+    assert heads == [("95", b"", ()), ("95", b"", ("from-recording",))]
+    assert replay.internet.requests() == []
+    assert replay.exit_code == 0
+
+
+def _replay_edited(run_workflow, tmp_path, method, status, edit):
+    """Replay a copy of a `revalidate` recording, one answer's headers put through `edit`.
+
+    The answer edited is the one to `method` with `status`."""
+    recorded = run_workflow(W, "revalidate", "shadow")
+    home = tmp_path / "home"
+    shutil.copytree(recorded.home, home)
+    run_id = replayed_run_id(recorded)
+    events = (
+        home / recorded.store_root().relative_to(recorded.home) / "runs" / run_id / "events.jsonl"
+    )
+    edited, changed = [], 0
+    for line in events.read_text().splitlines():
+        event = json.loads(line)
+        answer = (event.get("request", {}).get("method"), event.get("response", {}).get("status"))
+        if event["type"] == "exchange" and answer == (method, status):
+            headers = [edit(k, v) for k, v in event["response"]["headers"]]
+            changed += headers != event["response"]["headers"]
+            event["response"]["headers"] = headers
+        edited.append(json.dumps(event))
+    # Every line is written again, so only the count shows that the answer was edited.
+    assert changed == 1
+    events.write_text("\n".join(edited) + "\n")
+    return replay(dataclasses.replace(recorded, home=home), run_id, tmp_path / "replay")
+
+
+def _forge_in_value(k, v):
+    return [k, f"{v}\r\nSet-Cookie: session=forged" if k == "etag" else v]
+
+
+def _forge_in_name(k, v):
+    return ["set-cookie: session=forged; etag" if k == "etag" else k, v]
+
+
+@pytest.mark.parametrize(
+    ("edit", "reason"),
+    [
+        (_forge_in_value, "the 'etag' header holds a control character"),
+        (_forge_in_name, "the header name 'set-cookie: session=forged; etag' is not a token"),
+    ],
+)
+def test_a_recorded_header_edited_to_hold_crlf_is_refused_not_served(
+    run_workflow, tmp_path, edit, reason
+):
+    """A hand-edited recording whose 304 ETag holds CRLF would add a `Set-Cookie` to its answer.
+
+    So would an ETag renamed to hold a colon. irimi answers that check 502 `decision-failed`
+    instead, and the rest of the replay as before."""
+    replay_run = _replay_edited(run_workflow, tmp_path, "GET", 304, edit)
+    assert check_invariants(replay_run) == []
+    status, length, _, kept_alive = framing(replay_run)["not_modified"]
+    assert (status, int(length) > 0, kept_alive) == (502, True, True)
+    assert all("set-cookie" not in e["names"] for e in replay_run.events("framing"))
+    checks = ("changes", "not_modified", "size")
+    assert {k: v for k, v in replay_run.by_label().items() if k in checks} == {
+        "changes": (204, "recording"),
+        "not_modified": (502, "irimi"),
+        "size": (200, "recording"),
+    }
+    [refused] = [ex.response for ex in replay_run.reported if "decision-failed" in ex.flags]
+    assert refused is not None and refused.status == 502
+    assert json.loads(refused.body)["error"]["message"] == (
+        f"irimi could not decide how to answer this request: {reason}"
+    )
+    assert replay_run.internet.requests() == []
+
+
+def test_a_recorded_head_whose_lengths_disagree_is_replayed_without_one(run_workflow, tmp_path):
+    """httpx, requests and aiohttp refuse an answer naming two lengths, even to HEAD.
+
+    The answer to HEAD may name none, so the replay sends it with none, and the connection is
+    still used for nothing else after it."""
+    replay_run = _replay_edited(
+        run_workflow,
+        tmp_path,
+        "HEAD",
+        200,
+        lambda k, v: [k, f"{v}, 96" if k.lower() == "content-length" else v],
+    )
+    assert check_invariants(replay_run) == []
+    assert framing(replay_run) == {
+        "changes": (204, None, None, True),
+        "not_modified": (304, None, None, True),
+        "size": (200, None, None, True),
+    }
+    [head] = [ex for ex in replay_run.reported if ex.request.method == "HEAD"]
+    assert (head.response.header("content-length"), head.flags) == (None, ("from-recording",))
+    assert replay_run.internet.requests() == []
 
 
 def test_a_target_off_this_machine_is_refused_unless_allowed_by_name(run_workflow):

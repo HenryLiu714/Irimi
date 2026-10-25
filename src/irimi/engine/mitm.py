@@ -12,6 +12,7 @@ import asyncio
 import errno
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Sequence
 
@@ -54,6 +55,28 @@ REQUEST_CUT_KEY = "irimi-request-cut"  # flow.metadata slot: request body cut at
 # Called once from the running hook with (bound port, None) or (None, why it failed).
 OnRunning = Callable[[int | None, EngineStartError | None], None]
 PARSE_FAILED = "could not parse this request"
+
+# A connection's own headers (RFC 9110 7.6.1), and Trailer, whose trailers an answer irimi builds
+# never has. mitmproxy frames that answer itself, and a recorded `Connection: close` would end the
+# agent's connection.
+_HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+# mitmproxy keeps a folded value it read with the fold, which RFC 9112 5.2 makes one space.
+_OBS_FOLD = re.compile(r"\r\n[ \t]+")
+# A control character but a tab (RFC 9110 5.5). mitmproxy writes a header as it is, so a CR or LF
+# would start a header of its own, and httpx refuses a whole answer over a VT or FF.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# A field name (RFC 9110 5.1): a `:` in one would end it early and name another header.
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 def _request_line(flow: http.HTTPFlow) -> Request:
@@ -147,25 +170,64 @@ def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
     return [(k.encode("latin-1"), v.encode("latin-1")) for k, v in headers]
 
 
-def _to_mitm_response(r: Response) -> http.Response:
+def _one_line(headers: Headers) -> Headers:
+    """Return `headers` as each goes out on one line of its own.
+
+    A folded value is unfolded, and the whitespace a service left before a name's colon is
+    dropped, as RFC 9112 5.1 and 5.2 tell a proxy to. Raises ValueError for a name that is not a
+    token, or a value that still holds a control character other than a tab.
+    """
+    unfolded = tuple((k.rstrip(" \t"), _OBS_FOLD.sub(" ", v)) for k, v in headers)
+    for name, value in unfolded:
+        if not _TOKEN.fullmatch(name):
+            raise ValueError(f"the header name {name!r} is not a token")
+        if _CONTROL.search(value):
+            raise ValueError(f"the {name!r} header holds a control character")
+    return unfolded
+
+
+def _to_mitm_response(r: Response, method: str) -> http.Response:
+    """Return `r` as mitmproxy sends it in answer to `method`, framed as HTTP requires.
+
+    Its hop-by-hop headers are dropped. Raises ValueError for a header that is not one line.
+    """
+    fields = _fields(tuple((k, v) for k, v in _one_line(r.headers) if k.lower() not in _HOP_BY_HOP))
+    if wire.ends_at_head(method, r.status):
+        return _head_only(r.status, fields)
     # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
     # (`rot13`, `utf-8`); the body then goes out as it is, as mitmproxy's own fallback sends it.
     try:
-        return http.Response.make(r.status, r.body, _fields(r.headers))
-    except TypeError:
-        fields = [(k, v) for k, v in _fields(r.headers) if k.lower() != b"content-encoding"]
         return http.Response.make(r.status, r.body, fields)
+    except TypeError:
+        kept = [(k, v) for k, v in fields if k.lower() != b"content-encoding"]
+        return http.Response.make(r.status, r.body, kept)
 
 
-def _without_content(response: http.Response) -> http.Response:
-    """Return `response` fit to answer HEAD: no content and no Content-Length.
+def _head_only(status: int, fields: list[tuple[bytes, bytes]]) -> http.Response:
+    """Return an answer that ends at its head: no content, and a Content-Length only to HEAD.
 
-    A HEAD answer carries no content (RFC 9110 9.3.2), which the client would read as its next
-    response, and no Content-Length, since it is not what a GET would get (8.6).
+    An answer whose status a GET would carry content with ends at its head only to HEAD, and keeps
+    the one length its fields name, which says what that GET would carry. A 1xx or 204 must not
+    send one, and a 304 need not (RFC 9110 8.6). The fields are set after `make`, which would give
+    the answer a length of 0.
     """
-    response.raw_content = b""
+    response = http.Response.make(status)
+    response.headers = http.Headers(fields)
+    named = _one_length(response.headers.get_all("content-length"))
     response.headers.pop("content-length", None)
+    if named is not None and not wire.ends_at_head("GET", status):
+        response.headers["content-length"] = named
     return response
+
+
+def _one_length(values: list[str]) -> str | None:
+    """Return the one length `values` name, or None for none, a malformed one or two that differ.
+
+    Clients refuse an answer whose lengths disagree, even to HEAD, and some refuse a repeated one.
+    """
+    lengths = {length.strip() for value in values for length in value.split(",")}
+    named = lengths.pop() if len(lengths) == 1 else ""
+    return named if named.isascii() and named.isdigit() else None
 
 
 def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
@@ -179,7 +241,7 @@ def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
         flow.response.status_code = out.status
         flow.response.headers = http.Headers(fields=_fields(out.headers))
         return
-    flow.response = _to_mitm_response(out)
+    flow.response = _to_mitm_response(out, flow.request.method)
 
 
 def _start_failure(config: EngineConfig, cause: BaseException | None) -> str:
@@ -349,9 +411,7 @@ class IrimiAddon:
         elif isinstance(decision, Respond):
             # A replayed response comes off disk, and mitmproxy may refuse to encode its headers.
             try:
-                built = _to_mitm_response(decision.response)
-                if plan.request.method == "HEAD":
-                    built = _without_content(built)
+                built = _to_mitm_response(decision.response, plan.request.method)
             except Exception as exc:
                 refused = self.session.decision_failed(
                     admitted, exc, request=plan.request, issued=plan.issued
@@ -372,8 +432,7 @@ class IrimiAddon:
     def _answer_now(self, flow: http.HTTPFlow, plan: Plan) -> None:
         """Answer a settled plan, setting the response before recording it."""
         assert isinstance(plan.decision, Respond)
-        response = _to_mitm_response(plan.decision.response)
-        flow.response = _without_content(response) if plan.request.method == "HEAD" else response
+        flow.response = _to_mitm_response(plan.decision.response, plan.request.method)
         self.session.record(self.session.settle(plan))
         self._record_issued(plan)
 
@@ -384,15 +443,13 @@ class IrimiAddon:
 
     def _answer_control(self, flow: http.HTTPFlow, call: ControlCall) -> None:
         """Answer a control request. Never raises (fail-closed hook rule)."""
-        head = call.request.method == "HEAD"
+        method = call.request.method
         try:
             answer = self.control.answer(call.request, whole_body=call.whole_body)
-            response = _to_mitm_response(answer)
+            flow.response = _to_mitm_response(answer, method)
         except Exception:
             logger.exception("irimi: could not send the control endpoint's answer")
-            error = control.INTERNAL_ERROR
-            response = http.Response.make(error.status, error.body, _fields(error.headers))
-        flow.response = _without_content(response) if head else response
+            flow.response = _to_mitm_response(control.INTERNAL_ERROR, method)
 
     def _strip_irimi_headers(self, flow: http.HTTPFlow) -> None:
         """Remove irimi's headers before forwarding: only irimi may set them.

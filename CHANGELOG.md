@@ -128,6 +128,19 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   sends after it ended, and its idempotency key, are no longer kept.
 - irimi's own answer to a `HEAD` carries no body, so the next response on a kept-alive connection
   is read whole.
+- A `204`, `304` or `1xx` that irimi builds (every control endpoint `204`, a replayed answer)
+  carries no `Content-Length`, `Transfer-Encoding` or body. A body, or a chunked answer's last
+  chunk, would be read as the next response on a kept-alive connection.
+- A replayed answer to `HEAD` carries its recorded `Content-Length` and `Content-Encoding`, which
+  say what its `GET` would carry, instead of none. A recorded length that is malformed, or two
+  that disagree, are left out, since clients refuse them.
+- An answer irimi builds (a replayed one, an overlaid read) leaves out the hop-by-hop headers it
+  holds (`Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`,
+  `Upgrade`), so a recorded `Connection: close` no longer ends the agent's connection.
+- A recorded header that holds a control character other than a tab once a folded value is
+  unfolded (a CR or LF would start another header), or whose name is not a token (a `:` in it
+  would name another), is refused with irimi's `502` flagged `decision-failed`, instead of being
+  sent as more than one header.
 - A base-URL request whose path starts with `//` names no host and is refused.
 - An argument no command takes is refused with the usage of the command it was typed to, with a
   hint for `--serve` and for a command typed without its `--`.

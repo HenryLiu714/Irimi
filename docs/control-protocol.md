@@ -44,7 +44,7 @@ The protocol version is `1`.
 | `GET` | `health` | none | `200` with the engine's state |
 
 Every answer carries `Irimi-Answered-By: control` and `Irimi-Protocol: 1`. Every body is a JSON
-object, and so is every answer that has one.
+object, and so is every answer that has one. A `204` has no body and no `Content-Length`.
 
 ### Run ids
 

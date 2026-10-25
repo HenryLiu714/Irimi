@@ -313,11 +313,11 @@ class ShadowSession:
     def settle(self, plan: Plan) -> Exchange:
         """Return a settled plan's exchange; the stamp is on the wire only, not recorded.
 
-        An answer to HEAD is recorded with no content, as it is sent.
+        An answer that ends at its head is recorded with no content, as it is sent.
         """
         assert isinstance(plan.decision, Respond)
         response = plan.decision.response.without_header(ANSWERED_BY_HEADER)
-        if plan.request.method == "HEAD":
+        if wire.ends_at_head(plan.request.method, response.status):
             response = replace(response, body=b"")
         return self._exchange(plan, response, plan.answered_by, plan.flags)
 
