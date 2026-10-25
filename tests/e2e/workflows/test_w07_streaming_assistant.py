@@ -732,6 +732,20 @@ def test_a_replay_of_a_replay_serves_both_streams_with_their_recorded_chunks(rep
     assert stored_streams(second, replayed_run_id(second)) == streams
 
 
+def test_a_streamed_read_back_replays_with_its_chunks_and_still_does_not_show_the_post(replayed):
+    """A replayed read back that streamed keeps its recorded chunks and its `partial` fidelity."""
+    recorded, replay = replayed(W, "streamed_read_back", command=True)
+    assert replay.result(with_time=False) == recorded.result(with_time=False)
+    assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/api/conversations.history" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
+    summary = replay.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == (
+        "    ↳ POST /api/conversations.history did not show it  recorded (partial)"
+    )
+
+
 def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placeholder(replayed):
     """A secret recorded in pieces replays whole, and the request carrying it matches its record.
 
@@ -741,6 +755,9 @@ def test_a_secret_a_stream_sent_in_pieces_replays_whole_and_matches_its_placehol
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
 
 
 def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
@@ -751,6 +768,9 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
     assert replay.result()["caller_text"] == LONG_ANSWER.replace(SECRET, hidden)
     assert replay.exchange_lines() == RECORDED_LINES
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
 
 
 # The replay's flags for a stream recorded cut: a miss, which the fake's fault cuts again. A miss
@@ -838,3 +858,6 @@ def test_a_gzip_encoded_stream_replays_decoded_without_its_encoding(replayed):
     assert replay.result(with_time=False) == recorded.result(with_time=False)
     assert [c["answered_by"] for c in replay.calls("anthropic_stream")] == ["recording"]
     assert replay.internet.requests() == []
+    streams = stored_streams(recorded, replayed_run_id(recorded))
+    assert "/v1/messages" in streams
+    assert stored_streams(replay, replayed_run_id(replay)) == streams
