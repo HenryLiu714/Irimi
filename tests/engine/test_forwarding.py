@@ -232,20 +232,21 @@ def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream
     assert cookies == ["a=1", "b=2"]
 
 
+@pytest.mark.parametrize("framed", [(), (("transfer-encoding", "chunked"),)])
 @pytest.mark.parametrize(("method", "status"), [("GET", 204), ("GET", 304), ("HEAD", 200)])
 def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connection_usable(
-    tmp_path, monkeypatch, method, status
+    tmp_path, monkeypatch, method, status, framed
 ):
-    """A policy's 204, 304 or answer to HEAD has no content and no Content-Length (RFC 9112 6.3).
+    """A policy's 204, 304 or answer to HEAD has no content, Content-Length or Transfer-Encoding.
 
-    Bytes after it would be read as the next response, so the GET sent next on the same
-    connection must get its own answer. Both go in one raw-socket write, and both are recorded
-    as sent."""
+    Bytes after it would be read as the next response (RFC 9112 6.3), a chunked one's last chunk
+    included, so the GET sent next on the same connection must get its own answer. Both go in one
+    raw-socket write, and both are recorded as sent."""
 
     class _Answers(ShadowPolicy):
         def decide(self, request, classification, write_log=(), run_id="", target=None):
             if request.path == "/empty":
-                return Decided(Respond(Response(status, (), b"stray"), "recording"))
+                return Decided(Respond(Response(status, framed, b"stray"), "recording"))
             return Decided(Respond(Response(200, (), b"{}"), "recording"))
 
     eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), policy=_Answers())
@@ -267,6 +268,7 @@ def test_an_answer_that_ends_at_its_head_sends_no_content_and_keeps_the_connecti
     assert head.startswith(f"HTTP/1.1 {status} ".encode())
     assert b"\r\nirimi-answered-by: recording" in head.lower()
     assert b"content-length" not in head.lower()
+    assert b"transfer-encoding" not in head.lower()
     assert after.startswith(b"HTTP/1.1 200 ")
     recorded = [(ex.response.status, ex.response.body) for ex in seen if ex.response is not None]
     assert recorded == [(status, b""), (200, b"{}")]

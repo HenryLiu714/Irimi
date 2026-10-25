@@ -156,22 +156,19 @@ def _to_mitm_response(r: Response, method: str) -> http.Response:
     except TypeError:
         fields = [(k, v) for k, v in _fields(r.headers) if k.lower() != b"content-encoding"]
         built = http.Response.make(r.status, r.body, fields)
-    if wire.ends_at_head(method, r.status):
-        # `make` gives every answer a Content-Length, and mitmproxy ends a chunked 204 or 304
-        # with a last chunk the client reads as its next response.
-        built.headers.pop("transfer-encoding", None)
-        return _without_content(built)
-    return built
+    return _without_content(built) if wire.ends_at_head(method, r.status) else built
 
 
 def _without_content(response: http.Response) -> http.Response:
-    """Return `response` with no content and no Content-Length, for an answer that ends at its head.
+    """Return `response` bare: no content, Content-Length or Transfer-Encoding.
 
     A 1xx or 204 must not send a Content-Length, and a HEAD answer's or a 304's must be what a GET
-    would get (RFC 9110 8.6).
+    would get (RFC 9110 8.6), but `make` gives every answer one. mitmproxy ends a chunked 204 or
+    304 with a last chunk, which the client reads as its next response.
     """
     response.raw_content = b""
     response.headers.pop("content-length", None)
+    response.headers.pop("transfer-encoding", None)
     return response
 
 
