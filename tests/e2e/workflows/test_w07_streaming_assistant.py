@@ -327,6 +327,9 @@ def test_a_key_sent_in_pieces_after_an_escape_in_the_piece_before_is_stored_as_i
     sent_anthropic, sent_openai = (
         handed[path].response.body for path in ("/v1/messages", "/v1/chat/completions")
     )
+    # Anthropic's key is whole in a piece, its `%` in the one before; OpenAI's key is in two.
+    assert ESCAPES_ANSWER[0].endswith("%") and ESCAPES_ANSWER[1] == "20" + SECRET
+    assert [piece for piece in ESCAPES_DECISION if SECRET in piece] == []
     assert [d["delta"]["text"] for d in data_lines(sent_anthropic)[2:-3]] == ESCAPES_ANSWER
     assert chat_deltas(sent_openai) == ESCAPES_DECISION
     assert b'"No summary: \\u0041"' in sent_openai
