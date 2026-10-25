@@ -197,6 +197,17 @@ class FakeStripe:
                 intent["status"] = "canceled"
                 return Resp(200, intent)
             if not found.group(2) and m == "GET":
+                sent = req.query.get("client_secret")
+                known = self.payment_intents.get(pid)
+                # Stripe refuses a retrieve whose client secret is not the intent's own.
+                if sent is not None and known is not None and sent != known["client_secret"]:
+                    return _stripe_error(
+                        400,
+                        "payment_intent_invalid_parameter",
+                        "The client_secret provided does not match the client_secret associated "
+                        "with the PaymentIntent.",
+                        "client_secret",
+                    )
                 return self._one(self.payment_intents, pid, "payment_intent")
         if (found := re.fullmatch(r"/v1/disputes/([^/]+)", p)) and m == "GET":
             return self._one(self.disputes, found.group(1), "dispute")

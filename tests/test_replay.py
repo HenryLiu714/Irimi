@@ -290,6 +290,23 @@ def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_m
     )
 
 
+@pytest.mark.parametrize(("sent", "said"), [(1, "1 request"), (2, "2 requests")])
+def test_a_replay_counts_the_requests_it_sent_live_with_a_placeholder(sent, said):
+    """Each exchange flagged `placeholder-sent` is counted under the totals; the exit code holds."""
+    flagged = [
+        _exchange(f"/v1/charges/{n}", ("replay-miss", "placeholder-sent")) for n in range(sent)
+    ]
+    events = [_exchange("/v1/charges/a", ("replay-miss",)), *flagged]
+    outcome = replay_report.outcome(_run(_record(), []), _new(events), replay_report.Ended(0), None)
+    assert outcome.lines()[3:6] == [
+        f"  0 from the recording · {sent + 1} missed",
+        f"  {said} sent live carried a recorded secret's placeholder, not the secret "
+        "(placeholder-sent)",
+        "",
+    ]
+    assert outcome.exit_code == exitcodes.OK
+
+
 def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_args():
     source = _run(replace(_record(), agent_version="v1"), [])
     other = replace(TRIGGER, args={"ticket": None})

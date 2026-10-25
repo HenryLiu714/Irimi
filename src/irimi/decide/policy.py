@@ -15,11 +15,13 @@ from irimi.core.exchange import (
     AnsweredBy,
     Exchange,
     Flag,
+    Kind,
     OverlayCoverage,
     Precondition,
     Request,
     Response,
     WriteOutcome,
+    is_authored_answer,
 )
 from irimi.decide import idempotency, preconditions
 from irimi.decide.reader import NoReader, Reader
@@ -42,6 +44,10 @@ class Forward:
     def answered_by(self) -> AnsweredBy:
         return "live"
 
+    @property
+    def outcome(self) -> WriteOutcome:
+        return WriteOutcome()
+
 
 @dataclass(frozen=True)
 class Delegate:
@@ -53,6 +59,10 @@ class Delegate:
     @property
     def answered_by(self) -> AnsweredBy:
         return "delegated"
+
+    @property
+    def outcome(self) -> WriteOutcome:
+        return WriteOutcome(self.precondition)
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,12 @@ class Decided:
     decision: Decision
     flags: tuple[Flag, ...] = ()
     issued: tuple[Exchange, ...] = ()
+
+    def is_authored_write(self, kind: Kind) -> bool:
+        """Return True if this answer to a request of `kind` enters the write log once recorded."""
+        decision = self.decision
+        precondition = decision.outcome.precondition
+        return is_authored_answer(kind, decision.answered_by, self.flags, precondition)
 
 
 class AnswerPolicy(Protocol):

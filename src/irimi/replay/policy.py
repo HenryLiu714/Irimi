@@ -14,10 +14,11 @@ from irimi.core.exchange import (
     WriteOutcome,
 )
 from irimi.decide import idempotency, policy
-from irimi.decide.policy import Decided, Respond, ShadowPolicy
+from irimi.decide.policy import Decided, Forward, Respond, ShadowPolicy
 from irimi.decide.targets import ForwardTo
 from irimi.protocol.headers import ANSWERED_BY_HEADER
 from irimi.protocol.trace import JSONValue, ToolCall
+from irimi.record import redact
 from irimi.replay.index import RecordingReader, ReplayIndex
 from irimi.servicemaps import MapIndex
 from irimi.servicemaps.classify import Classification
@@ -41,15 +42,17 @@ class ReplayPolicy:
     | --- | --- | --- |
     | llm; read before the replay diverged | the recorded response | live |
     | read, after the replay diverged | never taken | live, with the overlay |
-    | write, unknown | the recorded answer, at its recorded level | faked; the replay diverges |
+    | write, unknown | the recorded answer, at its recorded level | as shadow mode; see below |
     | telemetry, sent to a target | not looked up, no flag | as in shadow mode |
 
     A write is looked up with its idempotency standing; a checked write is served only while the
-    replay has not diverged. A write miss or a stale recorded answer diverges it; a read or llm
-    miss does not. A recorded read is not overlaid again: its bytes already show the matched
-    writes. A recorded answer keeps its `answered_by`, overlay and minted ids; only `live`
-    becomes `recording` (answered-by header). Misses go to `self.shadow`, whose check
-    reads come from the recording; a lookup that raises is a miss (fail-closed hook rule).
+    replay has not diverged. Only a missed write the write log takes (`Decided.is_authored_write`),
+    or a stale recorded answer, diverges it. A recorded read is not overlaid again: its bytes
+    already show the matched writes. A recorded answer keeps its `answered_by`, overlay and
+    minted ids; only `live` becomes `recording` (answered-by header). Misses go to `self.shadow`,
+    whose check reads come from the recording; a lookup that raises is a miss (fail-closed hook
+    rule). A miss sent live that holds a placeholder is flagged `placeholder-sent`: the service
+    gets the placeholder, never the secret behind it.
     """
 
     name: str = "replay"
@@ -96,10 +99,14 @@ class ReplayPolicy:
             found = None
         if found is not None:
             return found
-        if kind not in LIVE_KINDS:
-            self.recording.diverge()
         decided = self.shadow.decide(request, classification, write_log, run_id, target)
-        return replace(decided, flags=(*decided.flags, Flag.REPLAY_MISS))
+        # Only a write the write log takes is one a later recorded read would show.
+        if decided.is_authored_write(kind):
+            self.recording.diverge()
+        flags = (*decided.flags, Flag.REPLAY_MISS)
+        if isinstance(decided.decision, Forward) and redact.carries_placeholder(request):
+            flags = (*flags, Flag.PLACEHOLDER_SENT)
+        return replace(decided, flags=flags)
 
     def _from_recording(
         self, request: Request, classification: Classification, run_id: str

@@ -9,6 +9,7 @@ Guarantees:
 - Fails closed: a value that cannot be redacted is stored as `<redaction-failed>` and the exchange
   is flagged `redaction-failed`. No public function raises.
 - `is_credential_header` also says which headers a target may not receive.
+- `carries_placeholder` finds a placeholder an agent sends back, as a replay hands them out.
 """
 
 import hmac
@@ -115,9 +116,35 @@ def is_credential_header(name: str) -> bool:
     return lowered in CREDENTIAL_HEADERS or any(m in lowered for m in CREDENTIAL_MARKERS)
 
 
+# A placeholder is `<` + the tag + `:` + that many hex digits of the HMAC + `>`.
+_PLACEHOLDER_TAG = "redacted"
+_PLACEHOLDER_DIGITS = 16
+
+
 def placeholder(key: bytes, value: str) -> str:
     """Return the stored placeholder for `value`, the same for the same value and key."""
-    return "<redacted:" + hmac.new(key, value.encode(), "sha256").hexdigest()[:16] + ">"
+    digest = hmac.new(key, value.encode(), "sha256").hexdigest()[:_PLACEHOLDER_DIGITS]
+    return f"<{_PLACEHOLDER_TAG}:{digest}>"
+
+
+# A placeholder as `placeholder` writes it, URL-encoded as a query or form sends it, or with its
+# angle brackets escaped as some JSON encoders write them.
+_SENT_PLACEHOLDER = re.compile(
+    (
+        rf"(?:<|%3[Cc]|\\u003[Cc]){_PLACEHOLDER_TAG}(?::|%3[Aa])"
+        + "[0-9a-f]" * _PLACEHOLDER_DIGITS
+        + r"(?:>|%3[Ee]|\\u003[Ee])"
+    ).encode()
+)
+
+
+def carries_placeholder(request: Request) -> bool:
+    """Return True if the request's path, query, a header value or its body holds a placeholder."""
+    texts = (request.path, request.query, *(value for _, value in request.headers))
+    parts = (*(text.encode("utf-8", "replace") for text in texts), request.body)
+    # The tag is never escaped, and a substring test is far faster than the pattern on a big body.
+    tag = _PLACEHOLDER_TAG.encode()
+    return any(tag in part and _SENT_PLACEHOLDER.search(part) is not None for part in parts)
 
 
 def load_key(home: Path) -> bytes:

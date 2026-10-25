@@ -105,18 +105,29 @@ own placeholder. Each recorded exchange answers once, in recorded order.
 | --- | --- | --- |
 | an LLM call, or a read before the replay diverged | the recorded response | sent live |
 | a read after the replay diverged | not used | sent live, with the overlay |
-| a write | the recorded answer | faked as shadow mode fakes it; the replay diverges |
+| a write | the recorded answer | as shadow mode answers it; the replay diverges if it joins the write log |
 | telemetry, or a request sent to a target | not looked up | as in shadow mode |
 
 A write is never forwarded in a replay. A recorded read made after a recorded write that the
 replay has not made is stale: it would show a write that did not happen, so it is never served,
-and reaching one diverges the replay. irimi's check reads are answered from the recording too.
+and reaching one diverges the replay. irimi's check reads are answered from the recording too. A
+missed write that shadow mode refuses (the precondition check rejects it, or it reuses an
+idempotency key) or answers as a retry changes nothing a recorded read shows, so it does not
+diverge the replay.
+
+**Placeholders.** A recorded secret comes back to the agent as its placeholder, never the secret:
+in a response, a read tool's result or a trigger's recorded arguments. A missed read or LLM call
+that holds one when it is sent live, as written, URL-encoded or JSON-escaped, is flagged
+`placeholder-sent`, and the report counts them under the totals. The service got the placeholder,
+so its answer (an auth failure, a model's reply to the placeholder) is the replay's doing, not the
+agent's. Pass a trigger's real arguments with `--args`.
 
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes
 never count. The line under it counts the agent's exchanges and read tools answered from the
-recording, and missed. Past the divergence the agent talks to the real services for its reads and
-to the model again.
+recording, and missed. A missed model call is sent to the model, and reads go to the real services
+once a missed write is faked or a stale recorded answer is reached, which may come after the
+divergence the report names.
 
 ### Tools in a replay
 

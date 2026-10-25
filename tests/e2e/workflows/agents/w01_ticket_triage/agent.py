@@ -37,6 +37,12 @@ PROMPTS = {
     "runaway": "You are a refund agent. Keep checking the charge until it changes.",
     "verify": "You are a refund agent. Refund in full; check the charge again before replying.",
     "verify_only": "You are a refund agent. Do not refund; check the charge again before replying.",
+    "verify_twice": "You are a refund agent. Refund in full, then refund again to be sure; check "
+    "the charge again before replying.",
+    "verify_retry": "You are a refund agent. Refund in full, and send the refund twice in case one "
+    "drops; check the charge again before replying.",
+    "verify_resent": "You are a refund agent. Refund in full, then resend it for 100 less at once; "
+    "check the charge again before replying.",
     "late_lookup": "You are a refund agent. Refund in full; only then look the customer up, and "
     "check the charge again before replying.",
 }

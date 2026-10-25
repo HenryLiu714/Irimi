@@ -1,16 +1,19 @@
 """W5 `dispute_responder`: a signed Stripe webhook consumer; the raw body is the trigger's argument.
 
-It tags, alerts and fights each dispute, or refunds one under $20; each event id is handled once."""
+It tags, alerts and fights each dispute, or refunds one under $20; each event id is handled once.
+With `CHECK_INTENT` set, it retrieves each intent again with its `client_secret`."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import os
 import sys
 import threading
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 from tests.e2e.workflows.agents import agentkit, credentials, observe
 
@@ -45,6 +48,8 @@ def _respond(dispute_id: str) -> str:
     intent = agentkit.stripe(
         "GET", f"/v1/payment_intents/{dispute['payment_intent']}", label="payment_intent"
     ).json()
+    if os.environ.get("CHECK_INTENT"):
+        _check_intent(intent)
     customer_id = charge["customer"]
     customer = agentkit.stripe("GET", f"/v1/customers/{customer_id}", label="customer").json()
     evidence = _draft_evidence(dispute, intent, customer)
@@ -77,6 +82,14 @@ def _respond(dispute_id: str) -> str:
             _refunds.append(answer)
     agentkit.obs("event", id=dispute_id, type="charge.dispute.created", action=action)
     return action
+
+
+def _check_intent(intent: dict[str, Any]) -> None:
+    """Retrieve the intent again with its client secret, as the customer's browser would."""
+    query = urlencode({"client_secret": intent["client_secret"]})
+    path = f"/v1/payment_intents/{intent['id']}?{query}"
+    check = agentkit.stripe("GET", path, label="intent_check")
+    agentkit.obs("intent_check", status=check.status)
 
 
 def _draft_evidence(

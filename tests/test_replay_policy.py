@@ -3,7 +3,9 @@
 `_stored` redacts with the live side's key, as the store does. The engine is in `tests/engine`."""
 
 import json
+import re
 from dataclasses import replace
+from urllib.parse import quote_plus
 
 import pytest
 
@@ -15,7 +17,7 @@ from irimi.core.exchange import (
     Precondition,
     Response,
 )
-from irimi.decide.policy import ShadowPolicy
+from irimi.decide.policy import Respond, ShadowPolicy
 from irimi.decide.reader import NoReader, UpstreamReader, answered_as
 from irimi.protocol.trace import ErrorInfo, TelemetrySeen, ToolCall
 from irimi.record import redact
@@ -516,6 +518,52 @@ def test_an_unknown_request_that_misses_is_faked_and_the_replay_diverges():
     assert _answer(policy, _req()).answered_by == "live"
 
 
+# A recorded secret's placeholder, as an answer from the recording hands it to the agent.
+HANDED_BACK = redact.placeholder(KEY, RECORDED_SECRET)
+SENT_BACK = (("authorization", f"Bearer {HANDED_BACK}"),)
+
+
+def test_a_read_sent_live_after_the_replay_diverged_with_a_placeholder_is_flagged():
+    """Past the divergence a recorded read goes live, so the service gets the placeholder."""
+    recording = _recording(_stored(_req(headers=SENT_BACK)))
+    recording.diverge()
+    answer = _answer(ReplayPolicy(recording, SHIPPED), _req(headers=SENT_BACK))
+    assert (answer.answered_by, answer.flags) == (
+        "live",
+        (Flag.REPLAY_MISS, Flag.PLACEHOLDER_SENT),
+    )
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        _req(query="client_secret=" + quote_plus(HANDED_BACK)),
+        _llm(content=f"the key is {HANDED_BACK}"),
+    ],
+    ids=["read", "llm"],
+)
+def test_any_miss_sent_live_with_a_placeholder_is_flagged(request_):
+    """A read or llm call the recording lacks goes live whether or not the replay diverged."""
+    policy = ReplayPolicy(_recording(), SHIPPED)
+    answer = _answer(policy, request_)
+    assert (answer.answered_by, answer.flags) == (
+        "live",
+        (Flag.REPLAY_MISS, Flag.PLACEHOLDER_SENT),
+    )
+    assert not policy.recording.diverged
+
+
+def test_a_placeholder_in_a_request_irimi_answers_itself_is_never_flagged():
+    """A recorded answer and a faked write never leave irimi, so no service gets the placeholder."""
+    policy = ReplayPolicy(_recording(_stored(_req(headers=SENT_BACK))), SHIPPED)
+    assert _answer(policy, _req(headers=SENT_BACK)).flags == (Flag.FROM_RECORDING,)
+    body = f"metadata[note]={quote_plus(HANDED_BACK)}".encode()
+    write = _req("POST", path="/v1/customers/cus_1", body=body, ct=FORM_CONTENT_TYPE)
+    answer = _answer(policy, write)
+    assert (answer.answered_by, answer.response is None) == ("fake-L1", False)
+    assert answer.flags == (Flag.REPLAY_MISS,)
+
+
 def test_a_matched_write_holds_its_idempotency_key_for_a_retry_that_misses():
     """A write answered from the recording still holds its idempotency key in the replay's store."""
     policy = ReplayPolicy(_recording(_recorded_refund()), SHIPPED)
@@ -799,6 +847,73 @@ def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds(
         400,
         (Flag.IDEMPOTENCY_CONFLICT, Flag.REPLAY_MISS),
     )
+
+
+def test_a_missed_write_the_check_rejects_leaves_the_replay_answering_from_the_recording():
+    """A refused write changes nothing a recorded read shows, so the replay does not diverge."""
+    engine = _stored(_req(), CHARGE, issued_by="engine")
+    policy = ReplayPolicy(_recording(engine, _stored(_req())), SHIPPED)
+    refused = _answer(policy, _keyed_refund(9800, "x"))
+    assert (refused.response.status, refused.precondition) == (400, "rejected")
+    assert refused.flags[-1] == Flag.REPLAY_MISS
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "recording"
+
+
+def test_a_missed_retry_leaves_the_replay_answering_from_the_recording():
+    """A retry the recording has no answer for repeats a write already made: no divergence."""
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), shown), SHIPPED)
+    assert Flag.FROM_RECORDING in _answer(policy, _keyed_refund(100, "k1")).flags
+    retry = _answer(policy, _keyed_refund(100, "k1"))
+    assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.REPLAY_MISS)
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "overlay"
+
+
+def test_a_missed_reused_key_leaves_the_replay_answering_from_the_recording():
+    """A key reused for another write is refused as the service would refuse it: no divergence."""
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), shown), SHIPPED)
+    assert Flag.FROM_RECORDING in _answer(policy, _keyed_refund(100, "k1")).flags
+    reused = _answer(policy, _keyed_refund(250, "k1"))
+    assert reused.flags[-2:] == (Flag.IDEMPOTENCY_CONFLICT, Flag.REPLAY_MISS)
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "overlay"
+
+
+def _every_unsafe_request():
+    """Each unsafe method on each shipped route's path, and on a host no map names."""
+    for service_map in servicemaps.loader.load_shipped():
+        host = min(service_map.hosts).replace("*.", "a.")
+        for route in service_map.routes:
+            path = re.sub(r"\{[^}]*\}", "x1", route.path)
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                yield _req(method, host, path, b"a=1", FORM_CONTENT_TYPE)
+    yield _req("POST", "internal.example", "/jobs", b"a=1", FORM_CONTENT_TYPE)
+
+
+@pytest.mark.parametrize("state", ["fresh", "diverged", "unsearchable"])
+def test_a_replay_answers_every_write_itself_whatever_the_recording_holds(state, monkeypatch):
+    """No write or unknown request is forwarded, before or after the replay diverges."""
+    recording = _recording(_recorded_refund(), _stored(_req()))
+    if state == "diverged":
+        recording.diverge()
+    elif state == "unsearchable":
+        monkeypatch.setattr(recording, "answer_for", lambda *args: 1 / 0)
+    policy = ReplayPolicy(recording, SHIPPED)
+    asked: dict[str, int] = {}
+    for request in _every_unsafe_request():
+        cls = classify(request, SHIPPED)
+        if cls.kind in LIVE_KINDS:
+            continue
+        decision = policy.decide(request, cls, (), "rep").decision
+        assert isinstance(decision, Respond), (request.method, request.host, request.path)
+        assert decision.answered_by != "live"
+        asked[cls.kind] = asked.get(cls.kind, 0) + 1
+    # Both kinds that are never forwarded, each over many routes.
+    assert sorted(asked) == ["unknown", "write"]
+    assert min(asked.values()) >= 5 and sum(asked.values()) > 50
 
 
 def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():

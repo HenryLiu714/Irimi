@@ -71,12 +71,19 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - **A command is the whole process.** With `-- COMMAND`, every run the process starts is the one
   replay, answered from the one recorded run, so a process that held several runs shows the
   others' writes as added.
-- **A divergence makes the rest live.** Past it, the agent's reads go to the real services and the
-  model is asked again.
+- **A divergence makes the rest live.** Past a missed write irimi fakes, or a recorded read that
+  would show a write the replay has not made, the agent's reads go to the real services, and a
+  model call the recording does not hold is sent to the model.
 - **No provenance between tools and requests.** A stored tool call names none of the exchanges its
   body made, so a replay that answers the tool takes the exchanges recorded within its span as its
   body's.
-- **Redacted values stay redacted.** A recorded secret comes back as its placeholder.
+- **Redacted values stay redacted.** A recorded secret comes back as its placeholder, and a
+  request sent live with it fails as a wrong credential would. irimi flags it `placeholder-sent`
+  when the placeholder is written as is, URL-encoded or JSON-escaped, not inside a Basic
+  credential's base64 or another encoding, and not when a tool sends it outside the proxy. A
+  placeholder sent back in a field redaction hides whole (`client_secret`, `access_token` and the
+  like) is stored as a placeholder of its own, so that request misses even where the recording
+  made it: a read or LLM call goes live, and a write is faked.
 - **One run, one store.** The run replayed and its replay share one store, serve mode cannot
   replay, and each `irimi replay` replays one run.
 - **Compare sees writes, not reads.** Two writes made at once can finish in either order, so a run

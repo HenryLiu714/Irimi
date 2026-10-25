@@ -9,8 +9,9 @@ from irimi.core.exchange import Exchange
 from irimi.record import redact
 from irimi.report.model import run_elapsed
 from tests.e2e.workflows.harness.compare import compare, rows_not_shown
+from tests.e2e.workflows.harness.internet import Req
 from tests.e2e.workflows.harness.invariants import check_invariants
-from tests.e2e.workflows.harness.services import client_secret
+from tests.e2e.workflows.harness.services import FakeStripe, client_secret
 
 W = "w05_dispute_responder"
 AGENT = "tests.e2e.workflows.agents.w05_dispute_responder.agent"
@@ -251,3 +252,60 @@ def test_the_raw_webhook_body_is_revived_as_bytes_and_the_trigger_replays(replay
         "  no divergence: every call was answered from the recording",
     ]
     assert replay.internet.requests() == []
+
+
+def test_the_fake_stripe_refuses_only_a_client_secret_that_is_not_the_intent_s():
+    """The refusal the replay below reads is Stripe's to a wrong client secret, not to any."""
+    stripe = FakeStripe()
+    stripe.add_payment_intent("pi_BIG")
+
+    def retrieve(query: dict[str, str]) -> int:
+        headers = {"authorization": "Bearer sk_test_fake"}
+        req = Req("GET", "api.stripe.com", "/v1/payment_intents/pi_BIG", query, headers, b"", False)
+        return stripe.handle(req).status
+
+    owned, other = client_secret("pi_BIG"), "<redacted:0123456789abcdef>"
+    statuses = [retrieve(q) for q in ({}, {"client_secret": owned}, {"client_secret": other})]
+    assert statuses == [200, 200, 400]
+
+
+def test_a_replay_that_sends_the_recorded_client_secret_live_flags_its_placeholder(replayed):
+    """A replayed agent gets the intent's `client_secret` as its placeholder, never the secret.
+
+    With `CHECK_INTENT` it sends it back to retrieve the intent, a read the recording lacks, so the
+    read goes live with the placeholder, Stripe refuses it, and the replay flags and counts it."""
+    recorded, replay = replayed(W, "over_threshold", {"CHECK_INTENT": "1"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("dispute", 200, "recording"),
+        ("charge", 200, "recording"),
+        ("payment_intent", 200, "recording"),
+        ("intent_check", 400, None),
+        ("customer", 200, "recording"),
+        ("llm", 200, "recording"),
+        ("tag_customer", 200, "fake-L1"),
+        ("slack.com/api/chat.postMessage", 200, "fake-L1"),
+    ]
+    path = "/v1/payment_intents/pi_BIG"
+    hidden = redact.placeholder(redact.load_key(replay.home), client_secret("pi_BIG"))
+    handed, checked = (ex for ex in replay.reported if ex.request.path == path)
+    assert handed.response is not None and handed.flags == ("from-recording",)
+    assert json.loads(handed.response.body)["client_secret"] == hidden
+    assert (checked.answered_by, checked.flags) == ("live", ("replay-miss", "placeholder-sent"))
+    [sent] = replay.internet.requests()
+    assert (sent.method, sent.path, sent.query) == ("GET", path, {"client_secret": hidden})
+    # KNOWN BUG: a placeholder sent back in a secret-named field is stored as its own placeholder,
+    # so a replay misses that request even where its recording made it.
+    events = replay.stored().load_run(replay.process_run_id()).events
+    [stored] = [e for e in events if isinstance(e, Exchange) and e.request.query]
+    again = redact.placeholder(redact.load_key(replay.home), hidden)
+    assert stored.request.query == f"client_secret={again}"
+    assert [e["status"] for e in replay.events("intent_check")] == [400]
+    shown = f"real          read      GET api.stripe.com{path} -> 400"
+    assert replay.replay_result()[2:5] == [
+        f"  diverged at the agent's 4th call: {shown}  [replay-miss, placeholder-sent]",
+        "  7 from the recording · 1 missed",
+        "  1 request sent live carried a recorded secret's placeholder, not the secret "
+        "(placeholder-sent)",
+    ]
+    assert replay.exit_code == recorded.exit_code == 0

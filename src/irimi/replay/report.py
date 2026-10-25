@@ -1,9 +1,11 @@
 """Build what `irimi replay` reports once a replay has run. Pure: runs nothing, prints nothing.
 
 - The divergence point is the first agent call the recording did not answer (a `replay-miss`
-  exchange or a read tool that ran for real); only a missed write sets `ReplayIndex.diverged`.
+  exchange or a read tool that ran for real); only a missed write the write log takes, or a
+  stale recorded answer, sets `ReplayIndex.diverged`.
 - Calls within a read tool's span belong to its body and are not counted (`made_within`).
 - The exit code is `irimi compare`'s, never the agent's; with dropped events it is never OK.
+- A request sent live with a recorded secret's placeholder (`placeholder-sent`) is counted.
 """
 
 import shlex
@@ -55,6 +57,7 @@ class ReplayReport:
     never_made: int
     comparison: compare.Comparison
     rerun: tuple[str, ...] | None = None  # the command line a process run's replay ran again
+    placeholders_sent: int = 0  # the replay's exchanges flagged `placeholder-sent`
 
     @property
     def exit_code(self) -> int:
@@ -80,6 +83,12 @@ class ReplayReport:
             lines.append(f"  {compare.ARGS_DIFFER}")
         lines.append(f"  {self._diverged()}")
         lines.append(f"  {self.answered} from the recording · {self.missed} missed")
+        if self.placeholders_sent:
+            n = self.placeholders_sent
+            lines.append(
+                f"  {n} request{'' if n == 1 else 's'} sent live carried a recorded secret's "
+                f"placeholder, not the secret ({Flag.PLACEHOLDER_SENT})"
+            )
         for record, which in ((self.source, "recording"), (self.replayed, "replay")):
             if record.dropped_events:
                 lines.append(
@@ -142,6 +151,9 @@ def outcome(
     recorded = sum(_looked_up(e) and not _in_a_tool(e, tools) for e in source.events)
     never_made = recorded - answered - unasked
     comparison = compare.compare_runs(source, replayed, index)
+    sent = sum(
+        isinstance(e, Exchange) and Flag.PLACEHOLDER_SENT in e.flags for e in replayed.events
+    )
     return ReplayReport(
         source.record,
         replayed.record,
@@ -152,6 +164,7 @@ def outcome(
         max(never_made, 0),
         comparison,
         rerun,
+        placeholders_sent=sent,
     )
 
 
