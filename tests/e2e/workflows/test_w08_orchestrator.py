@@ -30,13 +30,13 @@ def decision(result):
 
 
 def framing(result) -> dict[str, tuple]:
-    """Return `{label: (status, Content-Length, Transfer-Encoding, body bytes, kept alive)}`.
+    """Return `{label: (status, Content-Length, Transfer-Encoding, kept alive)}`.
 
-    One per check `revalidate` makes; a broken connection shows as its own label."""
+    One per check `revalidate` makes. `http.client` reads no content after a 204 or 304, so bytes
+    sent after one show as a `connection_broke` label or a wrong next answer."""
     return {
         e["label"]: tuple(
-            e.get(k)
-            for k in ("status", "content_length", "transfer_encoding", "body", "kept_alive")
+            e.get(k) for k in ("status", "content_length", "transfer_encoding", "kept_alive")
         )
         for e in result.events("framing")
     }
@@ -387,8 +387,8 @@ def test_a_live_204_and_304_reach_the_agent_framed_as_the_service_framed_them(ru
     shadow = run_workflow(W, "revalidate", mode)
     bare = run_workflow(W, "revalidate", "bare")
     live = {
-        "changes": (204, "0", None, 0, False),
-        "not_modified": (304, "0", None, 0, False),
+        "changes": (204, "0", None, False),
+        "not_modified": (304, "0", None, False),
     }
     assert framing(bare) == framing(shadow) == live
     assert [e["etag"] for e in shadow.events("framing")] == [None, STOCK_ETAG]
@@ -445,8 +445,8 @@ def test_a_replayed_204_and_304_end_at_their_head_on_a_connection_kept_alive(rep
     open, so the 304 is read off the same connection right after the 204's head."""
     recorded, replay = replayed(W, "revalidate")
     assert framing(replay) == {
-        "changes": (204, None, None, 0, True),
-        "not_modified": (304, None, None, 0, True),
+        "changes": (204, None, None, True),
+        "not_modified": (304, None, None, True),
     }
     assert [e["etag"] for e in replay.events("framing")] == [None, STOCK_ETAG]
     assert {k: v for k, v in replay.by_label().items() if k in ("changes", "not_modified")} == {

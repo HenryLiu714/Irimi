@@ -411,7 +411,7 @@ def _end(
 def _post(control: str, run_id: str, action: str, doc: dict[str, Any], label: str) -> Response:
     """Make one control post, logging the body so a test can compare it with the stored record.
 
-    The answer's Content-Length is logged too: a 204 may not carry one."""
+    The answer's Content-Length is logged too: a 204 must not carry one."""
     agentkit.obs("posted", label=label, run=run_id, action=action, body=doc)
     resp = http("POST", f"{control}/runs/{run_id}/{action}", json_body=doc, label=label)
     agentkit.obs("framing", label=label, content_length=resp.headers.get("content-length"))

@@ -129,8 +129,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - irimi's own answer to a `HEAD` carries no body, so the next response on a kept-alive connection
   is read whole.
 - A `204`, `304` or `1xx` that irimi builds (every control endpoint `204`, a replayed answer)
-  carries no `Content-Length`, `Transfer-Encoding` or body, so the next response on a kept-alive
-  connection is read whole.
+  carries no `Content-Length`, `Transfer-Encoding` or body. A body, or a chunked answer's last
+  chunk, would be read as the next response on a kept-alive connection.
 - A base-URL request whose path starts with `//` names no host and is refused.
 - An argument no command takes is refused with the usage of the command it was typed to, with a
   hint for `--serve` and for a command typed without its `--`.

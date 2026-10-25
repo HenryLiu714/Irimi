@@ -65,7 +65,7 @@ def revalidate(service: str, etag: str, headers: dict[str, str]) -> None:
             url = service + path
             conn.request("GET", url if proxy else path, headers={**headers, **extra})
             resp = conn.getresponse()
-            body = resp.read()
+            resp.read()
             answered_by = resp.getheader("Irimi-Answered-By")
             agentkit.obs_http("GET", url, label, status=resp.status, answered_by=answered_by)
             agentkit.obs(
@@ -75,7 +75,6 @@ def revalidate(service: str, etag: str, headers: dict[str, str]) -> None:
                 content_length=resp.getheader("Content-Length"),
                 transfer_encoding=resp.getheader("Transfer-Encoding"),
                 etag=resp.getheader("ETag"),
-                body=len(body),
                 kept_alive=conn.sock is not None,
             )
     except (OSError, HTTPException) as err:
