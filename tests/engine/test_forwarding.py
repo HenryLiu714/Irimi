@@ -6,7 +6,9 @@ import json
 import socket
 from pathlib import Path
 
+import httpx
 import pytest
+import requests
 
 from irimi.config import ca, paths
 from irimi.core.exchange import Flag, Response
@@ -244,11 +246,8 @@ HOP_BY_HOP = (
 )
 
 
-def _on_one_connection(tmp_path, monkeypatch, first, method="GET"):
-    """Return the raw answer to `method /first`, the one to a GET after it, and what was recorded.
-
-    Both requests go in one raw-socket write. The policy answers `/first` with `first` and the GET
-    with `{}`, so the connection must stay open, and `first` end where it says, for `{}` to come."""
+def _answering(first):
+    """Return a policy that answers `/first` with `first`, and any other path with `{}`."""
 
     class _Answers(ShadowPolicy):
         def decide(self, request, classification, write_log=(), run_id="", target=None):
@@ -256,7 +255,15 @@ def _on_one_connection(tmp_path, monkeypatch, first, method="GET"):
                 return Decided(Respond(first, "recording"))
             return Decided(Respond(Response(200, (), b"{}"), "recording"))
 
-    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), policy=_Answers())
+    return _Answers()
+
+
+def _on_one_connection(tmp_path, monkeypatch, first, method="GET"):
+    """Return the raw answer to `method /first`, the one to a GET after it, and what was recorded.
+
+    Both requests go in one raw-socket write. The policy answers `/first` with `first` and the GET
+    with `{}`, so the connection must stay open, and `first` end where it says, for `{}` to come."""
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), policy=_answering(first))
     sent = "".join(
         f"{verb} http://127.0.0.1:9/{path} HTTP/1.1\r\nhost: 127.0.0.1:9\r\n\r\n"
         for verb, path in ((method, "first"), ("GET", "after"))
@@ -326,11 +333,22 @@ def test_a_policy_s_connection_close_does_not_end_the_agent_s_connection(tmp_pat
     assert seen[0].response is not None and seen[0].response.body == b"stray"
 
 
+FORGED_VALUE = ("etag", '"v1"\r\nSet-Cookie: session=forged')
+FORGED_NAME = ("set-cookie: session=forged; etag", '"v1"')
+
+
+@pytest.mark.parametrize(
+    ("header", "reason"),
+    [
+        (FORGED_VALUE, "the 'etag' header holds a CR, LF or NUL"),
+        (FORGED_NAME, "the header name 'set-cookie: session=forged; etag' is not a token"),
+    ],
+)
 def test_an_answer_with_a_header_that_is_not_one_line_is_refused_as_irimi_s_502(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, header, reason
 ):
-    """A header holding CRLF would add a header of its own to the answer; irimi refuses it."""
-    first = Response(200, (("etag", '"v1"\r\nSet-Cookie: session=forged'),), b"stray")
+    """A header holding CRLF, or a name holding a colon, would add a header of its own."""
+    first = Response(200, (header,), b"stray")
     head, after, seen = _on_one_connection(tmp_path, monkeypatch, first)
     assert head.startswith(b"HTTP/1.1 502 ")
     assert b"set-cookie" not in head.lower()
@@ -338,11 +356,69 @@ def test_an_answer_with_a_header_that_is_not_one_line_is_refused_as_irimi_s_502(
     error = json.loads(after.split(b"HTTP/1.1 200 ", 1)[0])["error"]
     assert error == {
         "type": "irimi_decision_failed",
-        "message": "irimi could not decide how to answer this request: "
-        "the 'etag' header holds a CR, LF or NUL",
+        "message": f"irimi could not decide how to answer this request: {reason}",
     }
     assert seen[0].response is not None and seen[0].response.status == 502
     assert Flag.DECISION_FAILED in seen[0].flags
+
+
+def _with_httpx(port, method):
+    """Return httpx's answer to `method /first`, the GET after it, and if one connection did."""
+    with httpx.Client(proxy=f"http://127.0.0.1:{port}", timeout=10) as client:
+        first = client.request(method, "http://127.0.0.1:9/first")
+        after = client.get("http://127.0.0.1:9/after")
+        one = first.extensions["network_stream"] is after.extensions["network_stream"]
+        return first.status_code, first.headers, after.content, one
+
+
+def _with_requests(port, method):
+    """Return requests' answer to `method /first`, the GET after it, and if one connection did."""
+    with requests.Session() as session:
+        session.proxies = {"http": f"http://127.0.0.1:{port}"}
+        first = session.request(method, "http://127.0.0.1:9/first", timeout=10)
+        after = session.get("http://127.0.0.1:9/after", timeout=10)
+        managers = session.adapters["http://"].proxy_manager.values()  # type: ignore[attr-defined]
+        # urllib3's pool container refuses to be iterated, but lists its keys.
+        opened = sum(m.pools[key].num_connections for m in managers for key in list(m.pools.keys()))
+        return first.status_code, first.headers, after.content, opened == 1
+
+
+@pytest.mark.parametrize("client", [_with_httpx, _with_requests])
+@pytest.mark.parametrize(
+    ("method", "first", "status", "length"),
+    [
+        ("HEAD", Response(200, (("content-length", "42"),), b""), 200, "42"),
+        (
+            "HEAD",
+            Response(200, (("content-length", "42"), ("content-length", "43")), b""),
+            200,
+            None,
+        ),
+        ("GET", Response(204, HOP_BY_HOP, b"stray"), 204, None),
+        ("GET", Response(200, HOP_BY_HOP, b"stray"), 200, "5"),
+        ("GET", Response(200, (FORGED_VALUE,), b"{}"), 502, "149"),
+        ("GET", Response(200, (FORGED_NAME,), b"{}"), 502, "175"),
+        ("HEAD", Response(200, (FORGED_NAME,), b""), 502, None),
+    ],
+)
+def test_real_clients_read_a_rebuilt_answer_and_the_next_on_one_connection(
+    tmp_path, monkeypatch, client, method, first, status, length
+):
+    """httpx and requests parse each answer irimi builds, with no header it did not mean to send.
+
+    The GET after it is read off the same connection."""
+    eng, _, stop = start_engine(engine_config(tmp_path, monkeypatch), policy=_answering(first))
+    try:
+        got, headers, after, one_connection = client(eng.listen_port(), method)
+    finally:
+        stop()
+    assert (got, headers.get("content-length"), after, one_connection) == (
+        status,
+        length,
+        b"{}",
+        True,
+    )
+    assert "set-cookie" not in headers
 
 
 @pytest.mark.parametrize("encoding", ["identity", "rot13"])
@@ -400,13 +476,62 @@ def test_a_rebuilt_answer_is_built_without_hop_by_hop_headers(method, status, bo
         ("etag", '"v1"\nSet-Cookie: session=forged'),
         ("etag", '"v1"\r'),
         ("etag", '"v1"\0'),
-        ("etag\r\nSet-Cookie", "session=forged"),
     ],
 )
 def test_a_header_that_is_not_one_line_is_never_built(method, name, value):
     """mitmproxy writes a header as it is, so a CR or LF would start another (RFC 9110 5.5)."""
     with pytest.raises(ValueError, match="header holds a CR, LF or NUL"):
         mitm._to_mitm_response(Response(200, ((name, value),), b"{}"), method)
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "set-cookie: session=forged; etag",
+        "etag\r\nSet-Cookie",
+        "x note",
+        " etag",
+        "",
+        "etag\0",
+        "x/y",
+    ],
+)
+def test_a_header_name_that_is_not_a_token_is_never_built(method, name):
+    """A `:` would end the name early, so a stored name could add a header of its own."""
+    with pytest.raises(ValueError, match="is not a token"):
+        mitm._to_mitm_response(Response(200, ((name, "1"),), b"{}"), method)
+
+
+def test_the_whitespace_before_a_header_name_s_colon_is_dropped():
+    """mitmproxy keeps it in the name it read, and RFC 9112 5.1 tells a proxy to drop it."""
+    headers = (("x-note \t", "a"), ("Connection ", "close"))
+    built = mitm._to_mitm_response(Response(200, headers, b"{}"), "GET")
+    assert built.headers.fields == ((b"x-note", b"a"), (b"content-length", b"2"))
+
+
+@pytest.mark.parametrize(
+    ("named", "sent"),
+    [
+        (("42",), "42"),
+        (("42", "42"), "42"),
+        (("42, 42",), "42"),
+        (("42", "43"), None),
+        (("42, 43",), None),
+        (("abc",), None),
+        (("-1",), None),
+        (("",), None),
+        (("4\xc2\xb2",), None),  # `4²` in UTF-8, as mitmproxy reads it: a digit to `isdigit`
+    ],
+)
+def test_an_answer_to_head_names_one_length_or_none(named, sent):
+    """httpx, requests and aiohttp refuse an answer whose lengths disagree, even to HEAD.
+
+    aiohttp refuses a repeated one too, so one that agrees is sent once."""
+    headers = (*(("content-length", n) for n in named), ("etag", '"v1"'))
+    built = mitm._to_mitm_response(Response(200, headers, b""), "HEAD")
+    assert built.headers.get_all("content-length") == ([] if sent is None else [sent])
+    assert built.headers.get("etag") == '"v1"'
 
 
 def test_a_header_value_may_hold_a_tab():

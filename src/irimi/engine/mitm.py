@@ -74,6 +74,8 @@ _HOP_BY_HOP = frozenset(
 _OBS_FOLD = re.compile(r"\r\n[ \t]+")
 # mitmproxy writes a header as it is, so any of these would start a header of its own.
 _BREAKS_LINE = re.compile(r"[\r\n\0]")
+# A field name (RFC 9110 5.1): a `:` in one would end it early and name another header.
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 def _request_line(flow: http.HTTPFlow) -> Request:
@@ -168,10 +170,17 @@ def _fields(headers: Headers) -> list[tuple[bytes, bytes]]:
 
 
 def _one_line(headers: Headers) -> Headers:
-    """Return `headers` with each folded value unfolded; raise ValueError for one not one line."""
-    unfolded = tuple((k, _OBS_FOLD.sub(" ", v)) for k, v in headers)
+    """Return `headers` as each goes out on one line of its own.
+
+    A folded value is unfolded, and the whitespace a service left before a name's colon is
+    dropped, as RFC 9112 5.1 and 5.2 tell a proxy to. Raises ValueError for a name that is not a
+    token, or a value that still holds a CR, LF or NUL.
+    """
+    unfolded = tuple((k.rstrip(" \t"), _OBS_FOLD.sub(" ", v)) for k, v in headers)
     for name, value in unfolded:
-        if _BREAKS_LINE.search(name) or _BREAKS_LINE.search(value):
+        if not _TOKEN.fullmatch(name):
+            raise ValueError(f"the header name {name!r} is not a token")
+        if _BREAKS_LINE.search(value):
             raise ValueError(f"the {name!r} header holds a CR, LF or NUL")
     return unfolded
 
@@ -181,7 +190,7 @@ def _to_mitm_response(r: Response, method: str) -> http.Response:
 
     Its hop-by-hop headers are dropped. Raises ValueError for a header that is not one line.
     """
-    fields = _fields(_one_line(tuple((k, v) for k, v in r.headers if k.lower() not in _HOP_BY_HOP)))
+    fields = _fields(tuple((k, v) for k, v in _one_line(r.headers) if k.lower() not in _HOP_BY_HOP))
     if wire.ends_at_head(method, r.status):
         return _head_only(r.status, fields, method)
     # `make` re-encodes per `content-encoding` and lets a text codec's TypeError through
@@ -196,15 +205,27 @@ def _to_mitm_response(r: Response, method: str) -> http.Response:
 def _head_only(status: int, fields: list[tuple[bytes, bytes]], method: str) -> http.Response:
     """Return an answer that ends at its head: no content, and a Content-Length only to HEAD.
 
-    An answer to HEAD keeps the length its fields name, which says what its GET would carry; a 1xx
-    or 204 must not send one, and a 304 need not (RFC 9110 8.6). The fields are set after `make`,
-    which would give the answer a length of 0.
+    An answer to HEAD keeps the one length its fields name, which says what its GET would carry; a
+    1xx or 204 must not send one, and a 304 need not (RFC 9110 8.6). The fields are set after
+    `make`, which would give the answer a length of 0.
     """
     response = http.Response.make(status)
     response.headers = http.Headers(fields)
-    if method != "HEAD" or wire.ends_at_head("GET", status):
-        response.headers.pop("content-length", None)
+    named = _one_length(response.headers.get_all("content-length"))
+    response.headers.pop("content-length", None)
+    if named is not None and method == "HEAD" and not wire.ends_at_head("GET", status):
+        response.headers["content-length"] = named
     return response
+
+
+def _one_length(values: list[str]) -> str | None:
+    """Return the one length `values` name, or None for none, a malformed one or two that differ.
+
+    Clients refuse an answer whose lengths disagree, even to HEAD, and some refuse a repeated one.
+    """
+    lengths = {length.strip() for value in values for length in value.split(",")}
+    named = lengths.pop() if len(lengths) == 1 else ""
+    return named if named.isascii() and named.isdigit() else None
 
 
 def _send(flow: http.HTTPFlow, out: Response, upstream: Response) -> None:
