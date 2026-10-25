@@ -549,11 +549,8 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
     """A stream the trigger returns unread is stored in its run, after the run ended.
 
     In `hand_off` the request goes out inside the run and the stream ends after it. Under serve the
-    block is read back only once the stream is stored, and is still the run as it ended.
-
-    KNOWN BUG (#125): under serve mode the run's block, the run as it stood when its end was
-    written, says the run made no exchange, while the stored run and `irimi runs show` hold the
-    stream."""
+    block is read back only once the stream is stored, and is still the run as it ended; the run
+    then prints again, late, with the stream, as `irimi runs show` prints it."""
     bare = run_workflow(W, "hand_off", "bare")
     shadow = run_workflow(W, "hand_off", mode)
     assert shadow.exit_code == bare.exit_code == 0
@@ -576,7 +573,11 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
     assert shadow.held is not None and shadow.held.settled
     assert (shadow.held.waiting, shadow.held.blocks) == ((run.run_id,), 0)
     assert shadow.held.event_counts[run.run_id] == 1
-    assert shadow.run_blocks()[run.run_id][-1] == (
+    [(at_end, ended), (again, late)] = [
+        ((run_id, is_late), lines) for run_id, is_late, lines in shadow.printed_blocks()
+    ]
+    assert (at_end, again) == ((run.run_id, False), (run.run_id, True))
+    assert ended[-1] == (
         "  0 exchanges · 0 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
     )
     code, out, err = shadow.runs("show", run.run_id)
@@ -585,6 +586,7 @@ def test_a_stream_its_trigger_hands_off_is_stored_in_its_run_after_the_run_ended
         out[-1]
         == "  1 exchange · 1 real · 0 answered by irimi (0 faked writes) · 0 sent to targets"
     )
+    assert late == out[-len(late) :]
 
 
 # ---------------------------------------------------------------------- irimi compare

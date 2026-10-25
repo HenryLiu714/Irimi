@@ -337,7 +337,8 @@ def test_a_loopback_bind_still_finds_its_own_loopback_spellings(tmp_path, monkey
 def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path):
     """`on_run_ended` runs on the writer thread once the run is whole on disk, end included.
 
-    It gets the run's last `seq` then. A run that has not ended is not called back for."""
+    It gets the run's last `seq` then, and runs again, late, once each event the run stores after
+    its end is on disk. A run that has not ended is not called back for."""
     import threading
 
     from irimi.record.store.reader import StoreReader
@@ -346,21 +347,23 @@ def test_the_store_calls_back_on_its_writer_once_a_runs_end_is_on_disk(tmp_path)
     root = tmp_path / "store"
     seen = []
 
-    def ended(run_id, last_seq):
+    def ended(run_id, last_seq, late):
         stored = StoreReader(root).load_run(run_id)
         assert stored.record.end is not None
         thread = threading.current_thread().name
-        seen.append((run_id, last_seq, thread, stored.record.end.outcome, stored.events))
+        seen.append((run_id, last_seq, late, thread, stored.record.end.outcome, len(stored.events)))
 
     store = DirectoryStore(root, b"k" * 32, ended)
     store.start_run(builders.run_record("r1"))
     store.record(builders.exchange(run_id="r1"))
     store.record(builders.exchange(run_id="r2"))
     store.end_run("r1", 20.0, "ok")
+    store.record(builders.exchange(run_id="r1"))
     store.close()
-    [(run_id, last_seq, thread, outcome, events)] = seen
-    assert (run_id, last_seq, thread, outcome) == ("r1", 1, "irimi-store", "ok")
-    assert [e.run_id for e in events] == ["r1"]
+    assert seen == [
+        ("r1", 1, False, "irimi-store", "ok", 1),
+        ("r1", 2, True, "irimi-store", "ok", 2),
+    ]
 
 
 def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, monkeypatch):
@@ -376,7 +379,7 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
     left_at_end: list[tuple] = []
     slot_of = {run_id: idempotency.slot_id(run_id, "stripe", (), "k-1") for run_id in ("r1", "r2")}
 
-    def on_run_ended(index, run_id, last_seq):
+    def on_run_ended(index, run_id, last_seq, late):
         assert run is not None and run.write_log is not None and run.keys is not None
         left_at_end.append(
             (run.write_log.for_run(run_id), run.keys.get(slot_of[run_id], builders.REFUND_PARAMS))
@@ -412,7 +415,7 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
 
     root = tmp_path / "store"
 
-    def ended(run_id, last_seq):
+    def ended(run_id, last_seq, late):
         raise ValueError(f"cannot print {MESSAGE_SECRET}")
 
     store = DirectoryStore(root, b"k" * 32, ended)
@@ -488,12 +491,13 @@ def test_a_summary_still_being_read_back_holds_up_no_other_run_s_events(
     assert len(StoreReader(output.store_root).load_run("r2").events) == 3
 
 
-def test_a_run_s_block_is_the_run_as_it_stood_when_its_end_was_written(
+def test_a_run_s_block_is_the_run_at_its_end_and_a_late_event_prints_it_again_whole(
     tmp_path, monkeypatch, capsys
 ):
     """An event stored in a run after its end is not in the run's block, however late the read.
 
-    The read-back here waits until the late event is on disk; `irimi runs show` still has it."""
+    It prints the run again, whole, under `--- run <id> (late) ---`, as `irimi runs show` has it.
+    The read-back here waits until the late event is on disk."""
     from irimi.record.store.reader import StoreReader
 
     held = _HeldReads(monkeypatch)
@@ -510,8 +514,60 @@ def test_a_run_s_block_is_the_run_as_it_stood_when_its_end_was_written(
             held.release.set()
     stored = StoreReader(output.store_root).load_run("r1")
     assert len(stored.events) == 2
-    summary = summary_lines(RunView(stored.record, stored.events[:1]), run.index)
-    assert capsys.readouterr().out.splitlines() == ["--- run r1 ---", *summary]
+    at_end = summary_lines(RunView(stored.record, stored.events[:1]), run.index)
+    whole = summary_lines(RunView(stored.record, stored.events), run.index)
+    assert at_end != whole
+    assert capsys.readouterr().out.splitlines() == [
+        "--- run r1 ---",
+        *at_end,
+        "--- run r1 (late) ---",
+        *whole,
+    ]
+
+
+def test_late_events_queued_together_print_their_run_again_once(tmp_path, monkeypatch, capsys):
+    """Late events queued while the printer is busy print their run again once, after its block.
+
+    So a burst of them costs one read-back, and the next run's block still prints. The printer here
+    waits on an earlier run's read-back until every summary is queued."""
+    from irimi.record.store.reader import StoreReader
+
+    held = _HeldReads(monkeypatch)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    with output.summaries(), run:
+        try:
+            run.store.start_run(builders.run_record("r0"))
+            run.store.end_run("r0", 20.0, "ok")
+            eventually(lambda: held.asked == ["r0"], timeout=5)
+            run.store.start_run(builders.run_record("r1"))
+            run.store.end_run("r1", 20.0, "ok")
+            for _ in range(3):
+                run.store.record(builders.exchange(run_id="r1"))
+            run.store.start_run(builders.run_record("r2"))
+            run.store.end_run("r2", 20.0, "ok")
+            # The end of r1, its three late events and the end of r2.
+            eventually(lambda: output._ended.qsize() == 5, timeout=5)
+        finally:
+            held.release.set()
+    reader = StoreReader(output.store_root)
+
+    def block(run_id: str, events: int | None = None) -> list[str]:
+        stored = reader.load_run(run_id)
+        return summary_lines(RunView(stored.record, stored.events[:events]), run.index)
+
+    assert len(reader.load_run("r1").events) == 3
+    assert capsys.readouterr().out.splitlines() == [
+        "--- run r0 ---",
+        *block("r0"),
+        "--- run r1 ---",
+        *block("r1", 0),
+        "--- run r1 (late) ---",
+        *block("r1"),
+        "--- run r2 ---",
+        *block("r2"),
+    ]
+    assert held.asked == ["r0", "r1", "r1", "r2"]
 
 
 def test_a_summary_that_cannot_be_printed_is_one_warning_and_the_next_still_prints(
@@ -1056,7 +1112,7 @@ def test_a_run_that_cannot_be_read_back_is_one_warning_naming_only_its_type(
     monkeypatch.setattr(StoreReader, "load_run", unreadable)
     output = serve._ServeOutput(tmp_path / "store")
     with output.summaries():
-        output.run_ended(servicemaps.MapIndex(), "r1", None)
+        output.run_ended(servicemaps.MapIndex(), "r1", None, False)
     out, err = capsys.readouterr()
     assert out == ""
     assert err == "warning: run r1 ended but could not be read back: TraceFormatError\n"

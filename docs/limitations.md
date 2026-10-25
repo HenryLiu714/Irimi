@@ -40,8 +40,6 @@ all is listed under [known bypasses](security.md#known-bypasses).
 
 ## Serve mode
 
-- A stream the agent leaves open after its run ended is stored in the run but missing from the
-  run's printed summary, which is the run as it stood at its end.
 - An agent whose control posts fail has its requests stored under a `header` run that lists as
   `incomplete`; the warning is on the agent's own logger, not irimi's.
 

@@ -27,8 +27,9 @@ from tests.e2e.workflows.harness.internet import FakeInternet
 from tests.e2e.workflows.harness.scenario import Workflow, environ, scenario_maps
 from tests.e2e.workflows.harness.services import World
 
-# The line irimi's serve mode prints above each run's summary when the SDK ends the run.
-RUN_BLOCK = re.compile(r"--- run (\S+) ---")
+# The line irimi's serve mode prints above each run's summary when the SDK ends the run, marked
+# `(late)` when it prints the run again for an event stored in it after its end.
+RUN_BLOCK = re.compile(r"--- run (\S+)( \(late\))? ---")
 # The run `irimi shadow`'s banner names, its process run.
 BANNER_RUN = re.compile(r"irimi (?:shadow|replay) · run (\S+) · ")
 # An `irimi runs list` row (`report.runs.run_list_lines`): run id, started (a date and a time, or
@@ -181,15 +182,20 @@ class Result:
         return [event for run_id in ids for event in reader.load_run(run_id).events]
 
     def run_blocks(self) -> dict[str, list[str]]:
-        """Return serve mode's summaries by run id: the lines under each `--- run <id> ---`.
+        """Return serve mode's summaries by run id: each run's last block, the run as it stands."""
+        return {run_id: lines for run_id, _, lines in self.printed_blocks()}
+
+    def printed_blocks(self) -> list[tuple[str, bool, list[str]]]:
+        """Return each block serve printed, in order: its run id, whether it is late, its lines.
 
         Serve prints a block under one lock, so it ends at the first line that is no summary's."""
-        blocks: dict[str, list[str]] = {}
+        blocks: list[tuple[str, bool, list[str]]] = []
         current: list[str] | None = None
         for line in self.irimi:
             match = RUN_BLOCK.fullmatch(line)
             if match:
-                current = blocks.setdefault(match.group(1), [])
+                current = []
+                blocks.append((match.group(1), match.group(2) is not None, current))
                 continue
             in_summary = line == "" or line.startswith("  ") or line.startswith("irimi shadow · ")
             if current is not None and in_summary:

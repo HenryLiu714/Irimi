@@ -84,9 +84,8 @@ class Run:
                 self.lock.release()
 
 
-# Called with the maps, the run id and its last `seq` (`writer.OnRunEnded`) once a run's end is on
-# disk and its state dropped.
-OnRunEnded = Callable[[MapIndex, str, int | None], None]
+# Called with the maps, then `writer.OnRunEnded`'s arguments, once the run's state is dropped.
+OnRunEnded = Callable[[MapIndex, str, int | None, bool], None]
 
 
 class EngineFactory(Protocol):
@@ -145,12 +144,12 @@ def prepare_run(
     write_log = WriteLog()
     keys = idempotency.Store()
 
-    def ended(run_id: str, last_seq: int | None) -> None:
-        # An ended run makes no more requests, so its writes and keys are never read again.
+    def ended(run_id: str, last_seq: int | None, late: bool) -> None:
+        # An ended run's writes and keys are never read again.
         write_log.end_run(run_id)
         keys.end_run(run_id)
         if on_run_ended is not None:
-            on_run_ended(index, run_id, last_seq)
+            on_run_ended(index, run_id, last_seq, late)
 
     store = _open_store(args, key, ended, replayed_run(config.mode))
     if store is None:

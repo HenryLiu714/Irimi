@@ -30,6 +30,9 @@ SERVE_POLL_S = 0.1
 # together, from when the store starts closing: the store's own bound, so a stop takes no longer.
 SUMMARIES_TIMEOUT_S = writer.CLOSE_TIMEOUT_S
 
+# An ended run's summary to print: the maps, the run id, its last `seq`, and whether it is late.
+_Ended = tuple[MapIndex, str, int | None, bool]
+
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
     serve = subparsers.add_parser(
@@ -83,9 +86,7 @@ class _ServeOutput:
         self.ca_cert: Path | None = None
         self._tls_warned: set[str] = set()
         # Each ended run whose summary waits for the printer; None stops it.
-        self._ended: queue.SimpleQueue[tuple[MapIndex, str, int | None] | None] = (
-            queue.SimpleQueue()
-        )
+        self._ended: queue.SimpleQueue[_Ended | None] = queue.SimpleQueue()
         self._summaries_given_up = False  # set under `_printing` when serve stops waiting
         self._stop_by: float | None = None  # when the printer must be done (`stopping`)
 
@@ -112,9 +113,12 @@ class _ServeOutput:
         [line] = tls_failure_lines({host: 1}, self.ca_cert)
         self.say([f"warning: {line.strip()}"], err=True)
 
-    def run_ended(self, index: MapIndex, run_id: str, last_seq: int | None) -> None:
-        """Queue the run's summary; the store calls this on its writer once the end is written."""
-        self._ended.put((index, run_id, last_seq))
+    def run_ended(self, index: MapIndex, run_id: str, last_seq: int | None, late: bool) -> None:
+        """Queue the run's summary; the store calls this on its writer once the end is written.
+
+        A late call prints the run again, whole, as it stands then.
+        """
+        self._ended.put((index, run_id, last_seq, late))
 
     def stopping(self) -> None:
         """Start the stop's clock as the store starts closing; the summaries left share it."""
@@ -159,18 +163,29 @@ class _ServeOutput:
                 _print(lines, err)
 
     def _print_summaries(self) -> None:
-        while (ended := self._ended.get()) is not None:
-            index, run_id, last_seq = ended
-            try:
-                self._print_summary(index, run_id, last_seq)
-            except Exception as exc:
-                # The type only: a message may quote what it choked on.
-                logger.warning(
-                    "irimi: run %s's summary could not be printed: %s", run_id, type(exc).__name__
-                )
+        stopped = False
+        while not stopped:
+            # Everything queued meanwhile is taken at once, so a burst of late events prints once.
+            batch = [self._ended.get()]
+            with contextlib.suppress(queue.Empty):
+                while batch[-1] is not None:
+                    batch.append(self._ended.get_nowait())
+            stopped = batch[-1] is None
+            for index, run_id, last_seq, late in _newest(batch):
+                try:
+                    self._print_summary(index, run_id, last_seq, late)
+                except Exception as exc:
+                    # The type only: a message may quote what it choked on.
+                    logger.warning(
+                        "irimi: run %s's summary could not be printed: %s",
+                        run_id,
+                        type(exc).__name__,
+                    )
 
-    def _print_summary(self, index: MapIndex, run_id: str, last_seq: int | None) -> None:
-        """Print the run's summary from the store, as the run stood when its end was written.
+    def _print_summary(
+        self, index: MapIndex, run_id: str, last_seq: int | None, late: bool
+    ) -> None:
+        """Print the run's summary from the store, as the run stood at `last_seq`.
 
         A read failure warns with the exception type only: its message may quote unredacted data.
         """
@@ -182,7 +197,25 @@ class _ServeOutput:
             self._say_summary([warning], err=True)
             return
         summary = summary_lines(RunView(stored.record, stored.events), index)
-        self._say_summary([f"--- run {run_id} ---", *summary])
+        header = f"--- run {run_id} (late) ---" if late else f"--- run {run_id} ---"
+        self._say_summary([header, *summary])
+
+
+def _newest(batch: list[_Ended | None]) -> list[_Ended]:
+    """Return the summaries in `batch` in order, each late one dropped when its run's next follows.
+
+    The next one prints the run whole too, through a later `seq`.
+    """
+    kept: list[_Ended] = []
+    later: set[str] = set()
+    for ended in reversed(batch):
+        if ended is None:
+            continue
+        _, run_id, _, late = ended
+        if not (late and run_id in later):
+            kept.append(ended)
+        later.add(run_id)
+    return kept[::-1]
 
 
 def _print(lines: list[str], err: bool) -> None:

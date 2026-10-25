@@ -146,6 +146,10 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   drops events while it prints. A block is still the run as it stood when its end was written.
   A stop still takes at most 10 seconds after the proxy stops; a summary left unprinted then is
   named by one warning on stderr.
+- `irimi serve` prints a run again, whole, under `--- run <id> (late) ---`, once an event is
+  stored in the run after its end, such as a stream its trigger returned unread; events that
+  arrive together print it once. The block printed at the run's end left them out, so it
+  disagreed with `irimi runs show`.
 
 ## [0.1.0] - 2026-10-20
 

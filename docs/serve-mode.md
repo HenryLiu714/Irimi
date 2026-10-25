@@ -55,11 +55,13 @@ The banner, then one line per exchange and tool call as each finishes (`--quiet`
 each run's summary under `--- run <id> ---` when the SDK ends the run: the same block
 `irimi runs show <id>` prints, built from the store once the run's end is on disk, on a thread that
 never holds up the store. A client that refuses irimi's certificate sends no request for a summary
-to show, so serve warns on stderr instead, once per host, naming the CA to point it at. A streamed
-answer is recorded when its stream closes, so a stream the agent leaves open after its run ends is
-stored in the run but missing from its printed summary, the run as it ended. On stop, if any
-requests named no run, irimi prints `stopped · N exchanges not in any run: irimi runs show
-unattributed`.
+to show, so serve warns on stderr instead, once per host, naming the CA to point it at. A run's
+summary is the run as it stood at its end. A streamed answer is recorded when its stream closes,
+so a stream the agent leaves open after its run ends is stored in the run after that, and serve
+then prints the run again, whole, under `--- run <id> (late) ---`. Any event stored in a run after
+its end does the same, once for events that arrive together, even in a run an earlier serve on
+the store ended. On stop, if any requests named no run, irimi prints `stopped · N exchanges not in
+any run: irimi runs show unattributed`.
 
 ## Binding, stopping and the store
 

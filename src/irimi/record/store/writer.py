@@ -68,9 +68,10 @@ SYNC_IDLE_S = 1.0
 CLOSE_TIMEOUT_S = 10.0
 DROP_WARNING_EVERY = 1000
 
-# Called on the writer thread once a run's end is written, with its id and the `seq` of the last
-# event it held then: 0 for none, None (read it whole) when the store could not open the run.
-OnRunEnded = Callable[[str, int | None], None]
+# Called on the writer thread with a run's id and the `seq` of the last event it holds: once its end
+# is written (0 for no event, None to read it whole when the store could not open the run), then
+# with `late` True after each event written in the run after its end.
+OnRunEnded = Callable[[str, int | None, bool], None]
 
 
 class RunAttribution:
@@ -163,7 +164,8 @@ class DirectoryStore:
 
         `on_run_ended` runs on the writer thread after a run's end is written, so the run's
         events are on disk, and also when writing the end failed; it blocks the queue while it
-        runs, and what it raises is logged. It gets the run's last `seq`, to read the run as ended.
+        runs, and what it raises is logged. It gets the run's last `seq`, to read the run as ended,
+        and runs again after each event the run stores after its end (`OnRunEnded`).
         `replay_of` is the stored run a replay answers from (`RunAttribution`).
         """
         private_dir(root)
@@ -376,13 +378,18 @@ class DirectoryStore:
             )
             self._forget(end.run_id, run)
         finally:
-            if self._on_run_ended is not None:
-                try:
-                    self._on_run_ended(end.run_id, last_seq)
-                except Exception as exc:
-                    # The type only: a message may quote what it choked on.
-                    logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
-                    logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
+            self._announce(end.run_id, last_seq, late=False)
+
+    def _announce(self, run_id: str, last_seq: int | None, *, late: bool) -> None:
+        """Call `on_run_ended`, logging what it raises."""
+        if self._on_run_ended is None:
+            return
+        try:
+            self._on_run_ended(run_id, last_seq, late)
+        except Exception as exc:
+            # The type only: a message may quote what it choked on.
+            logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
+            logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
 
     def _run_dir(self, run_id: str) -> _OpenRun:
         """Return a writable run directory's state, else raise ValueError (a drop)."""
@@ -421,6 +428,8 @@ class DirectoryStore:
         run.next_seq += 1
         with self._lock:
             self._written += 1
+        if run.record is not None and run.record.end is not None:
+            self._announce(event.run_id, run.next_seq - 1, late=True)
 
     def _prepare(self, event: Exchange | ToolCall | TelemetrySeen, *, bad_run_id: bool) -> Event:
         """Return `event` redacted for disk, an exchange flagged for what the store does to it."""
