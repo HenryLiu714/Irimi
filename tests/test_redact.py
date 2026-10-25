@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+from typing import Any
 
 import pytest
 
@@ -394,6 +395,36 @@ def test_a_shape_glued_to_a_word_is_part_of_the_word():
     assert redact_json(escaped, KEY) is escaped
 
 
+def test_a_shape_after_a_json_strings_escaped_letter_is_replaced_wherever_json_is_walked():
+    """The walk reads `\\u0041` as `A`, glued to the shape, so the shape is judged as sent.
+
+    A JSON body, an SSE line and an event joined from several `data:` lines all take the
+    placeholder. A glued shape that overlaps another shape is one secret with it, and one that
+    starts a longer glued shape leaves none of the longer one behind."""
+    note, hidden = f'"\\u0041{LIVE_KEY}"', f'"A{_ph(LIVE_KEY)}"'
+    assert _body(f'{{"note": {note}}}'.encode(), JSON) == f'{{"note":{hidden}}}'.encode()
+    sse = f'data: {{"note": {note}}}\n\ndata: {{\ndata: "note": {note}, "token": "t1"\ndata: }}\n'
+    stored = _response_body(sse.encode(), ("content-type", "text/event-stream"))
+    expected = f'data: {{"note":{hidden}}}\n\ndata: {{"note":{hidden},"token":"{_ph("t1")}"}}\n'
+    assert stored == f"{expected}data:\ndata:\n".encode()
+    both = f'["\\u0041{LIVE_KEY_SHORT}", "\\u0041{LIVE_KEY}"]'.encode()
+    assert _body(both, JSON) == f'["A{_ph(LIVE_KEY_SHORT)}","A{_ph(LIVE_KEY)}"]'.encode()
+    overlapping = f'["{LIVE_KEY_SHORT}\\u0041{LIVE_KEY}"]'.encode()
+    assert _body(overlapping, JSON) == f'["{_ph(LIVE_KEY_SHORT + "A" + LIVE_KEY)}"]'.encode()
+    twice = f'["\\u0041{LIVE_KEY} \\u0062{LIVE_KEY}"]'.encode()
+    assert _body(twice, JSON) == f'["A{_ph(LIVE_KEY)} b{_ph(LIVE_KEY)}"]'.encode()
+    keyed = f'{{"\\u0041{LIVE_KEY}": 1}}'.encode()
+    assert _body(keyed, JSON) == f'{{"A{_ph(LIVE_KEY)}":1}}'.encode()
+
+
+def test_only_an_escaped_letter_or_digit_glues_to_the_shape_after_it():
+    """Every other escape decodes to a character the shape rule already reads as a separator."""
+    for code in range(0x20, 0x7F):
+        for spelling in (f"{code:04x}", f"{code:04X}"):
+            glued = secret_shapes.shapes_after_escaped_letters(f'"\\u{spelling}{LIVE_KEY}"')
+            assert glued == ({LIVE_KEY} if chr(code).isalnum() else set()), spelling
+
+
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
     secret = LIVE_KEY
     response = Response(
@@ -449,6 +480,66 @@ def test_each_line_of_ndjson_and_each_sse_data_line_is_walked_as_json():
     )
 
 
+def test_an_sse_events_json_over_several_data_lines_is_walked_as_the_document_they_join_into():
+    """An event's `data:` lines are joined with LF, as a client joins them, and walked as JSON.
+
+    The walked document goes on the first `data:` line and the others are left empty, so the event
+    keeps its lines and a client's join still reads the document."""
+    sse = b'event: x\ndata: {\ndata:   "client_secret": "CANARYzzz"\ndata: }\n\ndata: {"a": 1}\n\n'
+    stored = _response_body(sse, ("content-type", "text/event-stream"))
+    hidden = _ph("CANARYzzz")
+    expected = (
+        f'event: x\ndata: {{"client_secret":"{hidden}"}}\ndata:\ndata:\n\ndata: {{"a": 1}}\n\n'
+    )
+    assert stored == expected.encode()
+    event = stored.decode().split("\n\n")[0].split("\n")
+    joined = "\n".join(line.removeprefix("data:").removeprefix(" ") for line in event[1:])
+    assert json.loads(joined) == {"client_secret": hidden}
+
+
+def test_an_events_data_lines_are_joined_past_its_other_fields_and_keep_their_endings():
+    """Other fields between `data:` lines are not data, and a line keeps its CR, LF or CRLF.
+
+    The other fields are scanned for shapes, and the first `data:` line keeps its leading
+    whitespace, as a line walked alone does."""
+    sse = f'data:[\r\nid: {LIVE_KEY}\rdata: {{"token": "t1"}}]\n\n'.encode()
+    stored = _response_body(sse, ("content-type", "text/event-stream"))
+    expected = f'data:[{{"token":"{_ph("t1")}"}}]\r\nid: {_ph(LIVE_KEY)}\rdata:\n\n'
+    assert stored == expected.encode()
+    spaced = b'data:  {\ndata: "token": "t1"}'
+    stored = _response_body(spaced, ("content-type", "text/event-stream"))
+    assert stored == f'data:  {{"token":"{_ph("t1")}"}}\ndata:'.encode()
+
+
+def test_an_events_data_lines_keep_their_bytes_unless_joined_they_are_json_holding_a_secret():
+    """A join that is JSON with no secret, or not a JSON object or array, is left line by line.
+
+    A JSON string cannot hold the LF the join puts between two lines, and a join that only starts
+    as a number is not read as JSON."""
+    quiet = b'event: x\ndata: {\ndata:   "text": "hi"\ndata: }\n\n'
+    broken = b'data: {"token": "a\ndata: b"}\n\n'
+    numbers = b"data: " + b"1" * 5000 + b"\ndata: 2\n\n"
+    for sse in (quiet, broken, numbers):
+        assert _response_body(sse, ("content-type", "text/event-stream")) == sse
+
+
+def test_an_event_of_one_data_line_is_parsed_once(monkeypatch):
+    """Only an event of several `data:` lines is parsed joined too.
+
+    A stream of one-line events, as model APIs send, is not parsed twice."""
+    parsed: list[str] = []
+    loads = json.loads
+
+    def counted(text: str, **kwargs: Any) -> Any:
+        parsed.append(text)
+        return loads(text, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counted)
+    sse = b'event: e\ndata: {"a": 1}\n\ndata: [1]\n\n'
+    assert _response_body(sse, ("content-type", "text/event-stream")) == sse
+    assert parsed == [sse.decode(), '{"a": 1}', "[1]"]
+
+
 def test_an_sse_line_ended_by_a_lone_carriage_return_is_walked_as_its_own_line():
     """An SSE line ended by a lone CR is its own line, walked as JSON like one ended by LF."""
     sse = b'data: {"token": "hunter2"}\rdata: {"a": 1}\r\r'
@@ -461,6 +552,8 @@ def test_a_json_line_the_walk_cannot_see_whole_fails_the_body_closed():
     body = b'data: {"token": "t1", "token": null}\n\n'
     stored = _response_body(body, ("content-type", "text/event-stream"))
     assert stored == FAILED_BODY
+    joined = b'data: {"token": "t1",\ndata: "token": null}\n\n'
+    assert _response_body(joined, ("content-type", "text/event-stream")) == FAILED_BODY
 
 
 def test_a_shape_in_a_json_key_is_replaced_too():
@@ -624,6 +717,33 @@ def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_
     )
 
 
+def test_a_stream_whose_events_json_spans_several_lines_keeps_its_lines_and_chunks():
+    """An event walked as one document keeps its line count, so its chunks are carried over by line.
+
+    A boundary in the line that takes the document, or in a line left empty, moves to its end."""
+    event = [b"event: x\n", b"data: {\n", b'data:   "client_secret": "s3cret"\n', b"data: }\n"]
+    sent = b"".join(event) + b"\n" + LAST
+    stored_event = [
+        event[0],
+        b'data: {"client_secret":"' + _ph("s3cret").encode() + b'"}\n',
+        b"data:\n",
+        b"data:\n",
+    ]
+    cuts = (3, len(event[0]) + 4, sum(map(len, event[:3])) + 2, len(sent) - 4)
+    chunks = tuple(b - a for a, b in zip([0, *cuts], [*cuts, len(sent)], strict=True))
+    stored = _stream(sent, chunks)
+    assert stored.response is not None
+    assert stored.response.body == b"".join(stored_event) + b"\n" + LAST
+    ends = [sum(map(len, stored_event[: i + 1])) for i in range(4)]
+    assert stored.stream_chunks == (
+        3,
+        ends[1] - 3,
+        ends[3] - ends[1],
+        len(stored.response.body) - 4 - ends[3],
+        4,
+    )
+
+
 def test_a_secret_split_across_two_chunks_is_redacted_whole():
     """The joined body is redacted, so a key cut in two by a chunk boundary is redacted whole."""
     cut = LOUD.index(b"abc123")
@@ -732,6 +852,8 @@ def _random_stream(rng) -> bytes:
                 f"data: {odd} {secret} as text",  # text a shape changes
                 f'data: {{"text":"{odd} quiet"}}',  # nothing changes
                 f"event: {odd}",
+                # an event of its own whose JSON spans lines: only joined is it one document
+                f'\r\ndata: {{\ndata: "token": "hunter2",\rdata: "text": "{secret}"\r\ndata: }}\n',
                 "",
             )
         )
@@ -757,6 +879,7 @@ def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
         case = (sent, chunks, body, got)
         assert all(length > 0 for length in got) and sum(got) == len(body), case
         assert not any(secret.encode() in body for secret in _STREAM_SECRETS), case
+        assert b"hunter2" not in body, case
         old, new = sent.splitlines(keepends=True), body.splitlines(keepends=True)
         assert len(old) == len(new), case
         old_starts = [sum(map(len, old[:i])) for i in range(len(old))]

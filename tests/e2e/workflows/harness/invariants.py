@@ -25,7 +25,12 @@ CANARIES = {
 # The credentials a fake service hands back in a response body: one on disk is a leak on the
 # response side, which the agent's canaries never reach. A bomb's first line holds one, so the
 # start of a body cut at irimi's decoding cap is checked too.
-SERVED_CANARIES = {"STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY, "BOMB_SECRET": BOMB_SECRET}
+SERVED_CANARIES = {
+    "STRIPE_CLIENT_SECRET": CLIENT_SECRET_CANARY,
+    "BOMB_SECRET": BOMB_SECRET,
+    "SSE_CLIENT_SECRET": credentials.SSE_CLIENT_SECRET,
+    "SSE_ESCAPED_KEY": credentials.SSE_ESCAPED_KEY,
+}
 # How much of a canary's start invariant 4 also looks for: a key cut before redaction loses its
 # shape and reaches disk as it is. Twelve characters reach past every shape's prefix (`sk-ant-`).
 CANARY_PART = 12

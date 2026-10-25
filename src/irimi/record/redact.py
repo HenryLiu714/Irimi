@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from functools import partial
 from itertools import pairwise
@@ -29,7 +29,7 @@ from irimi.config import paths
 from irimi.config.files import write_private
 from irimi.core.bodies import FORM_CT
 from irimi.core.exchange import Exchange, Flag, Headers, Request, Response, header_value, media_type
-from irimi.core.secret_shapes import SECRET_SHAPE
+from irimi.core.secret_shapes import SECRET_SHAPE, shapes_after_escaped_letters
 from irimi.protocol.trace import (
     ErrorInfo,
     Event,
@@ -491,7 +491,7 @@ def _redact_body_text(body: bytes, content_type: str, key: bytes) -> bytes:
 
 
 def _redact_document(text: str, content_type: str, key: bytes) -> str:
-    """Redact a body's text as JSON, else as a declared form, else line by line.
+    """Redact a body's text as JSON, else as a declared form, else line by line, event by event.
 
     The text is tried as JSON whatever its content type. JSON refused for another reason (an
     integer past the digit limit, a repeated key) raises to the guard and fails closed: a text
@@ -503,15 +503,62 @@ def _redact_document(text: str, content_type: str, key: bytes) -> str:
     if content_type == FORM_CT:
         return _redact_urlencoded(text, key)
     lines = _LINE.findall(text)
-    redacted = [_redact_line(line, key) for line in lines]
+    redacted = [line for event in _events(lines) for line in _redact_event(event, key)]
     if all(new is old for new, old in zip(redacted, lines, strict=True)):
         return text
     return "".join(redacted)
 
 
+def _events(lines: list[str]) -> Iterator[list[str]]:
+    """Yield `lines` in runs that each end at a blank line, as an SSE event does, or at the end."""
+    start = 0
+    for end, line in enumerate(lines, start=1):
+        if end == len(lines) or not _content(line):
+            yield lines[start:end]
+            start = end
+
+
+def _redact_event(lines: list[str], key: bytes) -> list[str]:
+    """Redact an SSE event's lines, its `data:` lines as one JSON document if they join into one.
+
+    A client joins an event's `data:` lines with LF. A join the walk changes goes on the first
+    `data:` line and the others are left empty, which the join reads as whitespace, so the event
+    keeps its line count for `_rechunk`. Any other event is redacted line by line.
+    """
+    data = [i for i, line in enumerate(lines) if line.startswith(_SSE_DATA)]
+    values = [_content(lines[i])[len(_SSE_DATA) :] for i in data] if len(data) > 1 else []
+    document = "\n".join(values)
+    walked = None
+    if document.lstrip().startswith(("{", "[")):
+        walked = _redact_json_text(document, key)
+    if walked is None or walked is document:
+        return [_redact_line(line, key) for line in lines]
+    redacted = [
+        _SSE_DATA + _ending(line) if line.startswith(_SSE_DATA) else _redact_line(line, key)
+        for line in lines
+    ]
+    redacted[data[0]] = _SSE_DATA + _indent(values[0]) + walked + _ending(lines[data[0]])
+    return redacted
+
+
+def _content(line: str) -> str:
+    """Return `line` without its line ending."""
+    return line.rstrip("\r\n")
+
+
+def _ending(line: str) -> str:
+    """Return `line`'s line ending, empty for a last line that has none."""
+    return line[len(_content(line)) :]
+
+
+def _indent(value: str) -> str:
+    """Return the whitespace `value` starts with, which a line rewritten as JSON keeps."""
+    return value[: len(value) - len(value.lstrip())]
+
+
 def _redact_line(line: str, key: bytes) -> str:
     """Redact one line: an NDJSON line or SSE `data:` JSON as JSON, any other for shapes."""
-    content = line.rstrip("\r\n")
+    content = _content(line)
     field = _SSE_DATA if content.startswith(_SSE_DATA) else ""
     value = content[len(field) :]
     document = value.lstrip()
@@ -520,17 +567,21 @@ def _redact_line(line: str, key: bytes) -> str:
         if walked is document:
             return line
         if walked is not None:
-            return field + value[: len(value) - len(document)] + walked + line[len(content) :]
+            return field + _indent(value) + walked + _ending(line)
     return _redact_text(line, key)
 
 
 def _redact_json_text(text: str, key: bytes) -> str | None:
-    """Return `text` redacted as JSON: itself if unchanged, else compact JSON; None if not JSON."""
+    """Return `text` redacted as JSON: itself if unchanged, else compact JSON; None if not JSON.
+
+    The walk reads decoded strings, so it is also handed the shapes the raw text spells after an
+    escaped letter, which the shape rule allows there and the decoded string glues to a word.
+    """
     try:
         document = json.loads(text, object_pairs_hook=_unique_members)
     except json.JSONDecodeError:
         return None
-    walked = _redact_json(document, key)
+    walked = _redact_json(document, key, shapes_after_escaped_letters(text))
     if walked is document:
         return text
     return json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
@@ -544,17 +595,22 @@ def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
     return members
 
 
-def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
-    """Return `value` itself if nothing matched, else a redacted copy; TypeError if not JSON."""
+def _redact_json(value: JSONValue, key: bytes, glued: frozenset[str] = frozenset()) -> JSONValue:
+    """Return `value` itself if nothing matched, else a redacted copy; TypeError if not JSON.
+
+    `glued` names shapes to hide in every string as well (`_redact_text`)."""
     if isinstance(value, str):
-        return _redact_text(value, key)
+        return _redact_text(value, key, glued)
     if isinstance(value, list):
-        items = [_redact_json(item, key) for item in value]
+        items = [_redact_json(item, key, glued) for item in value]
         if all(new is old for new, old in zip(items, value, strict=True)):
             return value
         return items
     if isinstance(value, dict):
-        pairs = [(_redact_text(k, key), _redact_member(k, v, key)) for k, v in value.items()]
+        pairs = [
+            (_redact_text(k, key, glued), _redact_member(k, v, key, glued))
+            for k, v in value.items()
+        ]
         if all(nk is k and nv is v for (nk, nv), (k, v) in zip(pairs, value.items(), strict=True)):
             return value
         return dict(pairs)
@@ -564,10 +620,10 @@ def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
     raise TypeError(f"{type(value).__name__} is not JSON")
 
 
-def _redact_member(name: str, value: JSONValue, key: bytes) -> JSONValue:
+def _redact_member(name: str, value: JSONValue, key: bytes, glued: frozenset[str]) -> JSONValue:
     """Hide a secret key's value whole (non-strings as sorted-key JSON); keep `null`."""
     if not _is_secret_key(name):
-        return _redact_json(value, key)
+        return _redact_json(value, key, glued)
     if value is None:
         return value
     return _hide(value if isinstance(value, str) else json.dumps(value, sort_keys=True), key)
@@ -582,7 +638,35 @@ def _hide(value: str, key: bytes) -> str:
     return value if value == "" else placeholder(key, value)
 
 
-def _redact_text(text: str, key: bytes) -> str:
-    """Return `text` itself when it holds no secret shape, else a copy with each replaced."""
-    redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
-    return redacted if count else text
+def _redact_text(text: str, key: bytes, glued: frozenset[str] = frozenset()) -> str:
+    """Return `text` itself when it holds no secret shape, else a copy with each replaced.
+
+    Each copy of a `glued` shape is hidden too. Where it overlaps a shape `text` shows, the two
+    are one secret, so neither leaves the other's tail behind."""
+    if not glued:
+        redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
+        return redacted if count else text
+    spans = [match.span() for match in SECRET_SHAPE.finditer(text)]
+    for shape in glued:
+        at = text.find(shape)
+        while at != -1:
+            spans.append((at, at + len(shape)))
+            at = text.find(shape, at + 1)
+    if not spans:
+        return text
+    pieces, end = [], 0
+    for start, stop in _merged(spans):
+        pieces += [text[end:start], placeholder(key, text[start:stop])]
+        end = stop
+    return "".join([*pieces, text[end:]])
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return `spans` sorted, each run of overlapping ones joined into one."""
+    merged: list[tuple[int, int]] = []
+    for start, stop in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(stop, merged[-1][1]))
+        else:
+            merged.append((start, stop))
+    return merged

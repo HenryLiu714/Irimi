@@ -136,6 +136,12 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
+- A secret in an SSE event whose JSON spans several `data:` lines is redacted: an event's `data:`
+  lines are joined as a client joins them before the JSON is walked. The stored event keeps its
+  line count, with the redacted document on its first `data:` line and the other `data:` lines
+  empty.
+- A key shape right after a JSON `\u` escape of a letter or digit (`"\u0041sk_live_…"`) is
+  redacted in a JSON body or line, as it is in other text, instead of stored decoded as sent.
 
 ## [0.1.0] - 2026-10-20
 
