@@ -100,3 +100,10 @@ def test_irimis_own_error_is_one_json_shape_and_stamped_by_the_caller():
     stamped = wire.stamp(error, "irimi")
     assert stamped.header(ANSWERED_BY_HEADER) == "irimi"
     assert wire.stamp(error, "live") is error
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "HEAD"])
+def test_an_answer_to_head_and_a_1xx_204_or_304_end_at_their_head(method):
+    """RFC 9112 6.3: every answer to HEAD carries no content, nor does a 1xx, 204 or 304 to any."""
+    bare = {status for status in range(100, 600) if wire.ends_at_head(method, status)}
+    assert bare == (set(range(100, 600)) if method == "HEAD" else {*range(100, 200), 204, 304})

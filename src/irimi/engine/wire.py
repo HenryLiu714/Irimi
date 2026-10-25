@@ -59,6 +59,14 @@ def stamp(response: Response, answered_by: AnsweredBy) -> Response:
     return replace(kept, headers=(*kept.headers, (ANSWERED_BY_HEADER, value)))
 
 
+def ends_at_head(method: str, status: int) -> bool:
+    """Return whether an answer to `method` with `status` carries no content (RFC 9112 6.3).
+
+    The client reads any content sent after such a head as the connection's next response.
+    """
+    return method == "HEAD" or status < 200 or status in (204, 304)
+
+
 def irimi_error(status: int, error_type: str, message: str, headers: Headers = ()) -> Response:
     """Return irimi's JSON error, `{"error": {"type": ..., "message": ...}}`, unstamped."""
     return Response.json(status, {"error": {"type": error_type, "message": message}}, headers)
