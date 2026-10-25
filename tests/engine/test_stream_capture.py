@@ -8,6 +8,7 @@ import time
 import types
 
 import pytest
+from mitmproxy import ctx
 from mitmproxy.connection import ConnectionState
 from mitmproxy.net import encoding
 from mitmproxy.test import tflow
@@ -237,7 +238,7 @@ def test_a_stream_mitmproxy_closes_for_idleness_is_not_blamed_on_the_agent(tmp_p
 
 @pytest.mark.parametrize(
     ("heard_ago", "hung_up"),
-    [(600 - mitm.IDLE_LIMIT_SLACK_S - 0.5, True), (600 - mitm.IDLE_LIMIT_SLACK_S / 2, False)],
+    [(598.5, True), (599.5, False)],
 )
 def test_a_flow_heard_just_inside_the_idle_limit_is_not_blamed_on_the_agent(
     monkeypatch, heard_ago, hung_up
@@ -246,7 +247,7 @@ def test_a_flow_heard_just_inside_the_idle_limit_is_not_blamed_on_the_agent(
     flow = tflow.tflow()
     flow.client_conn.state = ConnectionState.CLOSED
     flow.request.timestamp_end = time.time() - heard_ago
-    monkeypatch.setattr(mitm.ctx, "options", types.SimpleNamespace(tcp_timeout=600), raising=False)
+    monkeypatch.setattr(ctx, "options", types.SimpleNamespace(tcp_timeout=600), raising=False)
     assert mitm._agent_hung_up(flow, None) is hung_up
 
 
@@ -491,6 +492,17 @@ def test_the_tee_cuts_the_chunk_that_crosses_its_cap_and_keeps_nothing_after(sma
     assert tee(b"89abc") == b"89abc"
     assert tee(b"def") == b"def"
     assert (tee.chunks, tee.truncated) == ([b"1234567", b"89a"], True)
+
+
+def test_the_tee_times_every_chunk_even_past_its_cap(small_cap, monkeypatch):
+    """A chunk it no longer copies is still timed, since that time tells a hang-up from idleness."""
+    clock = iter([10.0, 20.0])
+    monkeypatch.setattr(capture, "time", types.SimpleNamespace(time=lambda: next(clock)))
+    tee = StreamCapture()
+    assert tee.last_chunk_at == 0.0
+    assert tee(b"12345678901") == b"12345678901"
+    assert tee(b"more") == b"more"
+    assert (tee.truncated, tee.chunks, tee.last_chunk_at) == (True, [b"1234567890"], 20.0)
 
 
 def test_the_tee_stops_copying_for_good_once_its_copy_raises(monkeypatch):
