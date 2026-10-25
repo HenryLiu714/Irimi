@@ -169,7 +169,7 @@ class ShadowPolicy:
             decided = self._answered(request, classification, checked)
         except Exception as exc:
             # The check read reached the service, so the trace must still hold it.
-            raise DecisionFailed(str(exc), checked.issued) from exc
+            raise DecisionFailed(_said(exc), checked.issued) from exc
         _remember(self.idempotency, slot, decided)
         return decided
 
@@ -197,6 +197,14 @@ class ShadowPolicy:
         declared = route is not None and bool(route.precondition)
         asked = declared and not isinstance(self.reader, NoReader)
         return Delegate(target, preconditions.NOT_EVALUABLE if asked else Precondition())
+
+
+def _said(exc: Exception) -> str:
+    """Return `str(exc)`, or its type's name when that raises: the reads must still be carried."""
+    try:
+        return str(exc)
+    except Exception:
+        return type(exc).__name__
 
 
 def _local(
@@ -231,32 +239,32 @@ def _recall(
     store falls through to the ordinary answer, but an answer the key calls for that cannot be
     built raises: faking the write afresh would turn the service's refusal into a success.
     """
-    slot, first, refusal = _standing(store, request, classification, run_id)
-    if refusal is not None:
-        return slot, _conflict_answer(classification, refusal)
-    if first is not None:
+    slot, first, conflicted = _standing(store, request, classification, run_id)
+    if slot is not None and conflicted:
+        refusal = idempotency.conflict(classification.service, slot.idempotency_key)
+        if refusal is not None:
+            return slot, _conflict_answer(classification, refusal)
+    elif first is not None:
         return slot, _retry_answer(first, classification.service)
     return slot, None
 
 
 def _standing(
     store: idempotency.Store, request: Request, classification: Classification, run_id: str
-) -> tuple[idempotency.Slot | None, idempotency.FirstAnswer | None, services.Rejection | None]:
-    """Return this write's slot, its key's first answer, and the service's refusal of a reused key.
+) -> tuple[idempotency.Slot | None, idempotency.FirstAnswer | None, bool]:
+    """Return this write's slot, its key's first answer, and whether the key was reused.
 
-    Never raises: a failed store gives `(None, None, None)`, so the write is answered afresh.
+    Never raises: a failed store gives `(None, None, False)`, so the write is answered afresh.
     """
     try:
         slot = idempotency.slot_for(request, classification, run_id)
         if slot is None:
-            return None, None, None
+            return None, None, False
         first, conflicted = store.get(slot.id, slot.params)
-        if not conflicted:
-            return slot, first, None
-        return slot, None, idempotency.conflict(classification.service, slot.idempotency_key)
+        return slot, first, conflicted
     except Exception:
         logger.exception("irimi: the idempotency store failed; answering this write afresh")
-        return None, None, None
+        return None, None, False
 
 
 def idempotency_standing(
@@ -267,8 +275,9 @@ def idempotency_standing(
     `idempotent-replay` for a retry, `idempotency-conflict` for a reused key. A replay matches a
     recorded write only with the same flag. Never raises.
     """
-    _, first, refusal = _standing(store, request, classification, run_id)
-    if refusal is not None:
+    # A slot means the service has an idempotency spec, so a reused key is always refused.
+    _, first, conflicted = _standing(store, request, classification, run_id)
+    if conflicted:
         return Flag.IDEMPOTENCY_CONFLICT
     if first is not None:
         return Flag.IDEMPOTENT_REPLAY

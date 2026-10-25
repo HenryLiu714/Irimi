@@ -365,7 +365,10 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
     assert Flag.IDEMPOTENT_REPLAY not in second.flags
 
 
-def test_a_reused_key_whose_refusal_cannot_be_built_fails_the_decision(monkeypatch):
+@pytest.mark.parametrize(
+    ("owner", "name"), [(services, "fake_rejection"), (idempotency, "conflict")]
+)
+def test_a_reused_key_whose_refusal_cannot_be_built_fails_the_decision(monkeypatch, owner, name):
     """A reused key whose `idempotency_error` cannot be built raises, so irimi answers its 502.
 
     Faked afresh, the write would succeed where Stripe refuses it. The key still reads as a
@@ -374,10 +377,10 @@ def test_a_reused_key_whose_refusal_cannot_be_built_fails_the_decision(monkeypat
     ask(policy, refund_request(b"charge=ch_REAL&amount=100"))
     reused = refund_request(b"charge=ch_REAL&amount=250")
 
-    def fails(classification, body):
+    def fails(*args):
         raise RuntimeError("the refusal could not be built")
 
-    monkeypatch.setattr(services, "fake_rejection", fails)
+    monkeypatch.setattr(owner, name, fails)
     with pytest.raises(RuntimeError, match="the refusal could not be built"):
         ask(policy, reused)
     standing = idempotency_standing(policy.idempotency, reused, classify(reused, SHIPPED), "t3st")

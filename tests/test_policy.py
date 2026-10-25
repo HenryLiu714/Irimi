@@ -144,6 +144,27 @@ def test_a_rejection_that_raises_carries_the_check_read_it_was_built_from(monkey
     )
 
 
+def test_a_cause_that_cannot_be_printed_still_carries_the_check_read(monkeypatch):
+    """A cause whose `str` raises is named by its type, and the check read is still carried."""
+
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise ValueError("no message")
+
+    def fails(classification, body):
+        raise Unprintable
+
+    monkeypatch.setattr(services, "fake_rejection", fails)
+    policy = ShadowPolicy(
+        reader=canned_reader(json_response(200, charge_document(refunded_so_far=4900))),
+        maps=SHIPPED,
+    )
+    with pytest.raises(DecisionFailed) as raised:
+        ask(policy, refund_request())
+    assert str(raised.value) == "Unprintable"
+    assert [read.issued_by for read in raised.value.issued] == ["engine"]
+
+
 def test_a_replayed_write_lists_no_webhooks():
     """A retry lists no events: they are already on the first write's exchange."""
     policy = ShadowPolicy(reader=canned_reader(json_response(200, charge_document())), maps=SHIPPED)
