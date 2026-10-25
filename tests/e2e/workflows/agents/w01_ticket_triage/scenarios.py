@@ -57,7 +57,13 @@ def triage_script(call: LlmCall) -> LlmTurn:
     if len(refunds) < wanted:
         refund = ("issue_refund", {"charge": charge["id"], "amount": amount})
         # "send the refund twice": the same call twice in one turn, as a model repeats itself.
-        return LlmTurn(tool_calls=(refund, refund) if "twice" in call.system else (refund,))
+        if "twice" in call.system:
+            return LlmTurn(tool_calls=(refund, refund))
+        # "resend it for 100 less": a second call in the same turn, so under the same key.
+        if "resend it for 100 less" in call.system:
+            less = ("issue_refund", {"charge": charge["id"], "amount": amount - 100})
+            return LlmTurn(tool_calls=(refund, less))
+        return LlmTurn(tool_calls=(refund,))
     if "check the charge again" in call.system and len(charges) < 2:
         again = ("get_charge", {"charge": charge["id"]})
         return LlmTurn(tool_calls=(lookup, again) if late else (again,))
@@ -110,7 +116,10 @@ WORKFLOW = Workflow(
             "verify",
             "refund the whole charge, then read the charge again, which the overlay answers with "
             "the refund in it; replayed with `PROMPT=verify_only`, which refunds nothing, "
-            "that recorded read shows a refund the replay never made",
+            "that recorded read shows a refund the replay never made; replayed with "
+            "`PROMPT=verify_twice`, `verify_retry` or `verify_resent`, whose second refund is "
+            "refused by the check, answered as a retry, or refused for reusing the first's key, "
+            "it is still the recording's",
         ),
         "checked_charge": _scenario(
             "verify_only",

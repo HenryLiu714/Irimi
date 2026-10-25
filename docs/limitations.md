@@ -71,8 +71,9 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - **A command is the whole process.** With `-- COMMAND`, every run the process starts is the one
   replay, answered from the one recorded run, so a process that held several runs shows the
   others' writes as added.
-- **A divergence makes the rest live.** Past it, the agent's reads go to the real services and the
-  model is asked again.
+- **A divergence makes the rest live.** Past a missed write irimi fakes, or a recorded read that
+  would show a write the replay has not made, the agent's reads go to the real services, and a
+  model call the recording does not hold is sent to the model.
 - **No provenance between tools and requests.** A stored tool call names none of the exchanges its
   body made, so a replay that answers the tool takes the exchanges recorded within its span as its
   body's.

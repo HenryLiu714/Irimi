@@ -1632,6 +1632,137 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
     assert replay.internet.writes() == []
 
 
+def test_a_replay_whose_second_refund_is_refused_reads_the_charge_from_the_recording(replayed):
+    """A refund the check refuses in a replay changes nothing, so the replay does not diverge.
+
+    `verify_twice` refunds again before it reads the charge. The second refund misses and is
+    refused, as the first already refunded it all; the read after it is still the recording's,
+    which shows the first refund, and Stripe hears nothing."""
+    recorded, replay = replayed(W, "verified_refund", {"PROMPT": "verify_twice"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("issue_refund#3", 400, "fake-L1"),
+        ("llm#4", 200, None),
+        ("get_charge#4", 200, "overlay"),
+        ("llm#5", 200, None),
+        ("llm#6", 200, None),
+    ]
+    refused = [ex for ex in replay.reported if ex.kind == "write"][-1]
+    assert (refused.precondition.rejection_code, refused.flags) == (
+        "charge_already_refunded",
+        ("replay-miss",),
+    )
+    # The refused refund's check read is the recording's too.
+    stripe = [(ex.kind, ex.answered_by, ex.flags) for ex in replay.reported if ex.kind != "llm"]
+    assert stripe == [
+        ("read", "recording", ("from-recording",)),
+        ("write", "fake-L1", ("from-recording",)),
+        ("read", "recording", ("from-recording",)),
+        ("write", "fake-L1", ("replay-miss",)),
+        ("read", "overlay", ("from-recording",)),
+    ]
+    again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
+    [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
+    assert again.flags == ("from-recording",)
+    assert again.response.body == recorded_again.response.body
+    assert replay.internet.requests("api.stripe.com") == []
+    assert replay.returned()["refund_statuses"] == [200, 400]
+    assert replay.replay_result()[3] == "  4 from the recording · 7 missed"
+
+
+def test_a_replay_that_retries_its_refund_reads_the_charge_from_the_recording(replayed):
+    """A retry the recording never made repeats a refund it did, so the replay does not diverge.
+
+    `verify_retry` sends its refund twice in one turn, under one key. The first is the
+    recording's; the second misses and is answered as the retry it is, and the read after it is
+    still the recording's. The retry is no second write, so compare finds the refund the same."""
+    recorded, replay = replayed(W, "verified_refund", {"PROMPT": "verify_retry"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, None),
+        ("llm#5", 200, None),
+    ]
+    first, retry = [ex for ex in replay.reported if ex.kind == "write"]
+    assert first.flags == ("from-recording",)
+    assert retry.flags == ("idempotent-replay", "replay-miss")
+    assert retry.response.body == first.response.body
+    again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
+    [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
+    assert again.flags == ("from-recording",)
+    assert again.response.body == recorded_again.response.body
+    assert replay.internet.requests("api.stripe.com") == []
+    assert replay.returned()["refund_statuses"] == [200, 200]
+    assert replay.replay_result() == [
+        f"irimi replay · {recorded.one('run.start')['run']} -> {replay.process_run_id()}",
+        "  agent exited 0",
+        f"  diverged at {FIRST_CALL}",
+        "  4 from the recording · 6 missed",
+        "",
+        f"  = {FULL}",
+        *reply_changed("Refund of 4900 requested (statuses: 200, 200)."),
+        "",
+        "  1 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_a_replay_that_reuses_its_refund_s_key_reads_the_charge_from_the_recording(replayed):
+    """A key reused with another amount is refused as Stripe refuses it: no divergence.
+
+    `verify_resent` sends a second refund, 100 less, in the same turn and so under the same key.
+    The first is the recording's; the second misses and is refused `idempotency_error`, and the
+    read after it is still the recording's, showing the first refund alone."""
+    recorded, replay = replayed(W, "verified_refund", {"PROMPT": "verify_resent"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        (REFUND, 400, "fake-L1"),
+        ("llm#3", 200, None),
+        ("get_charge#3", 200, "overlay"),
+        ("llm#4", 200, None),
+        ("llm#5", 200, None),
+    ]
+    first, reused = [ex for ex in replay.reported if ex.kind == "write"]
+    assert first.flags == ("from-recording",)
+    assert reused.flags == ("idempotency-conflict", "replay-miss")
+    assert json.loads(reused.response.body)["error"]["type"] == "idempotency_error"
+    again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
+    [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
+    assert again.flags == ("from-recording",)
+    assert again.response.body == recorded_again.response.body
+    assert json.loads(again.response.body)["amount_refunded"] == 4900
+    assert replay.internet.requests("api.stripe.com") == []
+    assert replay.returned()["refund_statuses"] == [200, 400]
+    # Refused before any check, the reused key's refund has no read to name its currency.
+    resent = "refund 4800 (minor units, currency unknown) on ch_TICKET1"
+    assert replay.replay_result() == [
+        f"irimi replay · {recorded.one('run.start')['run']} -> {replay.process_run_id()}",
+        "  agent exited 0",
+        f"  diverged at {FIRST_CALL}",
+        "  4 from the recording · 6 missed",
+        "",
+        f"  = {FULL}",
+        f"  + ✗ stripe  {resent}  faked; would fail: idempotency_error",
+        *reply_changed("Refund of 4900 requested (statuses: 200, 400)."),
+        "",
+        "  1 same · 1 changed · 0 only in A · 1 only in B",
+    ]
+
+
 def _place(result, event: str, name: str) -> int:
     """Return where in the agent's log the first `event` named `name` is."""
     return next(

@@ -1,7 +1,8 @@
 """Build what `irimi replay` reports once a replay has run. Pure: runs nothing, prints nothing.
 
 - The divergence point is the first agent call the recording did not answer (a `replay-miss`
-  exchange or a read tool that ran for real); only a missed write sets `ReplayIndex.diverged`.
+  exchange or a read tool that ran for real); only a missed write the write log takes, or a
+  stale recorded answer, sets `ReplayIndex.diverged`.
 - Calls within a read tool's span belong to its body and are not counted (`made_within`).
 - The exit code is `irimi compare`'s, never the agent's; with dropped events it is never OK.
 """
