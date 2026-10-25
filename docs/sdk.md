@@ -181,8 +181,8 @@ An exception a read tool raised in the recorded run, raised again in a replay. F
 the original's type as recorded (`builtins.KeyError`), `message` its `str`, and `args` the
 original's, as JSON holds them (a tuple in them comes back as a list): a `KeyError`'s `args[0]` is
 its key, and an `OSError` has its `errno` and `strerror` back. When the recording holds no args that
-rebuild (bytes or an object's repr among them, a call recorded before irimi kept them), `args` is
-`(message,)`. Its other attributes, such as an `OSError`'s `filename`, are not stored.
+rebuild (bytes or an object's repr among them, a call recorded before irimi kept them), or that the
+builtin's constructor refuses, `args` is `(message,)`. Its other attributes, such as an `OSError`'s `filename`, are not stored.
 
 ### `irimi.testing`
 

@@ -123,8 +123,8 @@ A run's or tool call's `error` (`trace.ErrorInfo`):
 
 All three are redacted, `type` and `message` whole and only then cut; a secret across the cut is
 kept as its placeholder, never dropped or split. A replay raises a recorded error with its `args`
-when they rebuild (an `OSError`'s `errno` and `strerror` are among them, its `filename` is not),
-else with its `message` as its only argument.
+when they rebuild and its builtin's constructor takes them (an `OSError`'s `errno` and `strerror`
+are among them, its `filename` is not), else with its `message` as its only argument.
 
 ### Captured arguments
 

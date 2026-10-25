@@ -105,8 +105,9 @@ The fields are a stored tool call's ([trace-format.md](trace-format.md#tool_call
 which comes from the path; a body that names one is refused `400`. `ran` is `real` when the function
 ran, `shadow` when its fake ran, and `recording` when a replay answered it from the recording.
 `error` is `null` or `{"type": "module.QualName", "message": "...", "args": [...]}`. Its `args`,
-which may be left out, are the exception's arguments, captured as the call's `args` are; past 1 MiB
-together with those, they are sent as the truncation marker.
+which may be left out, are the exception's arguments, captured as the call's `args` are but with
+any `bytes` among them sent as `{"__irimi_repr__": "<bytes>"}`; past 1 MiB together with the call's
+`args`, they are sent as the truncation marker.
 
 ### `end`
 
