@@ -18,6 +18,15 @@ SECRET_PATTERNS: tuple[str, ...] = (
 # survives) unless it ends an escape stored text uses as a separator: `\n`, ` `, `%20`.
 _BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-9A-Fa-f]{2}))"
 SECRET_SHAPE = re.compile(_BOUNDARY + "(?:" + "|".join(SECRET_PATTERNS) + ")")
+# A JSON `\u` escape of an ASCII letter or digit, the one escape whose decoded character glues to a
+# shape after it: decoded JSON reads `Ask_live_…` as a word, its raw text as a shape.
+_ALNUM_ESCAPE = re.compile(r"\\u00(?:3[0-9]|[46][1-9A-Fa-f]|[57][0-9Aa])")
+
+
+def shapes_after_escaped_letters(text: str) -> frozenset[str]:
+    """Return each shape raw JSON `text` spells right after a `\\u` escape of a letter or digit."""
+    found = (SECRET_SHAPE.match(text, escape.end()) for escape in _ALNUM_ESCAPE.finditer(text))
+    return frozenset(shape.group(0) for shape in found if shape)
 
 
 # What a cut made with no redaction key, the SDK's, puts where a secret ran across it: dropping the

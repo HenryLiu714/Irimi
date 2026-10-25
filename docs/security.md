@@ -119,8 +119,8 @@ agent never see a placeholder.
   replaced wherever they appear: header names and values, the path and query, form fields, JSON
   strings and keys, every line of a text body (SSE included), a target URL and an operation name.
   A shape glued to a preceding letter or digit is part of a word and left alone, unless that
-  character ends an escape such as `\n`, `A` or `%20`. JSON is judged as sent, so a shape
-  after a JSON string's escaped letter (`"Ask_live_…"`) is replaced too.
+  character ends an escape such as `\n`, `\u0041` or `%20`. JSON is judged as sent, so a shape
+  after a JSON string's escaped letter (`"\u0041sk_live_…"`) is replaced too.
 - **Credential-path hosts.** On `hooks.slack.com`, and any host a map lists under
   `credential_path_hosts:`, the URL path is the secret, so the whole path is replaced wherever the
   exchange carries it.

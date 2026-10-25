@@ -29,7 +29,7 @@ from irimi.config import paths
 from irimi.config.files import write_private
 from irimi.core.bodies import FORM_CT
 from irimi.core.exchange import Exchange, Flag, Headers, Request, Response, header_value, media_type
-from irimi.core.secret_shapes import SECRET_SHAPE
+from irimi.core.secret_shapes import SECRET_SHAPE, shapes_after_escaped_letters
 from irimi.protocol.trace import (
     ErrorInfo,
     Event,
@@ -570,23 +570,17 @@ def _redact_line(line: str, key: bytes) -> str:
 def _redact_json_text(text: str, key: bytes) -> str | None:
     """Return `text` redacted as JSON: itself if unchanged, else compact JSON; None if not JSON.
 
-    The walk reads decoded strings, where `\\u0041sk_live_…` is a shape glued to a letter. The
-    raw text shows the escape, which the shape rule allows, so those shapes are hidden too.
+    The walk reads decoded strings, so it is also handed the shapes the raw text spells after an
+    escaped letter, which the shape rule allows there and the decoded string glues to a word.
     """
     try:
         document = json.loads(text, object_pairs_hook=_unique_members)
     except json.JSONDecodeError:
         return None
-    walked = _redact_json(document, key)
-    # Only a `\u` escape can glue a decoded letter or digit to a shape the raw text spells apart.
-    escaped = {m.group(0) for m in SECRET_SHAPE.finditer(text)} if "\\u" in text else set()
-    if walked is document and not escaped:
+    walked = _redact_json(document, key, shapes_after_escaped_letters(text))
+    if walked is document:
         return text
-    redacted = json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
-    # Longest first, so a shape that starts a longer one does not leave the longer one's tail.
-    for shape in sorted(escaped, key=len, reverse=True):
-        redacted = redacted.replace(shape, placeholder(key, shape))
-    return redacted
+    return json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
@@ -597,17 +591,22 @@ def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
     return members
 
 
-def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
-    """Return `value` itself if nothing matched, else a redacted copy; TypeError if not JSON."""
+def _redact_json(value: JSONValue, key: bytes, glued: frozenset[str] = frozenset()) -> JSONValue:
+    """Return `value` itself if nothing matched, else a redacted copy; TypeError if not JSON.
+
+    `glued` names shapes to hide in every string as well (`_redact_text`)."""
     if isinstance(value, str):
-        return _redact_text(value, key)
+        return _redact_text(value, key, glued)
     if isinstance(value, list):
-        items = [_redact_json(item, key) for item in value]
+        items = [_redact_json(item, key, glued) for item in value]
         if all(new is old for new, old in zip(items, value, strict=True)):
             return value
         return items
     if isinstance(value, dict):
-        pairs = [(_redact_text(k, key), _redact_member(k, v, key)) for k, v in value.items()]
+        pairs = [
+            (_redact_text(k, key, glued), _redact_member(k, v, key, glued))
+            for k, v in value.items()
+        ]
         if all(nk is k and nv is v for (nk, nv), (k, v) in zip(pairs, value.items(), strict=True)):
             return value
         return dict(pairs)
@@ -617,10 +616,10 @@ def _redact_json(value: JSONValue, key: bytes) -> JSONValue:
     raise TypeError(f"{type(value).__name__} is not JSON")
 
 
-def _redact_member(name: str, value: JSONValue, key: bytes) -> JSONValue:
+def _redact_member(name: str, value: JSONValue, key: bytes, glued: frozenset[str]) -> JSONValue:
     """Hide a secret key's value whole (non-strings as sorted-key JSON); keep `null`."""
     if not _is_secret_key(name):
-        return _redact_json(value, key)
+        return _redact_json(value, key, glued)
     if value is None:
         return value
     return _hide(value if isinstance(value, str) else json.dumps(value, sort_keys=True), key)
@@ -635,7 +634,35 @@ def _hide(value: str, key: bytes) -> str:
     return value if value == "" else placeholder(key, value)
 
 
-def _redact_text(text: str, key: bytes) -> str:
-    """Return `text` itself when it holds no secret shape, else a copy with each replaced."""
-    redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
-    return redacted if count else text
+def _redact_text(text: str, key: bytes, glued: frozenset[str] = frozenset()) -> str:
+    """Return `text` itself when it holds no secret shape, else a copy with each replaced.
+
+    Each copy of a `glued` shape is hidden too. Where it overlaps a shape `text` shows, the two
+    are one secret, so neither leaves the other's tail behind."""
+    if not glued:
+        redacted, count = SECRET_SHAPE.subn(lambda m: placeholder(key, m.group(0)), text)
+        return redacted if count else text
+    spans = [match.span() for match in SECRET_SHAPE.finditer(text)]
+    for shape in glued:
+        at = text.find(shape)
+        while at != -1:
+            spans.append((at, at + len(shape)))
+            at = text.find(shape, at + 1)
+    if not spans:
+        return text
+    pieces, end = [], 0
+    for start, stop in _merged(spans):
+        pieces += [text[end:start], placeholder(key, text[start:stop])]
+        end = stop
+    return "".join([*pieces, text[end:]])
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return `spans` sorted, each run of overlapping ones joined into one."""
+    merged: list[tuple[int, int]] = []
+    for start, stop in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(stop, merged[-1][1]))
+        else:
+            merged.append((start, stop))
+    return merged

@@ -399,7 +399,8 @@ def test_a_shape_after_a_json_strings_escaped_letter_is_replaced_wherever_json_i
     """The walk reads `\\u0041` as `A`, glued to the shape, so the shape is judged as sent.
 
     A JSON body, an SSE line and an event joined from several `data:` lines all take the
-    placeholder, and a shape that starts a longer one leaves none of the longer one behind."""
+    placeholder. A glued shape that overlaps another shape is one secret with it, and one that
+    starts a longer glued shape leaves none of the longer one behind."""
     note, hidden = f'"\\u0041{LIVE_KEY}"', f'"A{_ph(LIVE_KEY)}"'
     assert _body(f'{{"note": {note}}}'.encode(), JSON) == f'{{"note":{hidden}}}'.encode()
     sse = f'data: {{"note": {note}}}\n\ndata: {{\ndata: "note": {note}, "token": "t1"\ndata: }}\n'
@@ -408,6 +409,18 @@ def test_a_shape_after_a_json_strings_escaped_letter_is_replaced_wherever_json_i
     assert stored == f"{expected}data:\ndata:\n".encode()
     both = f'["\\u0041{LIVE_KEY_SHORT}", "\\u0041{LIVE_KEY}"]'.encode()
     assert _body(both, JSON) == f'["A{_ph(LIVE_KEY_SHORT)}","A{_ph(LIVE_KEY)}"]'.encode()
+    overlapping = f'["{LIVE_KEY_SHORT}\\u0041{LIVE_KEY}"]'.encode()
+    assert _body(overlapping, JSON) == f'["{_ph(LIVE_KEY_SHORT + "A" + LIVE_KEY)}"]'.encode()
+    twice = f'["\\u0041{LIVE_KEY} \\u0062{LIVE_KEY}"]'.encode()
+    assert _body(twice, JSON) == f'["A{_ph(LIVE_KEY)} b{_ph(LIVE_KEY)}"]'.encode()
+
+
+def test_only_an_escaped_letter_or_digit_glues_to_the_shape_after_it():
+    """Every other escape decodes to a character the shape rule already reads as a separator."""
+    for code in range(0x20, 0x7F):
+        for spelling in (f"{code:04x}", f"{code:04X}"):
+            glued = secret_shapes.shapes_after_escaped_letters(f'"\\u{spelling}{LIVE_KEY}"')
+            assert glued == ({LIVE_KEY} if chr(code).isalnum() else set()), spelling
 
 
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
