@@ -395,6 +395,21 @@ def test_a_shape_glued_to_a_word_is_part_of_the_word():
     assert redact_json(escaped, KEY) is escaped
 
 
+def test_a_shape_after_a_json_strings_escaped_letter_is_replaced_wherever_json_is_walked():
+    """The walk reads `\\u0041` as `A`, glued to the shape, so the shape is judged as sent.
+
+    A JSON body, an SSE line and an event joined from several `data:` lines all take the
+    placeholder, and a shape that starts a longer one leaves none of the longer one behind."""
+    note, hidden = f'"\\u0041{LIVE_KEY}"', f'"A{_ph(LIVE_KEY)}"'
+    assert _body(f'{{"note": {note}}}'.encode(), JSON) == f'{{"note":{hidden}}}'.encode()
+    sse = f'data: {{"note": {note}}}\n\ndata: {{\ndata: "note": {note}, "token": "t1"\ndata: }}\n'
+    stored = _response_body(sse.encode(), ("content-type", "text/event-stream"))
+    expected = f'data: {{"note":{hidden}}}\n\ndata: {{"note":{hidden},"token":"{_ph("t1")}"}}\n'
+    assert stored == f"{expected}data:\ndata:\n".encode()
+    both = f'["\\u0041{LIVE_KEY_SHORT}", "\\u0041{LIVE_KEY}"]'.encode()
+    assert _body(both, JSON) == f'["A{_ph(LIVE_KEY_SHORT)}","A{_ph(LIVE_KEY)}"]'.encode()
+
+
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
     secret = LIVE_KEY
     response = Response(

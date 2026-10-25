@@ -568,15 +568,25 @@ def _redact_line(line: str, key: bytes) -> str:
 
 
 def _redact_json_text(text: str, key: bytes) -> str | None:
-    """Return `text` redacted as JSON: itself if unchanged, else compact JSON; None if not JSON."""
+    """Return `text` redacted as JSON: itself if unchanged, else compact JSON; None if not JSON.
+
+    The walk reads decoded strings, where `\\u0041sk_live_…` is a shape glued to a letter. The
+    raw text shows the escape, which the shape rule allows, so those shapes are hidden too.
+    """
     try:
         document = json.loads(text, object_pairs_hook=_unique_members)
     except json.JSONDecodeError:
         return None
     walked = _redact_json(document, key)
-    if walked is document:
+    # Only a `\u` escape can glue a decoded letter or digit to a shape the raw text spells apart.
+    escaped = {m.group(0) for m in SECRET_SHAPE.finditer(text)} if "\\u" in text else set()
+    if walked is document and not escaped:
         return text
-    return json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
+    redacted = json.dumps(walked, separators=(",", ":"), ensure_ascii=False)
+    # Longest first, so a shape that starts a longer one does not leave the longer one's tail.
+    for shape in sorted(escaped, key=len, reverse=True):
+        redacted = redacted.replace(shape, placeholder(key, shape))
+    return redacted
 
 
 def _unique_members(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
