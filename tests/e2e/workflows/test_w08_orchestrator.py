@@ -315,6 +315,8 @@ def test_a_reservation_whose_answer_target_is_down_is_answered_502_and_compared_
     down = run_workflow(W, "target_down", mode)
     assert bare.by_label()["reserve"] == (200, None)
     assert down.by_label()["reserve"] == (502, "irimi")
+    (warning,) = down.irimi_logs
+    assert warning.startswith(f"irimi: target {DOWN_TARGET!r} could not be reached: ")
     assert decision(down) == {
         "reserved": False,
         "reason": "http_502",

@@ -400,6 +400,8 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
             for method, path, kind, odd in REFUSED_AS_STORED
         ),
     ]
+    [webhook] = [e for e in stored if e.request.path == hidden[WEBHOOK_BAD_PORT]]
+    assert webhook.request.header("x-note") == f"sent as {hidden[WEBHOOK_BAD_PORT]}"
     for e, why in zip(stored[1:], BASE_URL_REFUSALS.values(), strict=True):
         assert e.response is not None and e.response.status == 403
         if e.request.method != "HEAD":

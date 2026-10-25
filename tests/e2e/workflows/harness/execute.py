@@ -460,9 +460,10 @@ class _Kept(logging.Handler):
 
 @contextlib.contextmanager
 def _keeping_logs(lines: list[str]) -> Iterator[None]:
-    """Keep in `lines` what any logger, mitmproxy's too, emits in the block; pytest takes it all.
+    """Keep in `lines` what any logger, mitmproxy's too, emits in the block.
 
-    irimi configures no logging, so a user sees what Python's last-resort handler prints."""
+    irimi configures no logging, so a user sees what Python's last-resort handler prints. Under
+    pytest none of it reaches stderr: pytest's own handlers take every record."""
     handler = _Kept(lines)
     root = logging.getLogger()
     root.addHandler(handler)

@@ -162,7 +162,8 @@ def base_url_hosts() -> None:
     A write to a host `--base-url-host` names is relayed and faked. Every other one is answered by
     irimi itself, 403 with its JSON error: a host no map or flag names, a path that names no host
     or an empty one, and a port that is no port, once on Slack's incoming webhook, whose path is
-    its secret. Each answer's body is logged, so a test reads what irimi said."""
+    its secret and is echoed in a header. Each answer's body is logged, so a test reads what irimi
+    said."""
     listener = f"http://127.0.0.1:{urlsplit(agentkit.proxy() or '').port}"
     webhook = agentkit.key("SLACK_WEBHOOK_PATH")
     calls = (
@@ -176,7 +177,8 @@ def base_url_hosts() -> None:
     )
     for method, path, label in calls:
         form = {"amount": "700"} if method == "POST" else None
-        resp = http(method, listener + path, form=form, label=label)
+        note = {"x-note": f"sent as {path}"} if path.startswith(f"/{WEBHOOK_HOST}") else None
+        resp = http(method, listener + path, form=form, headers=note, label=label)
         agentkit.obs("answer", label=label, status=resp.status, body=resp.json())
     _head_then_get(listener)
 
