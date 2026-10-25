@@ -68,19 +68,19 @@ class ReplayPolicy:
         )
 
     def recorded_tool_call(
-        self, name: str, args: JSONValue, answer_id: str | None = None
+        self, name: str, args: JSONValue, hold: str | None = None
     ) -> ToolCall | None:
         """Return the recording's answer to a read tool call, or None to run the tool for real."""
         try:
-            return self.recording.tool_answer_for(name, args, answer_id)
+            return self.recording.tool_answer_for(name, args, hold)
         except Exception:
             logger.exception("irimi: the recording could not be searched; the tool runs for real")
             return None
 
-    def release_tool_call(self, answer_id: str) -> None:
-        """Give back what the hit `answer_id` names used up, so its body's re-run is answered."""
+    def release_tool_call(self, hold: str) -> None:
+        """Give back what the hit held under `hold` used up, so its body's re-run is answered."""
         try:
-            self.recording.release(answer_id)
+            self.recording.release(hold)
         except Exception:
             logger.exception(
                 "irimi: the recording could not take an answer back; the tool's body is "

@@ -1089,7 +1089,7 @@ def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_it
 def _answered_with_a_body():
     """A recording whose tool's body made a read, a write and a read tool, then a later read tool.
 
-    The tool's lookup is answered under the id `a1`."""
+    The tool's lookup is held under `a1`."""
     read = _stored(_req(), started_at=10.2, ended_at=10.3)
     write = _recorded_refund(started_at=10.4, ended_at=10.5)
     nested = _tool(name="db.rate", result={"rate": 1}, span=(10.6, 10.7))
@@ -1131,8 +1131,8 @@ def test_a_release_gives_back_only_what_its_answer_used_up():
     assert recording.answer_for(_req(), "read") is None
 
 
-def test_a_release_by_an_unknown_or_spent_id_gives_back_nothing():
-    """Only the id the lookup was answered under gives anything back, and only once."""
+def test_a_release_by_an_unknown_or_spent_hold_gives_back_nothing():
+    """Only the hold the lookup named gives anything back, and only once."""
     recording, _nested = _answered_with_a_body()
     recording.release("another")
     assert recording.answer_for(_req(), "read") is None
@@ -1140,6 +1140,25 @@ def test_a_release_by_an_unknown_or_spent_id_gives_back_nothing():
     assert recording.answer_for(_req(), "read") is not None
     recording.release("a1")
     assert recording.answer_for(_req(), "read") is None
+
+
+def test_no_release_makes_a_replay_forward_a_write():
+    """A release out of turn gives back recorded answers only: a write is never forwarded.
+
+    The agent can post any release. Released after its answer was used, the hit's write is
+    answered from the recording; a release spent or never given leaves the next write a miss,
+    which shadow mode fakes."""
+    recording, _nested = _answered_with_a_body()
+    policy = ReplayPolicy(recording, SHIPPED)
+    policy.release_tool_call("a1")
+    answers = [_answer(policy, _refund_request())]
+    for hold in ("a1", "another"):
+        policy.release_tool_call(hold)
+    answers.append(_answer(policy, _refund_request(key="k-2")))
+    assert [(a.answered_by, a.flags) for a in answers] == [
+        ("fake-L1", (Flag.FROM_RECORDING,)),
+        ("fake-L1", (Flag.REPLAY_MISS,)),
+    ]
 
 
 def test_a_release_the_recording_cannot_take_is_logged_and_never_raised(monkeypatch, caplog):

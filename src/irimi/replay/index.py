@@ -256,7 +256,7 @@ class ReplayIndex:
         self._maps = maps
         self._redaction_key = redaction_key
         self._diverged = False
-        # What each hit used up besides its call, by the id its lookup's answer was given.
+        # What each hit used up besides its call, by the hold its lookup named.
         self._held: dict[str, list[_Entry | _ToolEntry]] = {}
         self._lock = threading.Lock()
 
@@ -339,12 +339,12 @@ class ReplayIndex:
         return None
 
     def tool_answer_for(
-        self, name: str, args: JSONValue, answer_id: str | None = None
+        self, name: str, args: JSONValue, hold: str | None = None
     ) -> ToolCall | None:
         """Return the recorded read tool call that answers this live one, or None for a miss.
 
         `args` are unredacted. An unservable match is a miss using up only itself; an answered
-        one also uses up what was recorded in its span, held under `answer_id` for `release`. A
+        one also uses up what was recorded in its span, held under `hold` for `release`. A
         stale match is a miss, is not used up, and does not diverge the replay: the tool's body
         runs instead."""
         redacted = redact.redact_json(args, self._redaction_key)
@@ -367,18 +367,18 @@ class ReplayIndex:
                     taken += [nested for nested in entry.nested if not nested.consumed]
                     for made in taken:
                         made.consumed = True
-                    if answer_id is not None:
-                        self._held[answer_id] = taken
+                    if hold is not None:
+                        self._held[hold] = taken
                     return entry.call
         return None
 
-    def release(self, answer_id: str) -> None:
-        """Give back what the answer held under `answer_id` used up: the SDK could not use it.
+    def release(self, hold: str) -> None:
+        """Give back what the answer held under `hold` used up: the SDK could not use it.
 
         The call stays used up, as an unservable one is, so the tool's body runs and the recording
-        answers what it makes. An id unknown, or released already, gives back nothing."""
+        answers what it makes. A hold unknown, or released already, gives back nothing."""
         with self._lock:
-            for made in self._held.pop(answer_id, ()):
+            for made in self._held.pop(hold, ()):
                 made.consumed = False
 
     def _stale(self, position: int) -> bool:

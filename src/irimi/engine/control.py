@@ -112,7 +112,8 @@ class ControlEndpoint:
         # The stored run being replayed, if any; every run the SDK starts here replays it.
         self.replay_of = replay_of
         self.on_tool_call = on_tool_call
-        # Answers `tool-calls/recorded`; the path's run id is checked, never used to choose.
+        # Answers `tool-calls/recorded`; the path's run id is checked and holds a hit for that
+        # run's release, never used to choose the call.
         self.policy = policy
 
     @classmethod
@@ -174,9 +175,9 @@ class ControlEndpoint:
             raise _Refused(400, f"{run_id!r} {OWN_RUN}")
         posted = _posted(request, whole_body)
         if action == RECORDED_ACTION:
-            return self._recorded(posted)
+            return self._recorded(run_id, posted)
         if action == RELEASE_ACTION:
-            self._release(posted)
+            self._release(run_id, posted)
         elif action == START_ACTION:
             self._start(run_id, posted)
         elif action == TOOL_CALLS_ACTION:
@@ -219,7 +220,7 @@ class ControlEndpoint:
         except Exception:
             logger.exception("irimi: on_tool_call raised; the tool call is still stored")
 
-    def _recorded(self, posted: Mapping[str, Any]) -> Response:
+    def _recorded(self, run_id: str, posted: Mapping[str, Any]) -> Response:
         """Return a read tool call's recorded outcome, or 404; a hit is not recorded as a call."""
         for field in RECORDED_LOOKUP_FIELDS:
             if field not in posted:  # worded as the trace decoders word it
@@ -231,13 +232,13 @@ class ControlEndpoint:
         found = (
             None
             if self.policy is None
-            else self.policy.recorded_tool_call(name, posted["args"], answer_id)
+            else self.policy.recorded_tool_call(name, posted["args"], _hold(run_id, answer_id))
         )
         if found is None:
             return _error_response(404, NO_RECORDED_CALL)
         return _json_response(200, protocol.recorded_outcome_to_json(found, answer_id))
 
-    def _release(self, posted: Mapping[str, Any]) -> None:
+    def _release(self, run_id: str, posted: Mapping[str, Any]) -> None:
         """Give back what the posted `answer_id`'s answer used up: the SDK could not use it."""
         if ANSWER_ID_FIELD not in posted:
             raise _Refused(400, f"missing required field {ANSWER_ID_FIELD!r}")
@@ -247,11 +248,18 @@ class ControlEndpoint:
                 400, f"{ANSWER_ID_FIELD!r} is {trace.json_type(answer_id)}, not a string"
             )
         if self.policy is not None:
-            self.policy.release_tool_call(answer_id)
+            self.policy.release_tool_call(_hold(run_id, answer_id))
 
     def _end(self, run_id: str, posted: Mapping[str, Any]) -> None:
         end = _decode_or_400(protocol.run_end_from_json, posted)
         self.store.end_run(run_id, end.ended_at, end.outcome, end.error)
+
+
+def _hold(run_id: str, answer_id: str) -> str:
+    """Return what a hit is held under: its answer's id within the run whose lookup got it.
+
+    So a release under another run's path gives nothing back. A run id holds no `/`."""
+    return f"{run_id}/{answer_id}"
 
 
 def _split_run_route(route: str) -> tuple[str, str] | None:

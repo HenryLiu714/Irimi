@@ -141,12 +141,12 @@ answers `200`:
 Return `result` to the caller, raise `error` (a recorded exception, with its `args` when it has
 them), and, when `awaited` is true, return them through an awaitable. When you cannot use the
 answer (`result` names a class you cannot rebuild yet, or the call was cancelled while it waited),
-release it by its `answer_id` before you run the tool for real. A miss, or any lookup outside
-a replay, answers `404` with the message `no recorded call`: run the tool for real. Any other `404`
-is a route this irimi does not have, as an irimi older than the client answers; warn, and run the
-tool for real. Tell the two by the message, which every irimi speaking protocol 1 has sent, not the
-`type`, which they share. A lookup is not recorded as a tool call; post the call afterwards with
-`ran: recording` or `ran: real`.
+release it by its `answer_id`, under the same run, before you run the tool for real. A miss, or
+any lookup outside a replay, answers `404` with the message `no recorded call`: run the tool for
+real. Any other `404` is a route this irimi does not have, as an irimi older than the client
+answers; warn, and run the tool for real. Tell the two by the message, which every irimi speaking
+protocol 1 has sent, not the `type`, which they share. A lookup is not recorded as a tool call;
+post the call afterwards with `ran: recording` or `ran: real`.
 
 ### `tool-calls/recorded/release`
 
@@ -160,10 +160,10 @@ A replay's release of a lookup's answer the client did not use:
 itself: the exchanges and read tool calls recorded within that call's span. The call stays used
 up, as one irimi cannot hand back is, so run the tool for real, and the recording answers what
 its body sends. Release only an answer you did not use: released after you returned it, it gives
-back requests the recorded call's body already answered, which a later request may then take. An
-`answer_id` irimi did not give, or has released already, gives back nothing, and is still `204`.
-An answer never released keeps all of it used up. The path's run is checked, as a lookup's is,
-but the `answer_id` alone names the answer.
+back requests the recorded call's body already answered, which a later request may then take.
+irimi holds an answer for the run its lookup named, so post the release to that run: one under
+another run, or naming an `answer_id` irimi did not give or has released already, gives back
+nothing, and is still `204`. An answer never released keeps all of it used up.
 
 ### `health`
 

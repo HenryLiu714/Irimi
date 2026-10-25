@@ -369,6 +369,21 @@ REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
     ("POST", _RELEASE, {}, 400, "missing required field 'answer_id'"),
     ("POST", _RELEASE, {"answer_id": 1}, 400, "'answer_id' is an integer, not a string"),
     ("POST", _RELEASE, b"[]", 400, "the body is a list, not an object"),
+    ("POST", _RELEASE, b'{"answer_id": NaN}', 400, _NOT_JSON + "NaN is not a finite number"),
+    (
+        "POST",
+        "/_irimi/runs/../x/tool-calls/recorded/release",
+        {"answer_id": "a1"},
+        400,
+        "'../x' cannot name a run",
+    ),
+    (
+        "POST",
+        _RELEASE,
+        b" " * (MAX_CONTROL_BODY + 1),
+        413,
+        f"the body is {MAX_CONTROL_BODY + 1} bytes, over the {MAX_CONTROL_BODY} allowed",
+    ),
 ]
 
 
@@ -454,9 +469,10 @@ def test_every_control_answer_names_the_protocol_irimi_speaks(engine):
         engine.call("GET", "/_irimi/health"),
         engine.call("POST", _START, _start_body(1.0)),
         engine.call("POST", _LOOKUP, LOOKUP),
+        engine.call("POST", _RELEASE, {"answer_id": "a1"}),
         engine.call("POST", "/_irimi/nowhere", {}),
     ]
-    assert [status for status, _, _ in answers] == [200, 204, 404, 404]
+    assert [status for status, _, _ in answers] == [200, 204, 404, 204, 404]
     for _, headers, _ in answers:
         assert ("irimi-protocol", "1") in headers
     engine.finish()
@@ -521,7 +537,7 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
     """A lookup whose policy raises is answered with irimi's stamped 500, a miss to the SDK."""
 
     class _Broken(ShadowPolicy):
-        def recorded_tool_call(self, name, args, answer_id=None):
+        def recorded_tool_call(self, name, args, hold=None):
             raise RuntimeError("the recording is on fire")
 
     engine = _replaying(tmp_path, monkeypatch, policy=_Broken())
@@ -534,28 +550,28 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
 
 
 class _Holds(ShadowPolicy):
-    """A policy that answers every lookup and notes each id it answers under and is released."""
+    """A policy that answers every lookup and notes each hold it answers under and is released."""
 
     def __init__(self) -> None:
         super().__init__()
         self.answered: list[str | None] = []
         self.released: list[str] = []
 
-    def recorded_tool_call(self, name, args, answer_id=None):
-        self.answered.append(answer_id)
+    def recorded_tool_call(self, name, args, hold=None):
+        self.answered.append(hold)
         return ToolCall("tc-1", "recorded01", name, "read", "real", args, {"n": 1}, None, 1.0, 2.0)
 
-    def release_tool_call(self, answer_id):
-        self.released.append(answer_id)
+    def release_tool_call(self, hold):
+        self.released.append(hold)
 
 
 @pytest.mark.parametrize("run_id", [RUN, PROCESS_RUN, "unattributed"])
 def test_a_lookup_s_answer_is_named_by_a_fresh_id_its_release_hands_the_policy(
     tmp_path, monkeypatch, run_id
 ):
-    """Each hit is answered under an id of its own, which a release names: a stamped 204.
+    """Each hit is answered under an id of its own and held for its run, which a release names.
 
-    An id the policy never answered under is handed on too, and is no refusal."""
+    A stamped 204. An id the policy never answered under is handed on too, and is no refusal."""
     policy = _Holds()
     engine = _replaying(tmp_path, monkeypatch, policy=policy)
     lookup = f"/_irimi/runs/{run_id}/tool-calls/recorded"
@@ -566,12 +582,51 @@ def test_a_lookup_s_answer_is_named_by_a_fresh_id_its_release_hands_the_policy(
         unknown = engine.call("POST", f"{lookup}/release", {"answer_id": "never-given"})
     finally:
         reader = engine.finish()
-    assert policy.answered == ids and len(set(ids)) == 2 and all(ids)
-    assert policy.released == [ids[0], "never-given"]
+    assert len(set(ids)) == 2 and all(isinstance(i, str) and i for i in ids)
+    assert policy.answered == [f"{run_id}/{i}" for i in ids]
+    assert policy.released == [f"{run_id}/{ids[0]}", f"{run_id}/never-given"]
     for status, headers, body in (released, unknown):
         assert (status, body) == (204, b"")
         assert STAMP in headers
     assert reader.list_runs() == [] and engine.seen == [] and engine.tool_calls == []
+
+
+def test_only_the_run_whose_lookup_got_an_answer_gives_it_back(tmp_path, monkeypatch):
+    """A release under another run's path gives back nothing; under the lookup's run, it does.
+
+    The recorded `db.balance` held a `db.rate` call in its span, which a later `db.rate` follows,
+    so the hit uses that inner call up until the answer is released."""
+
+    def call(name: str, result: JSONValue, start: float, end: float) -> ToolCall:
+        args: JSONValue = {"account": "acc_1"}
+        return ToolCall(
+            f"tc-{start}", "recorded01", name, "read", "real", args, result, None, start, end
+        )
+
+    inner, outer, later = (
+        call("db.rate", {"rate": 1}, 10.5, 10.6),
+        call("db.balance", {"n": 1}, 10.0, 11.0),
+        call("db.rate", {"rate": 2}, 12.0, 12.1),
+    )
+    rate: dict[str, JSONValue] = {"name": "db.rate", "args": {"account": "acc_1"}}
+    taken: list[JSONValue] = []
+
+    def replayed(*released_under: str) -> None:
+        engine = _replaying(tmp_path / str(len(taken)), monkeypatch, inner, outer, later)
+        try:
+            _, _, body = engine.call("POST", _LOOKUP, LOOKUP)
+            answer_id = json.loads(body)["answer_id"]
+            for run_id in released_under:
+                route = f"/_irimi/runs/{run_id}/tool-calls/recorded/release"
+                _ok(engine.call("POST", route, {"answer_id": answer_id}))
+            _, _, body = engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls/recorded", rate)
+            taken.append(json.loads(body)["result"])
+        finally:
+            engine.finish()
+
+    replayed(PROCESS_RUN, "unattributed", "sdkrun02")
+    replayed(RUN)
+    assert taken == [{"rate": 2}, {"rate": 1}]
 
 
 def test_a_release_under_an_engine_that_is_not_replaying_gives_back_nothing(engine):
