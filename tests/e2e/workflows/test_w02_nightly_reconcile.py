@@ -11,10 +11,11 @@ from tests.e2e.workflows.agents.w02_nightly_reconcile.agent import (
     LEDGER,
     SOURCE_ENV,
     SOURCE_KEY_ENV,
+    charge_id,
     customer_id,
 )
 from tests.e2e.workflows.agents.w02_nightly_reconcile.scenarios import LONG_RUN_LABEL
-from tests.e2e.workflows.harness.compare import compare
+from tests.e2e.workflows.harness.compare import compare, rows_not_shown
 from tests.e2e.workflows.harness.execute import replay, replayed_run_id
 from tests.e2e.workflows.harness.invariants import check_invariants
 
@@ -200,6 +201,60 @@ def test_irimi_compare_shows_a_clean_night_and_forty_mismatches_eighty_writes_ap
         "",
         "  0 same · 1 changed · 0 only in A · 80 only in B",
     ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_irimi_compare_pairs_a_night_reconciled_twice_beside_forty_mismatches_once(
+    shared_store_run, mode
+):
+    """A tags three customers twice; B tags forty once, those three last. Both copies line up.
+
+    A's first copy pairs, changed, with B's first three updates and its second copy with B's own
+    three, so A has no write B lacks."""
+    twice = shared_store_run(W, "same_date_twice", mode)
+    forty = shared_store_run(W, "forty_mismatches")
+    assert check_invariants(twice) == []
+    code, out, err = compare(twice, forty)
+    a, b = (result.one("run.start")["run"] for result in (twice, forty))
+    update = "○ stripe  update customer {}  faked; not checked"
+    reconciled = f"○ tool  {AGENT}:mark_reconciled  fake ran instead"
+    changed = [
+        line
+        for i in (2, 1, 0)
+        for line in (
+            f"  ~ A {update.format(customer_id(i))}",
+            f"    B {update.format(customer_id(37 + i))}",
+            f"  ~ A {reconciled}",
+            f"    B {reconciled}",
+            f'      args.charge: "{charge_id(i)}" -> "{charge_id(37 + i)}"',
+        )
+    ]
+    added = [
+        line
+        for i in reversed(range(3, 37))
+        for line in (f"  + {update.format(customer_id(i))}", f"  + {reconciled}")
+    ]
+    same = [
+        line
+        for i in (2, 1, 0)
+        for line in (f"  = {update.format(customer_id(i))}", f"  = {reconciled}")
+    ]
+    post = 'slack  post to #C0RECON: "reconciled {} for 2026-09-27"  ' + PASSED
+    assert (code, err) == (1, [])
+    assert out == [
+        f"irimi compare · {a} vs {b}",
+        "  A  nightly-reconcile",
+        "  B  nightly-reconcile",
+        "",
+        *changed,
+        *added,
+        *same,
+        f"  ~ A ○ {post.format(6)}",
+        f"    B ○ {post.format(40)}",
+        "",
+        "  6 same · 7 changed · 0 only in A · 68 only in B",
+    ]
+    assert rows_not_shown(forty, a, b, out) == []
 
 
 def test_a_replay_that_tags_each_customer_otherwise_compares_its_updates_changed(replayed):
