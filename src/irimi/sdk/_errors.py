@@ -107,9 +107,14 @@ def _as_builtin(builtin: type[Exception]) -> type[RecordedToolError]:
 
 
 def error_info(exc: BaseException) -> trace.ErrorInfo:
-    """Return how to record `exc`; a RecordedToolError keeps its original type name."""
+    """Return how to record `exc`; a RecordedToolError keeps its original type name. Never raises.
+
+    A subclass whose `__init__` skipped RecordedToolError's is recorded as any exception is.
+    """
     if isinstance(exc, RecordedToolError):
-        return trace.ErrorInfo(exc.type_name, exc.message)
+        type_name, message = getattr(exc, "type_name", None), getattr(exc, "message", None)
+        if isinstance(type_name, str) and isinstance(message, str):
+            return trace.ErrorInfo(type_name, message)
     return trace.ErrorInfo.from_exception(exc)
 
 
@@ -118,8 +123,9 @@ def tool_error_info(exc: BaseException) -> trace.ErrorInfo:
 
     A RecordedToolError a replay raised is recorded as its recording holds it.
     """
-    if isinstance(exc, RecordedToolError) and exc._recorded is not None:
-        return exc._recorded
+    recorded = getattr(exc, "_recorded", None) if isinstance(exc, RecordedToolError) else None
+    if isinstance(recorded, trace.ErrorInfo):
+        return recorded
     try:
         args = exc.args
     except Exception:  # an `args` property that raises: recorded without them

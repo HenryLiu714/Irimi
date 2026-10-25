@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import functools
 import gc
 import http.server
@@ -269,6 +270,36 @@ def test_a_trigger_that_raises_re_raises_the_same_object_and_its_run_ends_in_err
     assert caught.value is boom
     [run] = irimi.sdk_runs()
     assert (run.end.outcome, run.end.error) == ("error", ErrorInfo("builtins.ValueError", "x"))
+
+
+def test_a_recorded_tool_error_subclass_that_skips_its_init_propagates_and_is_recorded(irimi):
+    """A subclass whose `__init__` skipped RecordedToolError's is recorded as any exception is.
+
+    The SDK never raises: its tool call and its run's end are recorded, and it propagates as is."""
+
+    class Bare(sdk.RecordedToolError):
+        def __init__(self, text: str) -> None:
+            Exception.__init__(self, text)
+
+    bare = Bare("acc_1")
+
+    @sdk.read_tool(name="db.bare")
+    def lookup() -> None:
+        raise bare
+
+    @sdk.trigger
+    def fails() -> None:
+        lookup()
+
+    with pytest.raises(Bare) as caught:
+        fails()
+    assert caught.value is bare
+    [run] = irimi.sdk_runs()
+    # Its `str` reads the `message` it never set, so it is recorded as unprintable.
+    error = ErrorInfo(f"{__name__}.{Bare.__qualname__}", f"<unprintable {Bare.__qualname__}>")
+    assert (run.end.outcome, run.end.error) == ("error", error)
+    [call] = irimi.finish().load_run(run.run_id).events
+    assert call.error == dataclasses.replace(error, args=["acc_1"])
 
 
 def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_run(irimi):
