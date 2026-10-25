@@ -49,25 +49,27 @@ def _headers(parent_header: bool) -> dict[str, str]:
 
 
 def revalidate(service: str, etag: str, headers: dict[str, str]) -> None:
-    """Ask whether the stock changed since `etag`, then re-read it conditionally, on one connection.
+    """Ask whether the stock changed since `etag`, re-read it conditionally, and ask its size.
 
-    The service answers 204 and 304, which end at their head: anything sent after one is read as
-    the next answer. Each answer's framing is logged, and whether the connection stayed open."""
+    All three go on one connection. The service answers 204, 304 and a HEAD's 200, which end at
+    their head: anything sent after one is read as the next answer. Each answer's framing and
+    header names are logged, and whether the connection stayed open."""
     proxy = agentkit.proxy()
     dialled = urlsplit(proxy or service)
     conn = HTTPConnection(dialled.hostname or "127.0.0.1", dialled.port, timeout=agentkit.timeout())
-    asks: tuple[tuple[str, str, dict[str, str]], ...] = (
-        ("changes", "/inventory/changes?" + urlencode({"since": etag}), {}),
-        ("not_modified", "/inventory", {"If-None-Match": etag}),
+    asks: tuple[tuple[str, str, str, dict[str, str]], ...] = (
+        ("changes", "GET", "/inventory/changes?" + urlencode({"since": etag}), {}),
+        ("not_modified", "GET", "/inventory", {"If-None-Match": etag}),
+        ("size", "HEAD", "/inventory", {}),
     )
     try:
-        for label, path, extra in asks:
+        for label, method, path, extra in asks:
             url = service + path
-            conn.request("GET", url if proxy else path, headers={**headers, **extra})
+            conn.request(method, url if proxy else path, headers={**headers, **extra})
             resp = conn.getresponse()
             resp.read()
             answered_by = resp.getheader("Irimi-Answered-By")
-            agentkit.obs_http("GET", url, label, status=resp.status, answered_by=answered_by)
+            agentkit.obs_http(method, url, label, status=resp.status, answered_by=answered_by)
             agentkit.obs(
                 "framing",
                 label=label,
@@ -75,6 +77,7 @@ def revalidate(service: str, etag: str, headers: dict[str, str]) -> None:
                 content_length=resp.getheader("Content-Length"),
                 transfer_encoding=resp.getheader("Transfer-Encoding"),
                 etag=resp.getheader("ETag"),
+                names=sorted({name.lower() for name, _ in resp.getheaders()}),
                 kept_alive=conn.sock is not None,
             )
     except (OSError, HTTPException) as err:

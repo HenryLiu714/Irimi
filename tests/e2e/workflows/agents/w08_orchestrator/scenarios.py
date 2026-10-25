@@ -15,6 +15,9 @@ from tests.e2e.workflows.harness.services import JsonService, World
 PRICES = {"SKU-A": 1200, "SKU-B": 800, "SKU-C": 5000}
 # The stock's version, which never changes: asked for changes since it, the service has none.
 STOCK_ETAG = '"stock-1"'
+# What the service says about its connection on a 204, which an answer irimi rebuilds leaves out.
+# No Keep-Alive: the service closes after each answer, and a client would wait for another.
+HOP_BY_HOP = {"connection": "Upgrade, close", "trailer": "X-Checksum", "upgrade": "h2c"}
 
 SUBAGENT_MAP = f"""\
 version: 1
@@ -27,6 +30,11 @@ routes:
       method: GET
       path: /inventory
     operation: inventory.list
+    kind: read
+  - match:
+      method: HEAD
+      path: /inventory
+    operation: inventory.size
     kind: read
   - match:
       method: GET
@@ -73,7 +81,7 @@ def _inventory(req: Req, state: dict[str, Any]) -> Resp:
 def _changes(req: Req, state: dict[str, Any]) -> Resp:
     """Answer 204 for no changes since the version asked about, as a sync endpoint does."""
     if req.query.get("since") == STOCK_ETAG:
-        return Resp(204)
+        return Resp(204, headers=HOP_BY_HOP)
     return Resp(200, {"changed": True})
 
 
@@ -96,6 +104,7 @@ def _world(world: World) -> None:
             (SUBAGENT_HOST,),
             {
                 ("GET", "/inventory"): _inventory,
+                ("HEAD", "/inventory"): _inventory,
                 ("GET", "/inventory/changes"): _changes,
                 ("POST", "/quote"): _quote,
                 ("POST", "/reservations"): _reserve,
@@ -180,7 +189,8 @@ WORKFLOW = Workflow(
             setup=_world,
             extra_maps={"subagent.yaml": SUBAGENT_MAP},
             doc="with_map with the stock checked again on one connection: no changes since its "
-            "ETag (204), and a conditional read of it (304)",
+            "ETag (204, with hop-by-hop headers), a conditional read of it (304), and its size "
+            "(HEAD)",
         ),
         "nested_write": Scenario(
             ("--runs", "2", "--nested-reserve"),

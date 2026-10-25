@@ -35,7 +35,7 @@ and whether the invariants below held.
 | W5 | `w05_dispute_responder` | signed Stripe webhook | a `bytes` trigger, the webhooks a write would fire, a live read whose response holds a credential |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, and replayed read tools |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE streams recorded chunk by chunk, hang-ups and resets mid-stream, a stream that outlives its run |
-| W8 | `w08_orchestrator` | nested triggers and an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop, a target nothing listens on, a remote target refused, a 204 and a 304 forwarded and replayed |
+| W8 | `w08_orchestrator` | nested triggers and an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop, a target nothing listens on, a remote target refused, a 204, a 304 and a `HEAD` forwarded and replayed, hop-by-hop headers, a recording edited to forge a header |
 | W9 | `w09_scope_gauntlet` | none (a plain script) | every classification edge: the scope rule, unsafe verbs, odd and oversized bodies, forged irimi headers, base-URL mode and its refusals (`HEAD` included), the control endpoint by hand |
 | W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets, a failed check read, two checks at once, an error on a faked refund's read, a run that raises or is killed, a control endpoint that is gone or stalls |
 | W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy or refuse its CA, raw sockets, loopback sidecars |
