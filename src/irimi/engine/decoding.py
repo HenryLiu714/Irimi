@@ -29,16 +29,21 @@ class Decoded:
 def decode_body(body: bytes, content_encoding: str) -> Decoded | None:
     """Return `body` decoded up to MAX_DECODED_BODY, or None when it cannot be decoded.
 
-    Stacked codings (`gzip, br`) are undone last first, each output stopping at the cap. Never
-    raises; holds at most three times the cap beside `body`. Other encodings than `_DECODERS` and
-    the identities return None, since mitmproxy's codec fallback is unbounded.
+    Stacked codings (`gzip, br`) are undone last first, `aws-chunked` before any, each output
+    stopping at the cap. Never raises; holds at most three times the cap beside `body`. Other
+    encodings than `_DECODERS` and the identities return None, since mitmproxy's codec fallback is
+    unbounded.
     """
     names = (name.strip().lower() for name in content_encoding.split(","))
     codings = [name for name in names if name and name not in _IDENTITY_ENCODINGS]
     if len(codings) > _MAX_CODINGS or any(name not in _DECODERS for name in codings):
         return None
+    # S3 strips `aws-chunked` wherever the list names it, since it frames the upload and codes
+    # nothing; AWS documents `aws-chunked,gzip` and boto3 sends `gzip,aws-chunked`.
+    framing = [name for name in codings if name == _AWS_CHUNKED]
+    undone = framing + [name for name in reversed(codings) if name != _AWS_CHUNKED]
     cut = False
-    for name in reversed(codings):
+    for name in undone:
         if cut:  # the start of an inner coding's stream is not the start of the body
             return Decoded(b"", True)
         if not body:  # brotli would refuse an empty body; mitmproxy's decoders accept it
@@ -141,6 +146,7 @@ def _zstd(body: bytes, limit: int) -> tuple[bytes, bool]:
     return out, False
 
 
+_AWS_CHUNKED = "aws-chunked"
 _CHUNK_LINE = re.compile(rb"([0-9A-Fa-f]{1,16})(?:;[^\r\n]*)?\r\n")
 
 
@@ -174,5 +180,5 @@ _DECODERS: dict[str, Callable[[bytes, int], tuple[bytes, bool]]] = {
     "deflateraw": _deflate,
     "br": _brotli,
     "zstd": _zstd,
-    "aws-chunked": _aws_chunked,
+    _AWS_CHUNKED: _aws_chunked,
 }

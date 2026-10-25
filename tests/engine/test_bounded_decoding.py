@@ -316,6 +316,22 @@ def test_an_aws_chunked_body_decodes_to_the_data_its_chunks_carry():
     assert decode_body(zipped, "gzip,aws-chunked") == Decoded(b"zipped", False)
 
 
+# Each value frames, in `aws-chunked`, the body its codings other than `aws-chunked` give.
+CHUNKED_STACKS = {
+    "aws-chunked,gzip": gzip.compress(b"zipped"),
+    "br, aws-chunked, gzip": gzip.compress(brotli.compress(b"zipped")),
+}
+
+
+@pytest.mark.parametrize("content_encoding", CHUNKED_STACKS)
+def test_aws_chunked_is_undone_first_wherever_the_list_names_it(content_encoding):
+    """S3 strips the framing from any place in the list, and AWS's docs spell it first.
+
+    Undone in its place, the gzip under `aws-chunked,gzip` would be read from the framing."""
+    framed = _aws_chunked(CHUNKED_STACKS[content_encoding])
+    assert decode_body(framed, content_encoding) == Decoded(b"zipped", False)
+
+
 def test_an_aws_chunked_body_past_the_cap_keeps_its_start(cap_of_10_lines):
     assert decode_body(_aws_chunked(LINE * 6, LINE * 6), "aws-chunked") == Decoded(LINE * 10, True)
 
