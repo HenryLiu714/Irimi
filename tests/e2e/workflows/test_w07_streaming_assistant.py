@@ -21,6 +21,7 @@ from tests.e2e.workflows.agents.w07_streaming_assistant.scenarios import (
     LONG_ANSWER,
     SECRET,
     SSE_CLIENT_SECRET,
+    SSE_ESCAPED_KEY,
     pair_answer,
     pair_decision,
 )
@@ -400,9 +401,10 @@ def test_an_events_json_over_several_data_lines_is_stored_redacted_in_as_many_li
 ):
     """An event's JSON over several `data:` lines is redacted as the document the agent reads.
 
-    The served `client_secret` has no secret's shape. The stored event holds the walked document
-    on its first `data:` line and leaves the others empty, so the stream keeps its lines, and the
-    chunk boundary inside the secret's line moves to that line's end."""
+    The served `client_secret` has no secret's shape, and the served key follows an escaped
+    letter the walk reads as glued to it. The stored event holds the walked document on its first
+    `data:` line and leaves the others empty, so the stream keeps its lines, and the chunk
+    boundary inside the secret's line moves to that line's end."""
     bare = run_workflow(W, "secret_in_multi_line_event", "bare")
     shadow = run_workflow(W, "secret_in_multi_line_event", mode)
     assert bare.exit_code == shadow.exit_code == 0
@@ -415,6 +417,8 @@ def test_an_events_json_over_several_data_lines_is_stored_redacted_in_as_many_li
     sent, sent_cuts = handed.response.body, boundaries(handed.stream_chunks)
     sent_lines, started = first_event(sent)
     assert started["message"]["client_secret"] == SSE_CLIENT_SECRET
+    assert started["message"]["note"] == "A" + SSE_ESCAPED_KEY
+    assert f'"\\u0041{SSE_ESCAPED_KEY}"'.encode() in sent
     [held] = [n for n, line in enumerate(sent_lines) if SSE_CLIENT_SECRET in line]
     with pytest.raises(json.JSONDecodeError):
         json.loads(sent_lines[held].removeprefix("data:"))
@@ -425,8 +429,13 @@ def test_an_events_json_over_several_data_lines_is_stored_redacted_in_as_many_li
     assert stored.response is not None and stored.flags == ()
     body = stored.response.body
     lines, document = first_event(body)
-    hidden = redact.placeholder(redact.load_key(shadow.home), SSE_CLIENT_SECRET)
-    assert document == {**started, "message": {**started["message"], "client_secret": hidden}}
+    key = redact.load_key(shadow.home)
+    hidden = redact.placeholder(key, SSE_CLIENT_SECRET)
+    note = "A" + redact.placeholder(key, SSE_ESCAPED_KEY)
+    assert document == {
+        **started,
+        "message": {**started["message"], "client_secret": hidden, "note": note},
+    }
     compact = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
     assert lines == [sent_lines[0], f"data: {compact}", *["data:"] * (len(sent_lines) - 2)]
     # The rest of the stream is stored as it was sent, and its chunks still split it.

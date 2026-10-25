@@ -23,6 +23,8 @@ CHANNEL = "C0CHAT"
 SECRET = credentials.STREAM_SECRET
 # No secret's shape: only its `client_secret` key marks it, on a `data:` line of its own.
 SSE_CLIENT_SECRET = credentials.SSE_CLIENT_SECRET
+# A key's shape the walk reads glued to a letter: the server escapes the letter before it.
+SSE_ESCAPED_KEY = credentials.SSE_ESCAPED_KEY
 ANSWER = (
     "Refunds return money to the original payment method. A partial refund leaves the rest "
     "of the charge in place, and a charge can be refunded until nothing is left."
@@ -165,8 +167,8 @@ class MultiLineDataLLM(ScriptedLLM):
     """Streams Anthropic's `message_start` as indented JSON, one `data:` line per line of it.
 
     A client joins an event's `data:` lines with LF, so the agent reads one document. Its message
-    carries a `client_secret`, which no line holds as JSON of its own. The event is written in
-    two pieces cut inside the secret, so a chunk boundary falls in a line redaction rewrites."""
+    carries a `client_secret`, which no line holds as JSON of its own, and a note whose key
+    follows an escaped `A`. The event is written in two pieces cut inside the secret."""
 
     def _anthropic(self, body: dict[str, Any]) -> Resp:
         resp = super()._anthropic(body)
@@ -174,7 +176,9 @@ class MultiLineDataLLM(ScriptedLLM):
             return resp
         start = json.loads(resp.chunks[0].decode().split("\ndata: ", 1)[1])
         start["message"]["client_secret"] = SSE_CLIENT_SECRET
-        lines = json.dumps(start, indent=2).splitlines()
+        start["message"]["note"] = "A" + SSE_ESCAPED_KEY
+        indented = json.dumps(start, indent=2)
+        lines = indented.replace('"A' + SSE_ESCAPED_KEY, '"\\u0041' + SSE_ESCAPED_KEY).splitlines()
         event = "event: message_start\n" + "".join(f"data: {line}\n" for line in lines) + "\n"
         cut = event.index(SSE_CLIENT_SECRET) + len(SSE_CLIENT_SECRET) // 2
         resp.chunks = [event[:cut].encode(), event[cut:].encode(), *resp.chunks[1:]]
@@ -363,7 +367,8 @@ WORKFLOW = Workflow(
             (QUESTION, "read_all"),
             setup=_multi_line,
             doc="Anthropic's first event spreads its JSON over several `data:` lines, a "
-            "`client_secret` on one of them: the agent joins them, irimi stores the placeholder",
+            "`client_secret` on one of them and a key after an escaped letter on another: the "
+            "agent joins them, irimi stores the placeholders",
         ),
         "gzip_bomb_stream": Scenario(
             ("What is the test key?", "read_all"),
