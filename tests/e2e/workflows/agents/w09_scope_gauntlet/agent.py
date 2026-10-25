@@ -87,8 +87,12 @@ def bodies() -> None:
     auth = {"Authorization": f"Bearer {key}"}
     form = urlencode({"charge": CHARGE, "amount": "300"}).encode()
     _coded_refund("refund_gzip", gzip.compress(form), "gzip", auth)
-    _chunked_post(
-        base("stripe") + "/v1/refunds", [b"charge=", CHARGE.encode(), b"&amount=400"], auth
+    _chunked(
+        "POST",
+        base("stripe") + "/v1/refunds",
+        [b"charge=", CHARGE.encode(), b"&amount=400"],
+        {**auth, "Content-Type": "application/x-www-form-urlencoded"},
+        "refund_chunked",
     )
     big = urlencode({"email": "big@example.test", "description": "x" * 3_000_000}).encode()
     http(
@@ -105,6 +109,11 @@ def bodies() -> None:
     _coded_refund("refund_gzip_members", members, "gzip", auth)
     noted = urlencode({"charge": CHARGE, "amount": "700", "metadata[note]": key}).encode()
     _coded_refund("refund_bzip2", bz2.compress(noted), "bzip2", auth)
+    # S3 uploads as boto3 frames them: the key split over two chunks, then AWS's documented order.
+    upload = json.dumps({"note": key}).encode()
+    half = len(upload) - len(key) // 2
+    _s3_upload("upload_aws_chunked", [upload[:half], upload[half:]], "aws-chunked")
+    _s3_upload("upload_aws_chunked_gzip", [gzip.compress(upload)], "aws-chunked,gzip")
     for label in ("read_gzip_br", "read_bzip2"):
         read = stripe("GET", f"/v1/refunds?charge={CHARGE}", label=label)
         doc = read.json()
@@ -124,6 +133,24 @@ def _coded_refund(label: str, body: bytes, content_encoding: str, auth: dict[str
         "Content-Encoding": content_encoding,
     }
     http("POST", base("stripe") + "/v1/refunds", body=body, headers=headers, label=label)
+
+
+# Where `bodies` uploads its objects: an S3-style store no map claims.
+OBJECT_STORE = "objects.internal"
+
+
+def _s3_upload(label: str, chunks: list[bytes], content_encoding: str) -> None:
+    """PUT `chunks` framed `aws-chunked` with a checksum trailer, as boto3 sends an S3 upload."""
+    framed = b"".join(b"%x\r\n%s\r\n" % (len(c), c) for c in chunks)
+    headers = {
+        "Content-Encoding": content_encoding,
+        "X-Amz-Content-SHA256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+        "X-Amz-Trailer": "x-amz-checksum-crc32",
+        "X-Amz-Decoded-Content-Length": str(sum(map(len, chunks))),
+    }
+    framed += b"0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n"
+    url = agentkit.internal(OBJECT_STORE) + f"/bucket/{label}.json"
+    _chunked("PUT", url, [framed], headers, label)
 
 
 def big_reads() -> None:
@@ -631,19 +658,20 @@ def get_that_writes() -> None:
     http("GET", legacy + "/api/delete_user?id=7", label="get_delete_user")
 
 
-def _chunked_post(url: str, pieces: list[bytes], headers: dict[str, str]) -> None:
-    """POST a chunked body, which urllib cannot send, with http.client through the proxy."""
+def _chunked(
+    method: str, url: str, pieces: list[bytes], headers: dict[str, str], label: str
+) -> None:
+    """Send a chunked body, which urllib cannot send, with http.client through the proxy."""
     proxy = agentkit.proxy()
     assert proxy, "the gauntlet always runs behind a proxy"
     p = urlsplit(proxy)
     conn = HTTPConnection(p.hostname or "127.0.0.1", p.port, timeout=agentkit.timeout())
-    sent = {**headers, "Content-Type": "application/x-www-form-urlencoded"}
-    conn.request("POST", url, body=iter(pieces), headers=sent, encode_chunked=True)
+    conn.request(method, url, body=iter(pieces), headers=headers, encode_chunked=True)
     resp = conn.getresponse()
     resp.read()
     conn.close()
     answered_by = resp.getheader("Irimi-Answered-By")
-    agentkit.obs_http("POST", url, "refund_chunked", status=resp.status, answered_by=answered_by)
+    agentkit.obs_http(method, url, label, status=resp.status, answered_by=answered_by)
 
 
 GROUPS = {

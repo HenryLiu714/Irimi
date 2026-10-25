@@ -40,6 +40,7 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     ERROR_KEY,
     HEAD_HOST,
     LONG_MESSAGE_CHARS,
+    OBJECT_STORE,
     OVERSIZED_BODY_BYTES,
     REFUSED_BASE_URL_HOST,
 )
@@ -137,6 +138,8 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
         "refund_gzip_br": (200, "fake-L1"),
         "refund_gzip_members": (200, "fake-L1"),
         "refund_bzip2": (502, "irimi"),
+        "upload_aws_chunked": (200, "fake-L0"),
+        "upload_aws_chunked_gzip": (200, "fake-L0"),
         "read_gzip_br": (200, "overlay"),
         "read_bzip2": (200, None),
     }
@@ -197,7 +200,39 @@ def test_a_body_in_stacked_codings_or_in_gzip_members_is_read_whole_and_stored_r
         f"  ○ stripe  refund $5.00 on {CHARGE}  {checked}",
         f"  ○ stripe  refund $6.00 on {CHARGE}  {checked}",
         f"  {CUT_REFUND}",
+        *(f"  {upload}" for upload in UPLOADS),
     ]
+
+
+# The summary lines of the two uploads `bodies` frames `aws-chunked`, faked as any unmapped write.
+UPLOADS = [
+    f"○ {OBJECT_STORE}  PUT {OBJECT_STORE}/bucket/{name}.json  faked; not checked (unclassified)"
+    for name in ("upload_aws_chunked", "upload_aws_chunked_gzip")
+]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_s3_upload_framed_aws_chunked_is_faked_from_its_data_and_stored_redacted(
+    run_workflow, mode
+):
+    """Both uploads, framing undone wherever their coding list names it, store the object itself.
+
+    The first splits the agent's key over two chunks, so only an upload irimi unframed has the
+    key whole for redaction to find; the second is gzip under AWS's `aws-chunked,gzip`."""
+    shadow = run_workflow(W, "bodies", mode)
+    key = credentials.STRIPE_API_KEY
+    hidden = redact.placeholder(redact.load_key(shadow.home), key)
+    uploads = [
+        e
+        for e in shadow.stored_events()
+        if isinstance(e, Exchange) and (e.request.method, e.request.host) == ("PUT", OBJECT_STORE)
+    ]
+    assert [(e.request.body, e.flags, e.answered_by) for e in uploads] == [
+        # Redaction re-serializes a JSON body it changed, compactly.
+        (f'{{"note":"{hidden}"}}'.encode(), (Flag.UNCLASSIFIED,), "fake-L0")
+    ] * 2
+    assert [line.strip() for line in summary_of(shadow) if OBJECT_STORE + "/" in line] == UPLOADS
+    assert [r for r in shadow.internet.requests() if r.host == OBJECT_STORE] == []
 
 
 @pytest.mark.parametrize("mode", MODES)
