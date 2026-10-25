@@ -537,8 +537,7 @@ def _redact_event(lines: list[str], key: bytes) -> list[str]:
         _SSE_DATA + _ending(line) if line.startswith(_SSE_DATA) else _redact_line(line, key)
         for line in lines
     ]
-    indent = values[0][: len(values[0]) - len(values[0].lstrip())]
-    redacted[data[0]] = _SSE_DATA + indent + walked + _ending(lines[data[0]])
+    redacted[data[0]] = _SSE_DATA + _indent(values[0]) + walked + _ending(lines[data[0]])
     return redacted
 
 
@@ -552,6 +551,11 @@ def _ending(line: str) -> str:
     return line[len(_content(line)) :]
 
 
+def _indent(value: str) -> str:
+    """Return the whitespace `value` starts with, which a line rewritten as JSON keeps."""
+    return value[: len(value) - len(value.lstrip())]
+
+
 def _redact_line(line: str, key: bytes) -> str:
     """Redact one line: an NDJSON line or SSE `data:` JSON as JSON, any other for shapes."""
     content = _content(line)
@@ -563,7 +567,7 @@ def _redact_line(line: str, key: bytes) -> str:
         if walked is document:
             return line
         if walked is not None:
-            return field + value[: len(value) - len(document)] + walked + _ending(line)
+            return field + _indent(value) + walked + _ending(line)
     return _redact_text(line, key)
 
 
