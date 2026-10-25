@@ -442,6 +442,41 @@ def test_a_pair_whose_data_json_cannot_hold_is_never_said_to_have_sent_the_same(
     ]
 
 
+@pytest.mark.parametrize(
+    "sent_to",
+    [{"query": "expand[]=charge"}, {"headers": (*FORM, ("stripe-account", "acct_2"))}],
+    ids=["query", "scope"],
+)
+def test_a_refund_sent_with_another_query_or_account_is_never_said_to_have_sent_the_same(sent_to):
+    """A write's query and scope headers are part of what it sent, as its body is."""
+    a = _refund()
+    b = _refund(
+        request=dataclasses.replace(a.request, **sent_to),
+        precondition=Precondition("rejected", "charge_already_refunded"),
+    )
+    assert compare.compare_runs(_run([a]), _run([b]), servicemaps.load()).lines() == [
+        f"  ~ A {REFUND}",
+        "    B ✗ stripe  refund $49.00 on ch_1  faked; would fail: charge_already_refunded",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
+def test_the_line_that_says_both_sent_the_same_is_not_one_of_the_five_parts_shown():
+    names = ("answered by", "currency", "flags", "precondition", "rejection code", "target")
+    a = compare.Action((compare.TOOL_KEY, "db.x"), "x", outcome=tuple((n, '"a"') for n in names))
+    b = compare.Action((compare.TOOL_KEY, "db.x"), "y", outcome=tuple((n, '"b"') for n in names))
+    assert compare.Comparison(compare.align([a], [b])).lines() == [
+        "  ~ A x",
+        "    B y",
+        f"      {SENT_ALIKE}",
+        *(f'      {name}: "a" -> "b"' for name in names[:5]),
+        "      and 1 more",
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ]
+
+
 def test_a_second_refused_refund_is_the_write_added_not_the_first(home, capfd):
     """Equal writes pair first, so B's refused second refund is the one marked `+`."""
     refused = _refund(precondition=Precondition("rejected", "charge_already_refunded"))
@@ -508,11 +543,17 @@ def test_a_delegated_write_is_a_write_and_prints_where_it_went(home, capfd):
         answered_by="delegated", target="http://127.0.0.1:9999", precondition=Precondition()
     )
     code, lines = _compare(home, capfd, [_refund()], [delegated])
-    assert (code, lines[3:5]) == (
+    assert (code, lines[3:]) == (
         1,
         [
             f"  ~ A {REFUND}",
             "    B ○ stripe  refund $49.00 on ch_1  sent to target 127.0.0.1:9999",
+            f"      {SENT_ALIKE}",
+            '      answered by: "fake-L1" -> "delegated"',
+            '      precondition: "passed" -> (absent)',
+            '      target: (absent) -> "http://127.0.0.1:9999"',
+            "",
+            "  0 same · 1 changed · 0 only in A · 0 only in B",
         ],
     )
 
