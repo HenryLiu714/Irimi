@@ -87,7 +87,7 @@ echo "--- irimi's output"
 echo "$logs"
 # One block per run, each with its faked refund and its tool's fake, and each charge's refund
 # in one block only: two requests at once that did not mix.
-[ "$(echo "$logs" | grep -c '^--- run ')" = 2 ]
+[ "$(echo "$logs" | grep -cE '^--- run [^ ]+ ---$')" = 2 ]
 [ "$(echo "$logs" | grep -c '^  ○ stripe  refund ')" = 2 ]
 [ "$(echo "$logs" | grep -c '^  ○ tool  db.mark_refunded  fake ran instead$')" = 2 ]
 for charge in "${charges[@]}"; do

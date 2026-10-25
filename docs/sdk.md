@@ -63,7 +63,12 @@ executor.submit(sdk.propagate(refund_one), charge_id)
 ```
 
 A pool's worker thread keeps the context it started in, so use `sdk.propagate` there even on a
-build where new threads copy their creator's context.
+build where new threads copy their creator's context (free-threaded Python 3.14). A run is current
+nowhere once it has ended, even in a context that still holds it. On such a worker, or in a task or
+thread that outlives the run, a request sent or a tool call started after the run's end is in no
+run, and a trigger called there starts its own. Work in no run is stored in the process run under
+`irimi shadow`, or as `unattributed` under `irimi serve`. In a replay the replayed run is ended by
+`irimi replay`, not the SDK, so such work stays in it.
 
 ## Which HTTP clients carry the run
 
@@ -144,12 +149,13 @@ function and not the function itself; each mistake is a `TypeError` at decoratio
 
 ### `sdk.current_run_id()`
 
-The id of the run this code is running in, or `None` outside a run or while the SDK is inactive.
+The id of the run this code is running in, or `None` outside a run, once that run has ended, or
+while the SDK is inactive.
 
 ### `sdk.propagate(fn)`
 
 Return a callable with `fn`'s signature that runs it in the current run, on whichever thread calls
-it.
+it, while that run lasts; called once the run has ended, it runs `fn` in no run.
 
 ### `sdk.is_active()`
 
@@ -211,7 +217,9 @@ values are captured, and which are replayable, is in
 - **A sync function that returns a coroutine** keeps its run, or its tool call open, until the
   coroutine finishes.
 - **A task outliving its run.** A task created inside a run keeps the run's id after the trigger
-  returns, so its requests are stored in the run after its end.
+  returns, but an ended run is current nowhere: the requests the task sends and the tool calls it
+  starts after the run's end are in no run, and its failure does not change how the run ended.
+  Await the work in the trigger, or return it as a coroutine, to keep it in the run.
 - **A request that names its own run.** An `http.client` request gets the SDK's header ahead of the
   agent's, and irimi takes the first; an httpx request that already has one keeps it.
 - **Redirects.** The header is added only on a connection to irimi, so the next hop of a redirect

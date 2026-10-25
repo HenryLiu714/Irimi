@@ -3,6 +3,7 @@
 Each test drives a real engine; the upstream never sees the header, which irimi strips."""
 
 import asyncio
+import contextvars
 import http.client
 import http.server
 import socket
@@ -112,6 +113,11 @@ async def fetch_async(proxy: str, url: str) -> str | None:
     return sdk.current_run_id()
 
 
+@sdk.trigger
+def keep_context() -> contextvars.Context:
+    return contextvars.copy_context()
+
+
 def _in_a_run(name: str, proxy: str, url: str) -> str | None:
     if name == "httpx-async":
         return asyncio.run(fetch_async(proxy, url))
@@ -154,6 +160,21 @@ def test_the_same_request_outside_any_run_is_the_engines_own(irimi, upstream, na
     [ex] = irimi.seen
     assert ex.run_id == ENGINE_RUN
     assert not _upstream_saw_the_header(upstream)
+
+
+@pytest.mark.parametrize("name", CLIENTS)
+def test_a_request_from_a_context_that_kept_an_ended_run_is_the_engines_own(irimi, upstream, name):
+    """A context copied inside a run still holds its id once it ends, but sends no `Irimi-Run`.
+
+    A task or a worker that outlives its run adds nothing to it after its end."""
+    kept = keep_context()
+    kept.run(_outside_any_run, name, irimi.proxy, f"http://127.0.0.1:{upstream}/hello")
+    [ex] = irimi.seen
+    assert ex.run_id == ENGINE_RUN
+    assert not _upstream_saw_the_header(upstream)
+    reader = irimi.finish()
+    [run] = [r for r in reader.list_runs() if r.attribution == "sdk"]
+    assert reader.load_run(run.run_id).events == []
 
 
 def test_a_client_made_before_the_first_run_is_covered(irimi, upstream):

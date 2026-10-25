@@ -53,21 +53,27 @@ SDK that ignores proxy settings (stripe-python) cannot be shadowed unless it is 
 
 The banner, then one line per exchange and tool call as each finishes (`--quiet` skips these), and
 each run's summary under `--- run <id> ---` when the SDK ends the run: the same block
-`irimi runs show <id>` prints, built from the store once the run's end is on disk. A client that
-refuses irimi's certificate sends no request for a summary to show, so serve warns on stderr
-instead, once per host, naming the CA to point it at. A streamed answer
-is recorded when its stream closes, so a stream the agent leaves open after its run ends is stored
-in the run but missing from the summary already printed. On stop, if any requests named no run,
-irimi prints `stopped · N exchanges not in any run: irimi runs show unattributed`.
+`irimi runs show <id>` prints, built from the store once the run's end is on disk, on a thread that
+never holds up the store. A client that refuses irimi's certificate sends no request for a summary
+to show, so serve warns on stderr instead, once per host, naming the CA to point it at. A run's
+summary is the run as it stood at its end. A streamed answer is recorded when its stream closes,
+so a stream the agent leaves open after its run ends is stored in the run after that, and serve
+then prints the run again, whole, under `--- run <id> (late) ---`. Any event stored in a run after
+its end does the same, even in a run an earlier serve on the store ended. Events queued while an
+earlier summary prints print their run once, and a run prints late at most once a second: a later
+event's block waits for that, or for the stop. A late event leaves the run's faked writes and
+idempotency keys as they were. On stop, if any requests named no run, irimi prints `stopped · N exchanges not in
+any run: irimi runs show unattributed`.
 
 ## Binding, stopping and the store
 
 - **Binding.** irimi listens on `127.0.0.1` unless `--bind` names another address. A wider bind
   prints a warning: the control endpoint has no authentication, so bind wider only on a network
   that holds the agent and nothing else ([security.md](security.md#trust-boundaries)).
-- **Stopping.** SIGINT and SIGTERM stop the proxy, write what is queued (for up to 10 seconds) and
-  exit 0. A run whose end arrived before the signal still prints its summary; a run still open is
-  left `incomplete`. A proxy that stops on its own exits 2.
+- **Stopping.** SIGINT and SIGTERM stop the proxy, write what is queued and print the summaries
+  left (for up to 10 seconds in all) and exit 0. A run whose end arrived before the signal still
+  prints its summary; if time runs out first, serve warns on stderr and `irimi runs list` has the
+  run. A run still open is left `incomplete`. A proxy that stops on its own exits 2.
 - **One serve per store.** A serve holds `serve.lock` in its store while it runs, and a second
   serve on the same store exits 2 at once. A supervisor's restart succeeds once the old process
   has exited. `irimi runs rm` and `runs prune` are refused while a serve, or any other irimi

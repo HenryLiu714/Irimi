@@ -84,8 +84,9 @@ class Run:
                 self.lock.release()
 
 
-# Called with the maps and run id once a run's end is on disk and its state dropped.
-OnRunEnded = Callable[[MapIndex, str], None]
+# Called with the maps, then `writer.OnRunEnded`'s arguments: at the end once the run's state is
+# dropped, and late with it left.
+OnRunEnded = Callable[[MapIndex, str, int | None, bool], None]
 
 
 class EngineFactory(Protocol):
@@ -144,12 +145,15 @@ def prepare_run(
     write_log = WriteLog()
     keys = idempotency.Store()
 
-    def ended(run_id: str) -> None:
-        # An ended run makes no more requests, so its writes and keys are never read again.
-        write_log.end_run(run_id)
-        keys.end_run(run_id)
+    def ended(run_id: str, last_seq: int | None, late: bool) -> None:
+        # An ended run's writes and keys are never read again. A late call leaves them: for a run
+        # an earlier process ended, dropping them once the writer caught up would answer a retry
+        # planned before that as a retry and one planned after it as a fresh write.
+        if not late:
+            write_log.end_run(run_id)
+            keys.end_run(run_id)
         if on_run_ended is not None:
-            on_run_ended(index, run_id)
+            on_run_ended(index, run_id, last_seq, late)
 
     store = _open_store(args, key, ended, replayed_run(config.mode))
     if store is None:
@@ -289,7 +293,7 @@ def store_subject(args: argparse.Namespace) -> str:
 def _open_store(
     args: argparse.Namespace,
     key: bytes,
-    on_run_ended: Callable[[str], None] | None = None,
+    on_run_ended: writer.OnRunEnded | None = None,
     replay_of: str | None = None,
 ) -> RunStore | None:
     """Return the trace store, redacting with `key`, or None after printing why it cannot open.
@@ -383,10 +387,12 @@ def resolve_run_id(root: Path, typed: str) -> str:
     return matches[0] if matches else typed
 
 
-def load_stored_run(root: Path, run_id: str, *, bodies: bool = True) -> StoredRun:
+def load_stored_run(
+    root: Path, run_id: str, *, bodies: bool = True, last_seq: int | None = None
+) -> StoredRun:
     """Return the stored run `run_id`; raise CliError, chained to the store's error, if not."""
     try:
-        return StoreReader(root).load_run(run_id, bodies=bodies)
+        return StoreReader(root).load_run(run_id, bodies=bodies, last_seq=last_seq)
     except RunNotFound as exc:
         raise CliError(f"no run {run_id} in {root}", exitcodes.ERROR) from exc
     except (TraceFormatError, OSError) as exc:

@@ -5,6 +5,7 @@ Each run reads and refunds its own charge, labelled `read:<charge>` and `refund:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import socket
 import sys
 import threading
@@ -326,12 +327,39 @@ def handle(message: dict[str, Any]) -> None:
         worker = threading.Thread(target=refund, args=(message,))
         worker.start()
         worker.join()
+    elif how == "inherited_pool":
+        # No `sdk.propagate` either: the refund runs in the run the pool's worker started in.
+        _inheriting_pool().submit(_on_worker, refund, message).result()
     elif how == "in_turn":
         refund_in_turn(message)
     else:
         refund(message)
     if message.get("audit"):
         audit(message)
+
+
+def _inherit(context: contextvars.Context) -> None:
+    """Start a pool worker in a copy of `context`, as a free-threaded build starts every thread."""
+    for var, value in context.items():
+        var.set(value)
+
+
+# Made inside the first message's run, so its one worker keeps that run's context for its life.
+_inheriting: ThreadPoolExecutor | None = None
+
+
+def _inheriting_pool() -> ThreadPoolExecutor:
+    global _inheriting  # noqa: PLW0603  # one scenario's pool, made once per process
+    if _inheriting is None:
+        context = contextvars.copy_context()
+        _inheriting = ThreadPoolExecutor(1, initializer=_inherit, initargs=(context,))
+    return _inheriting
+
+
+def _on_worker(fn: Any, message: dict[str, Any]) -> None:
+    """Call `fn(message)`, logging the thread, so a test can tell it ran on the pool's worker."""
+    agentkit.obs("on_worker", fn=fn.__name__, thread=threading.get_ident())
+    fn(message)
 
 
 @dataclass
@@ -494,7 +522,8 @@ async def _process(message: dict[str, Any]) -> None:
 def schedule(message: dict[str, Any]) -> asyncio.Task[None]:
     """Start the work as a task and return it; the run ends when `schedule` returns.
 
-    The task was created inside the run, so its context keeps the run's id for its requests."""
+    The task was created inside the run, so its context keeps the run, which has ended before the
+    task runs a step."""
     return asyncio.get_running_loop().create_task(_process_later(message))
 
 
@@ -587,6 +616,11 @@ def consume(messages: list[dict[str, Any]], how: str) -> tuple[int, int]:
             else:
                 worker.handle(message)
         done = [True] * len(messages)
+    elif how == "inherited":
+        # Then `audit`, called from outside any run on the worker that kept the first run.
+        done = [safe(message) for message in messages]
+        _inheriting_pool().submit(_on_worker, audit, messages[0]).result()
+        _inheriting_pool().shutdown()
     else:
         done = [safe(message) for message in messages]
     return done.count(True), done.count(False)
@@ -607,6 +641,7 @@ SCENARIOS: dict[str, tuple[int, str, dict[str, Any]]] = {
     "coroutine_handoff": (4, "handoff", {}),
     "one_pool_8": (8, "pooled", {}),
     "task_outlives_trigger": (2, "task", {}),
+    "inherited_worker": (2, "inherited", {"refund_in": "inherited_pool"}),
     # The worker's ledger tools, in each place a run's identity has to follow them.
     "ledger_threads_8": (8, "threads", {"refund_in": "propagated_thread", "ledger": "sync"}),
     "ledger_two_tools_8": (

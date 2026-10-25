@@ -379,6 +379,48 @@ def test_a_late_event_after_the_run_ended_is_still_appended(root, key):
     assert (run.record.end.outcome, _paths(run)) == ("ok", ["/late"])
 
 
+def test_a_read_through_a_run_s_last_seq_at_its_end_leaves_its_late_events_out(root, key):
+    """The end-of-run callback gets the run's last `seq`; a read through it is the run at its end.
+
+    Each event stored after the end calls it again, late, with that event's `seq`, in a later store
+    too, which numbers on from the run's last `seq`, so the bound still holds."""
+    ended: list[tuple[str, int | None, bool]] = []
+
+    def store() -> DirectoryStore:
+        return DirectoryStore(
+            root, key, lambda run_id, last_seq, late: ended.append((run_id, last_seq, late))
+        )
+
+    s = store()
+    s.start_run(_record("r1"))
+    s.record(_exchange("r1", "/a"))
+    s.record_tool_call(_tool_call("r1", {}))
+    s.end_run("r1", 3.0, "ok", exit_code=0)
+    s.record(_exchange("r1", "/late"))
+    s.close()
+    s = store()
+    s.record(_exchange("r1", "/later"))
+    s.end_run("r1", 4.0, "ok", exit_code=0)
+    s.close()
+    assert ended == [("r1", 2, False), ("r1", 3, True), ("r1", 4, True), ("r1", 4, False)]
+    reader = StoreReader(root)
+
+    def kept(last_seq: int | None) -> list[str]:
+        events = reader.load_run("r1", bodies=False, last_seq=last_seq).events
+        return [
+            e.name if isinstance(e, ToolCall) else cast(Exchange, e).request.path for e in events
+        ]
+
+    assert kept(2) == ["/a", "db.write"]
+    assert kept(4) == kept(None) == ["/a", "db.write", "/late", "/later"]
+    assert kept(0) == []
+    # A line after the bound is never decoded, so damage there leaves the run as it ended whole.
+    files.append_line(root / "runs/r1/events.jsonl", b'{"seq": 5, "type": "screenshot"}\n')
+    assert kept(4) == ["/a", "db.write", "/late", "/later"]
+    with pytest.raises(TraceFormatError, match="line 5"):
+        kept(None)
+
+
 def test_a_tool_calls_args_and_result_are_redacted_and_share_the_runs_seq(root, key):
     s = DirectoryStore(root, key)
     s.record(_exchange("r1", "/a"))
@@ -1645,10 +1687,15 @@ def test_a_run_s_end_is_announced_even_when_it_cannot_be_written(tmp_path, monke
     """A run's end is announced even when it cannot be written, so its write log and keys go.
 
     A full disk, or a replay's store that may not write the run, would keep them all serve long."""
-    ended: list[str] = []
+    ended: list[tuple[str, int | None, bool]] = []
     root = tmp_path / "store"
     replay_of = "recorded1" if fails == "claim" else None
-    store = DirectoryStore(root, KEY, on_run_ended=ended.append, replay_of=replay_of)
+    store = DirectoryStore(
+        root,
+        KEY,
+        on_run_ended=lambda run_id, last_seq, late: ended.append((run_id, last_seq, late)),
+        replay_of=replay_of,
+    )
     if fails == "write":
 
         def refuse(*args: object, **kwargs: object) -> None:
@@ -1658,5 +1705,6 @@ def test_a_run_s_end_is_announced_even_when_it_cannot_be_written(tmp_path, monke
     # A replay's store never writes the run it replays.
     store.end_run("recorded1" if fails == "claim" else "full0001", 2.0, "ok")
     store.close()
-    assert ended == ["recorded1" if fails == "claim" else "full0001"]
+    # A run the store could not open has no last `seq` to give.
+    assert ended == [("recorded1", None, False) if fails == "claim" else ("full0001", 0, False)]
     assert store.stats().dropped == 1

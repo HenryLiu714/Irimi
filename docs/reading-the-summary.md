@@ -203,6 +203,7 @@ many of those were faked writes. Tool calls are counted in none of these.
 - `N connections to <host> failed TLS: the client did not trust irimi's CA; point it at <ca.pem>
   (some clients ignore SSL_CERT_FILE)`, per host whose client refused irimi's certificate.
 
-Under `irimi serve`, each run's summary prints under `--- run <id> ---` when the SDK ends the run.
+Under `irimi serve`, each run's summary prints under `--- run <id> ---` when the SDK ends the run,
+and again, whole, under `--- run <id> (late) ---` once an event is stored in the run after its end.
 How a summary read back with `irimi runs show` can differ from the live one is in
 [cli.md](cli.md#irimi-runs-show).

@@ -31,10 +31,14 @@ from irimi.sdk._state import state
 class _Opened:
     """Hold a run this entry made current; `irimi replay` posts an `adopted` run's start and end."""
 
-    run_id: str
-    token: contextvars.Token[str | None]
+    live: context.Live
+    token: contextvars.Token[context.Live | None]
     start: dict[str, Any]
     adopted: bool = False
+
+    @property
+    def run_id(self) -> str:
+        return self.live.run_id
 
 
 class RunScope:
@@ -44,7 +48,8 @@ class RunScope:
         in a replay's child    adopt the replay's run: no capture, no posts
         otherwise              capture, mint an id, post `start`
 
-    On exit a new run posts `end`. Posts are synchronous, so they bracket the run's requests.
+    On exit a new run ends in every context that holds it, then posts `end`. Posts are
+    synchronous, so they bracket the run's requests.
     """
 
     def __init__(self, name: str, entrypoint: str | None, capture: Callable[[], Captured]) -> None:
@@ -60,6 +65,7 @@ class RunScope:
         try:
             _report_start(opened)
         except BaseException:
+            self._end()
             self._close()  # `with` does not call `__exit__` when `__enter__` raises
             raise
         return opened.run_id
@@ -71,8 +77,9 @@ class RunScope:
         tb: TracebackType | None,
     ) -> None:
         try:
-            if self._opened is not None:
-                _report_end(self._opened, exc)
+            opened = self._end()
+            if opened is not None:
+                _report_end(opened, exc)
         finally:
             self._close()
 
@@ -83,6 +90,7 @@ class RunScope:
         try:
             await off_the_loop(_report_start, opened)
         except BaseException:
+            self._end()
             self._close()  # `async with` does not call `__aexit__` when `__aenter__` raises
             raise
         return opened.run_id
@@ -98,8 +106,9 @@ class RunScope:
             self.__exit__(exc_type, exc, tb)
             return
         try:
-            if self._opened is not None:
-                await off_the_loop(_report_end, self._opened, exc)
+            opened = self._end()
+            if opened is not None:
+                await off_the_loop(_report_end, opened, exc)
         finally:
             self._close()
 
@@ -112,7 +121,7 @@ class RunScope:
         return self._carry(opened, coroutine)
 
     async def _carry[T](self, opened: _Opened, coroutine: Coroutine[Any, Any, T]) -> T:
-        self._opened = replace(opened, token=context.enter(opened.run_id))
+        self._opened = replace(opened, token=context.enter(opened.live))
         try:
             result = await coroutine
         except BaseException as exc:
@@ -127,16 +136,28 @@ class RunScope:
             return None
         adopted = context.replay_run_id()
         if adopted is not None:
-            self._opened = _Opened(adopted, context.enter(adopted), {}, adopted=True)
+            live = context.Live(adopted)
+            self._opened = _Opened(live, context.enter(live), {}, adopted=True)
             return self._opened
         args, replayable = self._capture()
         trigger = trace.Trigger(self._name, self._entrypoint, args, replayable)
         start = run_start_to_json(
             RunStart(trigger, os.environ.get(AGENT_VERSION_ENV), __version__, time.time())
         )
-        run_id = trace.new_run_id()
-        self._opened = _Opened(run_id, context.enter(run_id), start)
+        live = context.Live(trace.new_run_id())
+        self._opened = _Opened(live, context.enter(live), start)
         return self._opened
+
+    def _end(self) -> _Opened | None:
+        """End this entry's run in every context and return it, or None if it opened none.
+
+        It ends before its end is posted or its `ended_at` taken, and whether or not either
+        happens. An adopted run stays current: `irimi replay` ends it.
+        """
+        opened = self._opened
+        if opened is not None and not opened.adopted:
+            opened.live.end()
+        return opened
 
     def _close(self) -> None:
         opened, self._opened = self._opened, None

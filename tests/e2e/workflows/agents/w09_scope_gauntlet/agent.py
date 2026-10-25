@@ -291,8 +291,9 @@ def _keyed_message(head: str, filler: str) -> str:
 def control_hazards() -> None:
     """Make the posts the SDK never makes, so what irimi does with each is pinned.
 
-    That is a start re-posted for an ended run, a start, tool call and end for irimi's own run, and
-    a tool call for `unattributed`. The health check's `dropped` counts the re-posted start."""
+    That is a start re-posted for an ended run and a read labelled with it after, a start, tool call
+    and end for irimi's own run, and a tool call for `unattributed`. The health check's `dropped`
+    counts the re-posted start."""
     control = _control_base()
     _start(control, "ctl-restarted", "restarted_start")
     stripe(
@@ -303,6 +304,14 @@ def control_hazards() -> None:
     )
     _end(control, "ctl-restarted", "restarted_end")
     _start(control, "ctl-restarted", "restarted_again", name="ctl-restarted again")
+    # After the re-posted start, so the read shows the dropped start left the run ended: it is
+    # stored late. One late event only, since serve may print a burst of them as one block.
+    stripe(
+        "GET",
+        f"/v1/charges/{CHARGE}",
+        headers={"Irimi-Run": "ctl-restarted"},
+        label="restarted_late_read",
+    )
     # irimi's own run: the process run under shadow, `unattributed` under serve; a bare run has
     # neither, but makes the same calls.
     process_run = os.environ.get(RUN_ENV) or (

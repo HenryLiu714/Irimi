@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from irimi.protocol import trace
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines
 from tests.e2e.workflows.agents.w10_flaky_upstream.scenarios import CONTROL_DOWN
@@ -20,7 +19,7 @@ from tests.e2e.workflows.harness.invariants import (
     SERVED_CANARIES,
     check_invariants,
 )
-from tests.e2e.workflows.harness.result import RUN_BLOCK, Result
+from tests.e2e.workflows.harness.result import Result
 from tests.e2e.workflows.harness.scenario import cases, workflows
 
 TESTS = Path(__file__).parent
@@ -29,12 +28,12 @@ CASES = cases()
 MARKER = "KNOWN" + " BUG"
 MARKER_FORM = re.compile(MARKER + r"(?: \(#\d+(?:, #\d+)*\))?: \S")
 RETIRED_MARKER = "LOOKS" + " WRONG"
-# Serve prints a run's block once its end is on disk, so an event stored later is not in it.
-# KNOWN BUG (#125): each block says less than its run holds: W3 `task_outlives_trigger`'s task
-# calls after its run ends, and W7 `hand_off`'s stream is recorded after the run's end.
-LATE_EVENTS = {
-    ("w03_queue_worker", "task_outlives_trigger"),
+# The scenarios that store an event in a run after its end, so serve prints that run again, late:
+# W7 `hand_off`'s stream is recorded after its run's end, and W9 `control_hazards` labels a read
+# with a run it ended by hand.
+PRINTS_LATE = {
     ("w07_streaming_assistant", "hand_off"),
+    ("w09_scope_gauntlet", "control_hazards"),
 }
 # A control post that ends a run, as W9 makes one by hand: `<listener>/_irimi/runs/<id>/end`.
 END_POST = re.compile(r"/_irimi/runs/([^/]+)/end$")
@@ -55,30 +54,29 @@ def test_every_serve_run_keeps_the_universal_invariants(run_workflow, name, scen
 
 
 @pytest.mark.parametrize(("name", "scenario"), CASES, ids=[f"{n}:{s}" for n, s in CASES])
-def test_every_run_a_serve_ended_prints_its_stored_summary_once(run_workflow, name, scenario):
-    """Serve prints one `--- run <id> ---` block per run end it took, equal to the stored summary.
+def test_every_run_a_serve_ended_prints_its_stored_summary_last(run_workflow, name, scenario):
+    """Serve prints one `--- run <id> ---` block per run end it took; its last equals the store's.
 
-    A run that did not end (W10 `sigterm_mid_run`) or whose end never arrived (W10's
-    `CONTROL_DOWN`) gets no block. Serve stores no process run."""
+    An event stored in a run after its end prints the run again, under `--- run <id> (late) ---`,
+    so the last block printed for each run equals its stored summary. A run that did not end (W10
+    `sigterm_mid_run`) or whose end never arrived (W10's `CONTROL_DOWN`) gets no block. Serve
+    stores no process run."""
     serve = run_workflow(name, scenario, "serve")
     reader = serve.stored()
     records = reader.list_runs()
     assert "process" not in {r.attribution for r in records}
-    printed = [m[1] for line in serve.irimi if (m := RUN_BLOCK.fullmatch(line))]
+    blocks = [(run_id, is_late) for run_id, is_late, _ in serve.printed_blocks()]
+    printed = [run_id for run_id, is_late in blocks if not is_late]
     assert sorted(printed) == sorted(ends_taken(serve))
     assert {r.run_id for r in records if r.end is not None} <= set(printed)
+    late = [at for at, (_, is_late) in enumerate(blocks) if is_late]
+    assert bool(late) == ((name, scenario) in PRINTS_LATE)
+    for at in late:
+        assert (blocks[at][0], False) in blocks[:at], "a late block before its run's end block"
     maps = serve.maps()
     for run_id, block in serve.run_blocks().items():
         stored = reader.load_run(run_id)
-        if (name, scenario) not in LATE_EVENTS:
-            assert block == summary_lines(RunView(stored.record, stored.events), maps), run_id
-            continue
-        # The bug `LATE_EVENTS` names: the block is the run as it stood at its end.
-        ended = stored.record.end.ended_at
-        assert ended is not None
-        before = [e for e in stored.events if _ended_at(e) <= ended]
-        assert len(before) < len(stored.events), run_id
-        assert block == summary_lines(RunView(stored.record, before), maps)
+        assert block == summary_lines(RunView(stored.record, stored.events), maps), run_id
 
 
 def ends_taken(result: Result) -> list[str]:
@@ -93,10 +91,6 @@ def ends_taken(result: Result) -> list[str]:
         if call.get("status") == 204 and (match := END_POST.search(str(call["url"])))
     ]
     return [e["run"] for e in result.events("run.end")] + by_hand
-
-
-def _ended_at(event: trace.Event) -> float:
-    return event.started_at if isinstance(event, trace.TelemetrySeen) else event.ended_at
 
 
 def test_every_workflow_has_scenarios_and_a_summary():

@@ -147,6 +147,9 @@ the command printed live in these places:
   the cut, and a write irimi refused is spelled as its request, with
   `refused by irimi: its body is too large to read whole`.
 - **Dropped events** are missing; the record's `dropped events:` line says how many.
+- **Events stored after the run's end**, such as a stream left open past it: under serve, the
+  block printed at the end leaves them out, and the `--- run <id> (late) ---` block that follows
+  them has them, as `irimi runs show` does.
 - **Labelled runs.** Live, a shadow summary covers every exchange the process made. Stored, each run
   holds only its own events: the process run holds only requests that named no run, and each SDK
   run holds its own. All of a process's runs together, the unattributed events included, make the
