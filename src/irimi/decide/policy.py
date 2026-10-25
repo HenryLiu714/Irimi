@@ -77,6 +77,14 @@ class Decided:
     issued: tuple[Exchange, ...] = ()
 
 
+class DecisionFailed(Exception):
+    """A decision that raised once irimi's own reads had gone out; `issued` are those reads."""
+
+    def __init__(self, message: str, issued: tuple[Exchange, ...]) -> None:
+        super().__init__(message)
+        self.issued = issued
+
+
 class AnswerPolicy(Protocol):
     name: str
 
@@ -88,7 +96,11 @@ class AnswerPolicy(Protocol):
         run_id: str = "",
         target: ForwardTo | None = None,
     ) -> Decided:
-        """Return how this request is answered; `target` comes from `targets.resolve`."""
+        """Return how this request is answered; `target` comes from `targets.resolve`.
+
+        Raises:
+            DecisionFailed: the decision raised after irimi's own reads, which it carries.
+        """
         ...
 
     def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
@@ -153,23 +165,32 @@ class ShadowPolicy:
         checked = preconditions.check(
             request, classification, write_log, run_id, self.reader, self.maps, self.observe_read
         )
+        try:
+            decided = self._answered(request, classification, checked)
+        except Exception as exc:
+            # The check read reached the service, so the trace must still hold it.
+            raise DecisionFailed(str(exc), checked.issued) from exc
+        _remember(self.idempotency, slot, decided)
+        return decided
+
+    def _answered(
+        self, request: Request, classification: Classification, checked: preconditions.Checked
+    ) -> Decided:
+        """Return the service's own error for a write the check rejected, else the faked write."""
         if checked.rejection is not None:
             fake = services.fake_rejection(classification, checked.rejection.body)
             outcome = WriteOutcome(checked.precondition)
-            decided = _local(fake, checked.rejection.status, outcome, issued=checked.issued)
-            _remember(self.idempotency, slot, decided)
-            return decided
+            return _local(fake, checked.rejection.status, outcome, issued=checked.issued)
         try:
             fake = services.fake_response(request, classification, self.slack_ts)
         except Exception:
             # Fail-closed hook rule: a fake that fails is answered with an empty object.
             logger.exception("irimi: the local answer failed; answering with an empty object")
             fake = services.Fake(b"{}", bodies.JSON_CT)
+        route = classification.route
         fires = route.fires if route is not None else ()
         outcome = WriteOutcome(checked.precondition, fires)
-        decided = _local(fake, 200, outcome, issued=checked.issued)
-        _remember(self.idempotency, slot, decided)
-        return decided
+        return _local(fake, 200, outcome, issued=checked.issued)
 
     def _delegated(self, route: Route | None, target: ForwardTo) -> Delegate:
         """Return the `Delegate`; `not_evaluable` if a check was declared and a reader exists."""

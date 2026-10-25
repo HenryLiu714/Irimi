@@ -5,8 +5,9 @@ from dataclasses import replace
 
 import pytest
 
+from irimi import services
 from irimi.core.exchange import Flag, Response
-from irimi.decide.policy import ShadowPolicy
+from irimi.decide.policy import DecisionFailed, ShadowPolicy
 from irimi.servicemaps.classify import classify
 from tests.support.decisions import (
     SHIPPED,
@@ -115,6 +116,32 @@ def test_a_rejected_write_lists_no_webhooks():
     assert ans.precondition == "rejected"
     assert ans.rejection_code == "charge_already_refunded"
     assert ans.would_fire == ()
+
+
+def test_a_rejection_that_raises_carries_the_check_read_it_was_built_from(monkeypatch):
+    """A rejection that cannot be built raises `DecisionFailed`, holding irimi's check read.
+
+    The read reached the service, so the session records it with its 502."""
+    failure = RuntimeError("the rejection could not be built")
+
+    def fails(classification, body):
+        raise failure
+
+    monkeypatch.setattr(services, "fake_rejection", fails)
+    policy = ShadowPolicy(
+        reader=canned_reader(json_response(200, charge_document(refunded_so_far=4900))),
+        maps=SHIPPED,
+    )
+    with pytest.raises(DecisionFailed) as raised:
+        ask(policy, refund_request())
+    assert str(raised.value) == "the rejection could not be built"
+    assert raised.value.__cause__ is failure
+    (read,) = raised.value.issued
+    assert (read.issued_by, read.request.method, read.request.path) == (
+        "engine",
+        "GET",
+        "/v1/charges/ch_REAL",
+    )
 
 
 def test_a_replayed_write_lists_no_webhooks():

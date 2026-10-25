@@ -21,8 +21,10 @@ irimi's `Request` and `Response` and carries plans onto them. What irimi decides
    `classify.classify` gives the kind; `targets.resolve` finds the target once; a read the
    overlay can translate (a cursor naming a minted id) is translated; the `AnswerPolicy` returns a
    `Decision`: `Forward`, `Delegate` or `Respond`. The policy runs the precondition check
-   (`decide/preconditions.py`), whose check read is carried on the plan. A `Respond` is stamped
-   `Irimi-Answered-By` as it is planned, and a target is probed and, if unreachable, refused here.
+   (`decide/preconditions.py`), whose check read is carried on the plan, or on `DecisionFailed`
+   when the decision raises after it, so irimi's `502` still records the read. A `Respond` is
+   stamped `Irimi-Answered-By` as it is planned, and a target is probed and, if unreachable,
+   refused here.
 3. **Back in the hook**, the addon carries the plan onto the flow: a `Respond` becomes the flow's
    response, a `Delegate` points the flow at its target with credential headers removed, and a
    `Forward` goes upstream. The whole hook runs under one guard: if anything raises, the flow gets
@@ -112,7 +114,7 @@ The interfaces a test or another mode substitutes. Each is a `Protocol`.
 | Seam | What it does | Implementations |
 | --- | --- | --- |
 | `engine.Engine` | run, shut down, wait for the listener, report its port | `MitmEngine`; the CLI never touches mitmproxy |
-| `decide.policy.AnswerPolicy` | decide one request: `Forward`, `Delegate` or `Respond`; synchronous, called on a worker thread | `ShadowPolicy`, `replay.policy.ReplayPolicy` |
+| `decide.policy.AnswerPolicy` | decide one request: `Forward`, `Delegate` or `Respond`; synchronous, called on a worker thread; raises `DecisionFailed` with any read it made | `ShadowPolicy`, `replay.policy.ReplayPolicy` |
 | `decide.overlay.Overlay` | apply a run's faked writes to a live read, and translate a read before it is forwarded; pure | `ServiceOverlay`; `NoOverlay` for tests |
 | `decide.reader.Reader` | make irimi's check read | `UpstreamReader`, `NoReader` (no check), `replay.index.RecordingReader` |
 | `record.store.RunStore` | take run starts, exchanges, tool calls and run ends; never raises or blocks | `DirectoryStore`; `NullStore` in `tests/support` |
