@@ -48,7 +48,7 @@ TARGET_PROBE_TIMEOUT_S = 2.0
 
 
 class RequestBodyCut(Exception):
-    """A write whose body decoded past MAX_DECODED_BODY, which `plan` refuses."""
+    """A write whose body irimi could not read whole, which `plan` refuses."""
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ class Completed:
 
 
 def _cut_flags(cut: bool) -> tuple[Flag, ...]:
-    """Return `body-truncated` for a request whose body was cut at the cap."""
+    """Return `body-truncated` for a request whose body irimi could not read whole."""
     return (Flag.BODY_TRUNCATED,) if cut else ()
 
 
@@ -132,11 +132,11 @@ class ShadowSession:
         request = admitted.request
         try:
             cls = classify(request, self.maps)
-            # A body cut at the cap reaches the decision empty, and a faked write built from it
+            # A body not read whole reaches the decision empty, and a faked write built from it
             # would confirm a write the agent never sent. Live kinds forward the agent's own bytes.
             if admitted.cut and cls.kind not in LIVE_KINDS:
                 cut = RequestBodyCut(
-                    "request body decompresses to more than "
+                    "request body does not decode, or decodes to more than "
                     f"{MAX_DECODED_BODY // (1024 * 1024)} MiB; irimi does not fake a write it "
                     "cannot read whole"
                 )
@@ -324,7 +324,7 @@ class ShadowSession:
     def complete(self, plan: Plan, received: Received) -> Completed:
         """Return the exchange a planned request became, and what to send instead of its answer.
 
-        A streamed response is already sent, so it is not overlaid. A body cut at the cap is not
+        A streamed response is already sent, so it is not overlaid. A body not read whole is not
         observed or overlaid: the agent gets the service's bytes and only the recording is short.
         """
         upstream = received.response

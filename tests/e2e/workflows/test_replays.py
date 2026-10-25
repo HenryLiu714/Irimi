@@ -161,6 +161,7 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
     (W7, "gzip_bomb_stream"): _UNSERVABLE + ": `stream-truncated` at irimi's cap",
     (W7, "two_callers"): _ALL_RUNS,
     (W9, "control_runs"): _ALL_RUNS,
+    (W9, "bodies"): _UNSERVABLE + ": a `body-truncated` read in a coding irimi does not decode",
     (W9, "bombs"): _UNSERVABLE + ": `body-truncated` request bodies, an llm call and a read",
     (W10, "read_timeout"): _UNSERVABLE + ": `upstream-error`",
     (W10, "reset_on_read"): _UNSERVABLE + ": `upstream-error`",
@@ -173,9 +174,9 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
     (W11, "loopback_service"): _ESCAPE,
     (W11, "redirected"): "each hop's query names the fake internet's port, new in every run",
 }
-# Rule 3's exception: the engine refuses a write whose body decodes past irimi's cap before any
+# Rule 3's exception: the engine refuses a write whose body it cannot read whole before any
 # policy is asked, so no replay flag is due.
-CUT_BEFORE_THE_POLICY = {(W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
+CUT_BEFORE_THE_POLICY = {(W9, "bodies"), (W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
 # Rule 2's exception: (recorded exit, replay's agent exit, why).
 EXIT_DIFFERS = {
     (W7, "two_callers"): (

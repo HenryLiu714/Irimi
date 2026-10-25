@@ -39,8 +39,9 @@ irimi's `Request` and `Response` and carries plans onto them. What irimi decides
    response, flagged, so a failed write is never missing from the trace.
 
 Every body a hook records is decoded by `engine.decoding.decode_body`, which never raises and stops
-at `limits.MAX_DECODED_BODY`, so a small compressed bomb cannot exhaust memory. Raw TCP relay is
-off: bytes that are not HTTP fail as HTTP, and are never relayed.
+at `limits.MAX_DECODED_BODY`, so a small compressed bomb cannot exhaust memory. A body it cannot
+decode is recorded empty, flagged, since redaction cannot read it. Raw TCP relay is off: bytes
+that are not HTTP fail as HTTP, and are never relayed.
 
 ## Modes
 

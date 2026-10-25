@@ -11,6 +11,7 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     CHARGE,
     CUSTOMER,
     INTENT,
+    OBJECT_STORE,
 )
 from tests.e2e.workflows.harness.internet import PADDED_BYTES, PADDED_LINE, Req, Resp
 from tests.e2e.workflows.harness.scenario import Scenario, Workflow
@@ -36,6 +37,17 @@ def _bombs(world: World) -> None:
     """Set up `_stripe`, building `gzip-padded`'s padding before the agent starts."""
     agentkit.gzip_bomb(b"", PADDED_LINE, PADDED_BYTES)
     _stripe(world)
+
+
+def _bodies(world: World) -> None:
+    """Set up `_stripe`, and an object store that takes any PUT, as S3 does."""
+    _stripe(world)
+    world.extra.append(
+        JsonService(
+            (OBJECT_STORE,),
+            {("PUT", "/bucket/.+"): lambda req, state: Resp(200, {})},
+        )
+    )
 
 
 def _refunds_read(req: Req) -> bool:
@@ -93,7 +105,16 @@ WORKFLOW = Workflow(
             doc="DELETE/PATCH/PUT/unrouted POST are faked; a fixture-less write gets an echo",
         ),
         "idempotency": Scenario(("idempotency",), setup=_stripe, doc="one key, three uses"),
-        "bodies": Scenario(("bodies",), setup=_stripe, doc="gzip, chunked, and a 3 MB body"),
+        "bodies": Scenario(
+            ("bodies",),
+            setup=_bodies,
+            faults=(
+                ("api.stripe.com", "gzip-br", _refunds_read, 1),
+                ("api.stripe.com", "bzip2", _refunds_read, 1),
+            ),
+            doc="gzip, chunked, a 3 MB body, `gzip, br`, two gzip members, bzip2 and two S3 "
+            "uploads framed `aws-chunked`, then refunds read back in `gzip, br` and in bzip2",
+        ),
         "big_reads": Scenario(
             ("big_reads",), setup=_big, doc="a 3 MB charge: the check read and the overlay give up"
         ),

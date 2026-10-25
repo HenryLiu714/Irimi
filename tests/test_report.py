@@ -1056,7 +1056,7 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
 
 
 def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
-    """A write refused for its body size prints `✗` as its request line, saying why.
+    """A write refused for a body irimi could not read whole prints `✗` as its request, saying why.
 
     Its `human:` sentence would describe a body irimi never read. Its host line counts it as
     `refused by irimi`, as its line names it."""
@@ -1071,7 +1071,7 @@ def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
     )
     lines = summary_lines("7f3a", [cut], 0.0, _maps())
     assert _write_block(lines) == [
-        "  ✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: its body is too large to "
+        "  ✗ stripe  POST api.stripe.com/v1/refunds  refused by irimi: its body could not be "
         "read whole"
     ]
     assert _host(lines) == "  api.stripe.com  1 write refused by irimi"

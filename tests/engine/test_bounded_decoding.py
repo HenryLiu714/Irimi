@@ -1,6 +1,7 @@
 """A compressed body is decoded only up to `decoding.MAX_DECODED_BODY`, in every hook.
 
-Sections: each codec at a small cap, real bombs at the real cap, every path through the engine."""
+Sections: each codec at a small cap, stacked codings, gzip members and aws-chunked, real bombs at
+the real cap, every path through the engine."""
 
 import bz2
 import gzip
@@ -9,6 +10,7 @@ import json
 import os
 import socket
 import threading
+import time
 import tracemalloc
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -43,6 +45,14 @@ from tests.support.maps import STREAM_MAP, map_index, targeted_index
 from tests.support.servers import stop_server
 
 CAP = decoding.MAX_DECODED_BODY  # type: ignore[attr-defined]
+# The control endpoint's answer to a body the engine could not read whole.
+NOT_READ_WHOLE = {
+    "error": {
+        "type": "irimi_control_refused",
+        "message": "the body does not decode, or decodes past the "
+        f"{MAX_CONTROL_BODY} bytes allowed",
+    }
+}
 LINE = b"x" * 1023 + b"\n"  # a body of whole 1 KiB lines, so a cut one keeps whole lines
 MIB = 1024 * 1024
 
@@ -108,7 +118,7 @@ def test_an_encoding_irimi_does_not_decode_is_not_run_through_python_s_codecs(
 ):
     """A `bz2` or `zlib` body is undecodable, not run through `codecs.decode` with no bound.
 
-    Neither is an HTTP content coding, so the body is recorded as it came."""
+    Neither is an HTTP content coding, so the body is recorded empty."""
     assert decode_body(packed, content_encoding) is None
 
 
@@ -135,6 +145,212 @@ def test_a_deflate_stream_that_ends_early_is_refused_even_right_at_the_cap(cap_o
     assert len(plain) == cap_of_10_lines
     assert decode_body(zlib.compress(plain)[:-2], "deflate") is None
     assert decode_body(zlib.compress(plain), "deflate") == Decoded(plain, False)
+
+
+# ------------------------------------------------- stacked codings, gzip members and aws-chunked
+
+
+# Each value is applied first to last, so it is undone last first.
+STACKS = {
+    "gzip, br": lambda body: brotli.compress(gzip.compress(body)),
+    "gzip, gzip": lambda body: gzip.compress(gzip.compress(body)),
+    "deflate, zstd": lambda body: zstandard.ZstdCompressor().compress(zlib.compress(body)),
+    " BR ,, identity , x-gzip": lambda body: gzip.compress(brotli.compress(body)),
+}
+
+
+@pytest.mark.parametrize("content_encoding", STACKS)
+def test_stacked_codings_are_undone_last_first(content_encoding):
+    """Each coding is undone in turn; an identity and an empty list element are no coding."""
+    plain = LINE * 3
+    decoded = decode_body(STACKS[content_encoding](plain), content_encoding)
+    assert decoded == Decoded(plain, False)
+
+
+def test_codings_stacked_over_two_header_lines_are_one_list():
+    """`Content-Encoding: gzip` then `Content-Encoding: br` is `gzip, br` (RFC 9110 5.3)."""
+    fields = ((b"content-encoding", b"gzip"), (b"content-encoding", b"br"))
+    response = tutils.tresp(content=None, headers=fields)
+    response.raw_content = brotli.compress(gzip.compress(b"whole"))
+    assert mitm._body(response) == Decoded(b"whole", False)
+    tee = StreamCapture()
+    tee(response.raw_content)
+    recorded_body, chunks, cut = recorded(streamed_flow(*fields), tee, whole=True)
+    assert (recorded_body.body, chunks, cut) == (b"whole", (5,), False)
+
+
+def test_a_stacked_body_cut_at_the_cap_keeps_the_start_of_the_document(cap_of_10_lines):
+    """The last coding undone stops at the cap and keeps the document's start, as one does alone."""
+    plain = _lines(100 * len(LINE))
+    decoded = decode_body(brotli.compress(gzip.compress(plain)), "gzip, br")
+    assert decoded == Decoded(plain[:cap_of_10_lines], True)
+
+
+def test_a_stacked_body_cut_before_its_last_coding_keeps_nothing(cap_of_10_lines):
+    """An outer coding cut at the cap leaves the start of an inner stream, which is no document."""
+    inner = gzip.compress(os.urandom(20 * len(LINE)), compresslevel=0)
+    assert len(inner) > cap_of_10_lines
+    assert decode_body(brotli.compress(inner), "gzip, br") == Decoded(b"", True)
+
+
+def test_no_more_codings_are_undone_than_urllib3_undoes():
+    """Five stacked codings are undone; six are not decoded at all: an agent could not read them."""
+    five = b"layered"
+    for _ in range(5):
+        five = gzip.compress(five)
+    six = gzip.compress(five)
+    assert decode_body(five, ", ".join(["gzip"] * 5)) == Decoded(b"layered", False)
+    assert decode_body(six, ", ".join(["gzip"] * 6)) is None
+    assert decode_body(five, ", ".join(["identity"] * 5 + ["gzip"] * 5)) == Decoded(
+        b"layered", False
+    )
+
+
+@pytest.mark.parametrize("content_encoding", ["gzip, bzip2", "bzip2, gzip", "compress"])
+def test_a_stack_naming_a_coding_irimi_does_not_decode_is_refused_before_any_decoding(
+    monkeypatch, content_encoding
+):
+    """Nothing is undone first: a bomb under a coding irimi knows would cost the cap for nothing."""
+    undone = []
+    monkeypatch.setitem(decoding._DECODERS, "gzip", lambda body, limit: undone.append(body))
+    assert decode_body(gzip.compress(b"x"), content_encoding) is None
+    assert undone == []
+
+
+def test_every_gzip_member_is_decoded():
+    """A body of several gzip members decodes to all of them, as gunzip and urllib3 read it."""
+    body = gzip.compress(b'{"a": 1,') + gzip.compress(b' "b": 2}')
+    assert decode_body(body, "gzip") == Decoded(b'{"a": 1, "b": 2}', False)
+
+
+def test_zeros_between_gzip_members_are_skipped_and_bytes_after_the_last_ignored():
+    """Zeros between members are skipped, as Python's gzip skips them; what follows is not read."""
+    body = gzip.compress(b"one ") + bytes(3) + gzip.compress(b"two") + bytes(2) + b"trailing"
+    assert decode_body(body, "gzip") == Decoded(b"one two", False)
+
+
+def test_a_gzip_member_that_does_not_decode_makes_the_body_undecodable():
+    """A member that starts as gzip and is not makes the whole body undecodable, never half read."""
+    assert decode_body(gzip.compress(b"one ") + b"\x1f\x8b\x00broken", "gzip") is None
+
+
+def test_gzip_members_decode_into_one_cap(cap_of_10_lines):
+    """The members share the cap: past it in the third member, at it whole, past it by one byte."""
+    three = b"".join(gzip.compress(LINE * 4) for _ in range(3))
+    assert decode_body(three, "gzip") == Decoded(LINE * 10, True)
+    at_cap = gzip.compress(LINE * 4) + gzip.compress(LINE * 6) + gzip.compress(b"")
+    assert decode_body(at_cap, "gzip") == Decoded(LINE * 10, False)
+    past = gzip.compress(LINE * 10) + gzip.compress(b"x")
+    assert decode_body(past, "gzip") == Decoded(LINE * 10, True)
+
+
+def test_a_bomb_after_a_member_that_fills_the_cap_is_read_one_byte_at_most(cap_of_10_lines):
+    """zlib reads a limit of 0 as none, so irimi asks a full cap for one byte more, never for 0.
+
+    Asked for 0, the bomb's first step would decode to megabytes, past any cap."""
+    body = gzip.compress(LINE * 10) + gzip.compress(bytes(16 * MIB))
+    tracemalloc.start()
+    try:
+        decoded = decode_body(body, "gzip")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert decoded == Decoded(LINE * 10, True)
+    assert peak < MIB, peak
+
+
+def test_a_gzip_body_that_ends_early_keeps_its_start_and_says_it_was_cut():
+    """A last member cut short decodes as far as it goes, cut, as a member's lone header does.
+
+    Only a stream keeps that start; a buffered body is recorded empty, never faked from it."""
+    plain = b"".join(b"%d\n" % i for i in range(1000))
+    decoded = decode_body(gzip.compress(plain)[:-30], "gzip")
+    assert decoded is not None and decoded.cut and plain.startswith(decoded.body)
+    assert decode_body(gzip.compress(plain)[:-4], "gzip") == Decoded(plain, True)
+    assert decode_body(gzip.compress(b"one ") + b"\x1f\x8b", "gzip") == Decoded(b"one ", True)
+
+
+def test_many_gzip_members_decode_in_time_linear_in_the_body():
+    """19 MiB of empty members decode in about a second; copying the rest per member takes minutes.
+
+    zlib copies a member's unread input when it ends, so irimi hands it the body in steps."""
+    started = time.monotonic()
+    assert decode_body(gzip.compress(b"") * 1_000_000, "gzip") == Decoded(b"", False)
+    assert time.monotonic() - started < 20
+
+
+@pytest.mark.parametrize(
+    ("content_encoding", "raw"),
+    [
+        ("bzip2", bz2.compress(b"a secret redaction cannot read compressed")),
+        ("gzip, bzip2", bz2.compress(gzip.compress(b"x"))),
+        ("gzip", b"not gzip"),
+        ("gzip", gzip.compress(b"x" * 100)[:-4]),
+        (", ".join(["gzip"] * 6), gzip.compress(b"x")),
+    ],
+    ids=["unknown", "unknown-in-a-stack", "corrupt", "ends-early", "too-many"],
+)
+def test_a_buffered_body_irimi_cannot_decode_is_recorded_empty(content_encoding, raw):
+    """A body irimi cannot decode is recorded empty and not whole, never as it came.
+
+    Redaction cannot read an encoded body, so a secret in it would reach disk."""
+    response = tutils.tresp(
+        content=None, headers=((b"content-encoding", content_encoding.encode()),)
+    )
+    response.raw_content = raw
+    assert mitm._body(response) == Decoded(b"", True)
+
+
+def _aws_chunked(*chunks: bytes) -> bytes:
+    """Return `chunks` framed as boto3 frames an S3 upload, each signed, with a checksum trailer."""
+    signed = b"".join(b"%x;chunk-signature=%s\r\n%s\r\n" % (len(c), b"0" * 64, c) for c in chunks)
+    return signed + b"0;chunk-signature=" + b"0" * 64 + b"\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n"
+
+
+def test_an_aws_chunked_body_decodes_to_the_data_its_chunks_carry():
+    """S3's `aws-chunked` framing is undone, and a coding under it after it."""
+    assert decode_body(_aws_chunked(b"part one, ", b"part two"), "aws-chunked") == Decoded(
+        b"part one, part two", False
+    )
+    zipped = _aws_chunked(gzip.compress(b"zipped"))
+    assert decode_body(zipped, "gzip,aws-chunked") == Decoded(b"zipped", False)
+
+
+# Each value frames, in `aws-chunked`, the body its codings other than `aws-chunked` give.
+CHUNKED_STACKS = {
+    "aws-chunked,gzip": gzip.compress(b"zipped"),
+    "br, aws-chunked, gzip": gzip.compress(brotli.compress(b"zipped")),
+}
+
+
+@pytest.mark.parametrize("content_encoding", CHUNKED_STACKS)
+def test_aws_chunked_is_undone_first_wherever_the_list_names_it(content_encoding):
+    """S3 strips the framing from any place in the list, and AWS's docs spell it first.
+
+    Undone in its place, the gzip under `aws-chunked,gzip` would be read from the framing."""
+    framed = _aws_chunked(CHUNKED_STACKS[content_encoding])
+    assert decode_body(framed, content_encoding) == Decoded(b"zipped", False)
+
+
+def test_an_aws_chunked_body_past_the_cap_keeps_its_start_and_one_at_it_is_whole(cap_of_10_lines):
+    """Chunks that fill the cap exactly, then the last chunk, are the whole body."""
+    assert decode_body(_aws_chunked(LINE * 6, LINE * 6), "aws-chunked") == Decoded(LINE * 10, True)
+    assert decode_body(_aws_chunked(LINE * 4, LINE * 6), "aws-chunked") == Decoded(LINE * 10, False)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"3\r\nabcd\r\n0\r\n\r\n",
+        b"3\r\nabcXY0\r\n\r\n",
+        b"3\r\nabc\r\n",
+        b"zz\r\nabc\r\n0\r\n\r\n",
+        b"3\r\nab",
+    ],
+)
+def test_an_aws_chunked_body_framed_wrong_does_not_decode(body):
+    """A chunk longer than its size or not ended by CRLF, no last chunk, a bad size, a short one."""
+    assert decode_body(body, "aws-chunked") is None
 
 
 # --------------------------------------------------------------------- real bombs at the real cap
@@ -202,6 +418,44 @@ def test_a_bomb_never_holds_more_than_twice_the_cap(bombs, content_encoding):
         tracemalloc.stop()
     assert body == Decoded(b"", True)
     assert peak < 2 * CAP + 4 * MIB, peak
+
+
+def test_a_gzip_bomb_holds_less_than_twice_the_cap_however_its_output_grows(monkeypatch):
+    """gzip's output grows in steps, with room to spare; it is handed over without a copy.
+
+    A `bytearray` copied out at the end holds its growth room beside the copy: 2.125 caps."""
+    cap = 8 * MIB
+    monkeypatch.setattr(decoding, "MAX_DECODED_BODY", cap)
+    message = tutils.tresp(content=None, headers=((b"content-encoding", b"gzip"),))
+    message.raw_content = gzip.compress(bytes(2 * cap), compresslevel=9)
+    tracemalloc.start()
+    try:
+        body = mitm._body(message)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert body == Decoded(b"", True)
+    assert peak < 2 * cap, peak
+
+
+def test_a_stacked_body_holds_at_most_three_times_the_cap(monkeypatch):
+    """Undoing `gzip, br` holds the inner stream beside the document: at most thrice the cap."""
+    cap = 8 * MIB
+    monkeypatch.setattr(decoding, "MAX_DECODED_BODY", cap)
+    plain = os.urandom(cap - 64 * 1024)
+    deflater = zlib.compressobj(1, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    inner = deflater.compress(plain) + deflater.flush()
+    message = tutils.tresp(content=None, headers=((b"content-encoding", b"gzip, br"),))
+    message.raw_content = brotli.compress(inner, quality=0)
+    del inner
+    tracemalloc.start()
+    try:
+        body = mitm._body(message)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert body == Decoded(plain, False)
+    assert peak < 3 * cap + MIB, peak
 
 
 # ------------------------------------------------------------------- every path through the engine
@@ -390,9 +644,20 @@ def test_a_compressed_stream_the_tee_cut_is_recorded_as_the_whole_lines_it_decod
     flow = streamed_flow((b"content-encoding", content_encoding.encode()))
     response, chunks, cut = recorded(flow, tee, whole=True)
     assert cut
-    assert len(response.body) > len(plain) // 4
+    assert len(response.body) > len(packed) // 4
     assert plain.startswith(response.body) and response.body.endswith(b"\n")
     assert chunks == (len(response.body),)
+
+
+def test_a_gzip_stream_the_tee_cut_is_kept_no_longer_than_a_stored_body(monkeypatch):
+    """What the tee kept ends inside the member, so it decodes cut, kept to the store's cap."""
+    plain = b"".join(b"data: %d\n" % i for i in range(200_000))
+    packed = gzip.compress(plain)
+    monkeypatch.setattr(capture, "MAX_STORED_BODY", len(packed) // 2)
+    tee = StreamCapture()
+    tee(packed)
+    response, _, cut = recorded(streamed_flow((b"content-encoding", b"gzip")), tee, whole=True)
+    assert cut and 0 < len(response.body) <= len(packed) // 2
 
 
 def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
@@ -418,8 +683,9 @@ def test_a_write_whose_request_is_a_bomb_is_refused_never_faked_from_part_of_it(
     error = json.loads(data)["error"]
     assert error["type"] == "irimi_decision_failed"
     assert error["message"] == (
-        "irimi could not decide how to answer this request: request body decompresses to more "
-        f"than {CAP // (1024 * 1024)} MiB; irimi does not fake a write it cannot read whole"
+        "irimi could not decide how to answer this request: request body does not decode, or "
+        f"decodes to more than {CAP // (1024 * 1024)} MiB; irimi does not fake a write it cannot "
+        "read whole"
     )
     # The refusal keeps the write's classification, so the summary can name the operation.
     (ex,) = seen
@@ -561,12 +827,117 @@ def test_a_control_request_bomb_is_refused_without_decoding_it_whole(
     finally:
         stop()
     assert status == 413, data
-    assert json.loads(data) == {
-        "error": {
-            "type": "irimi_control_refused",
-            "message": f"the body decodes past the {MAX_CONTROL_BODY} bytes allowed",
-        }
-    }
+    assert json.loads(data) == NOT_READ_WHOLE
+    assert seen == []
+
+
+class _CodedUpstream(BaseHTTPRequestHandler):
+    """Answers every GET with `body`, its `Content-Encoding` set to `coding`."""
+
+    body = b""
+    coding = ""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-encoding", self.coding)
+        self.send_header("content-length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def coded_upstream():
+    srv = HTTPServer(("127.0.0.1", 0), _CodedUpstream)
+    threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.01), daemon=True).start()
+    yield srv.server_address[1]
+    stop_server(srv)
+
+
+def _read_coded(eng, port: int) -> tuple[int, str | None, bytes]:
+    conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=10)
+    conn.request("GET", f"http://127.0.0.1:{port}/coded", headers={"host": f"127.0.0.1:{port}"})
+    resp = conn.getresponse()
+    answer = resp.status, resp.getheader("content-encoding"), resp.read()
+    conn.close()
+    return answer
+
+
+@pytest.mark.parametrize(
+    ("coding", "body", "recorded", "flags"),
+    [
+        ("gzip, br", brotli.compress(gzip.compress(b'{"a": 1}')), b'{"a": 1}', ()),
+        ("bzip2", bz2.compress(b'{"a": 1}'), b"", (Flag.BODY_TRUNCATED,)),
+    ],
+    ids=["stacked", "unknown"],
+)
+def test_a_read_reaches_the_agent_as_sent_and_is_recorded_decoded_or_empty(
+    tmp_path, monkeypatch, coded_upstream, coding, body, recorded, flags
+):
+    """A read in stacked codings is recorded decoded; one irimi cannot decode, empty and flagged.
+
+    Either way the agent gets the service's bytes and coding."""
+    _CodedUpstream.body, _CodedUpstream.coding = body, coding
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
+    try:
+        answer = _read_coded(eng, coded_upstream)
+    finally:
+        stop()
+    assert answer == (200, coding, body)
+    (ex,) = seen
+    assert ex.response is not None
+    assert (ex.answered_by, ex.response.body, ex.flags) == ("live", recorded, flags)
+
+
+def test_an_overlaid_stacked_read_goes_out_decoded_and_without_its_codings(
+    tmp_path, monkeypatch, coded_upstream
+):
+    """An overlaid read is rebuilt from the decoded body; mitmproxy cannot encode `gzip, br`.
+
+    It drops the header and sends the body as built, so the agent reads it as it reads any other."""
+
+    class _Overlay:
+        def __call__(
+            self, write_log, classification, read_request, upstream_response, translated_from=None
+        ):
+            body = upstream_response.body + b"-OVERLAID"
+            return Overlaid(Response(200, upstream_response.headers, body))
+
+        def rewrite(self, write_log, classification, read_request):
+            return None
+
+    _CodedUpstream.body = brotli.compress(gzip.compress(b'{"a": 1}'))
+    _CodedUpstream.coding = "gzip, br"
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch), overlay=_Overlay())
+    try:
+        via_proxy(
+            eng.listen_port(), "POST", f"http://127.0.0.1:{coded_upstream}/things", body=b"{}"
+        )
+        answer = _read_coded(eng, coded_upstream)
+    finally:
+        stop()
+    assert answer == (200, None, b'{"a": 1}-OVERLAID')
+    assert seen[-1].response is not None
+    assert (seen[-1].answered_by, seen[-1].response.body) == ("overlay", b'{"a": 1}-OVERLAID')
+
+
+def test_a_control_request_irimi_cannot_decode_is_refused_413(tmp_path, monkeypatch):
+    """A control post in a coding irimi does not decode is refused as not read whole."""
+    eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch))
+    try:
+        status, data = via_base_url(
+            eng.listen_port(),
+            "POST",
+            "/_irimi/runs/r1/start",
+            body=bz2.compress(b"{}"),
+            extra_headers={"content-encoding": "bzip2", "connection": "close"},
+        )
+    finally:
+        stop()
+    assert (status, json.loads(data)) == (413, NOT_READ_WHOLE)
     assert seen == []
 
 

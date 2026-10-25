@@ -145,7 +145,7 @@ the command printed live in these places:
   `<redacted:…>`.
 - **A body the store cut** (past 8 MiB): a faked write's sentence may print `?` for a field past
   the cut, and a write irimi refused is spelled as its request, with
-  `refused by irimi: its body is too large to read whole`.
+  `refused by irimi: its body could not be read whole`.
 - **Dropped events** are missing; the record's `dropped events:` line says how many.
 - **Labelled runs.** Live, a shadow summary covers every exchange the process made. Stored, each run
   holds only its own events: the process run holds only requests that named no run, and each SDK

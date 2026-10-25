@@ -82,8 +82,9 @@ Rules that follow from these, each also held by a test:
   (`dropped_events`), never blocking or failing the agent's request.
 - **Telemetry is forwarded and never stored.** A request classified `telemetry` is recorded only as
   the fact that it happened, and to which host.
-- **Nothing is answered from part of a body.** A write whose request body decodes past 64 MiB is
-  refused with irimi's `502`, never faked from its start, and never forwarded.
+- **Nothing is answered from part of a body.** A write whose request body does not decode, or
+  decodes past 64 MiB, is refused with irimi's `502`, never faked from its start, and never
+  forwarded.
 - **Non-HTTP bytes are refused.** Raw TCP relay is off: bytes that are not HTTP, and a connection
   upgraded to anything but a WebSocket, are closed, never relayed.
 

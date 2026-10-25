@@ -28,7 +28,7 @@ class BaseUrlRefused(ValueError):
 class Admitted:
     """A request to answer, rewritten to its upstream and stripped of irimi's headers, and its run.
 
-    `listener` is where it reached irimi, which no target may be; `cut` means a truncated body.
+    `listener` is where it reached irimi, which no target may be; `cut`, a body not read whole.
     """
 
     request: Request
@@ -41,7 +41,7 @@ class Admitted:
 
 @dataclass(frozen=True)
 class ControlCall:
-    """A request to the control endpoint; `whole_body` is False when it decoded past the cap."""
+    """A request to the control endpoint; `whole_body` is False when it was not read whole."""
 
     request: Request
     whole_body: bool
