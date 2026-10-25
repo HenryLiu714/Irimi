@@ -339,6 +339,56 @@ def test_a_tool_call_streamed_in_pieces_becomes_one_faked_slack_post(run_workflo
     assert pieces == ["", *(arguments[i : i + 5] for i in range(0, len(arguments), 5))]
 
 
+SUMMARY_POSTED = "Summary: refunds go back to the card within 5-10 days."
+POSTED_LINE = (
+    f'  ○ slack  post to #{CHANNEL}: "{SUMMARY_POSTED}"  faked; checked against live state: '
+    "would succeed"
+)
+# A streamed read back of the channel is never edited, so it never shows the faked post.
+NOT_SHOWN_LINE = "    ↳ POST /api/conversations.history did not show it  real (partial)"
+# Slack's own history of the channel, which holds nothing under irimi.
+EMPTY_HISTORY = [{"ok": True, "messages": [], "has_more": False}]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_that_streams_after_a_faked_post_is_never_edited(run_workflow, mode):
+    """A read back that streams reaches the agent as Slack sent it, without the faked post.
+
+    It is recorded `partial`, so the summary says it did not show the post. Bare, it shows it."""
+    bare = run_workflow(W, "streamed_read_back", "bare")
+    shadow = run_workflow(W, "streamed_read_back", mode)
+    posted = {"ok": True, "channel": CHANNEL, "text": SUMMARY_POSTED}
+    assert bare.result()["posted"] == {**posted, "seen": True}
+    assert shadow.result()["posted"] == {**posted, "seen": False}
+    assert [c["answered_by"] for c in shadow.calls("read_back")] == [None]
+    assert shadow.exchange_lines()[-2:] == [
+        "faked         write     POST slack.com/api/chat.postMessage -> 200",
+        "real          read      POST slack.com/api/conversations.history -> 200",
+    ]
+    read = stored_exchanges(shadow)["/api/conversations.history"]
+    assert (read.answered_by, read.overlay, read.flags) == ("live", "partial", ())
+    assert read.response is not None and data_lines(read.response.body) == EMPTY_HISTORY
+    assert read.stream_chunks == (len(read.response.body),)
+    summary = shadow.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == NOT_SHOWN_LINE
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_that_breaks_mid_stream_is_still_marked_as_not_showing_the_post(
+    run_workflow, mode
+):
+    """A streamed read back that Slack resets after its event is stored broken, and `partial`."""
+    bare = run_workflow(W, "streamed_read_back_reset", "bare")
+    shadow = run_workflow(W, "streamed_read_back_reset", mode)
+    assert bare.result()["outcome"] == shadow.result()["outcome"] == "upstream_broke"
+    read = stored_exchanges(shadow)["/api/conversations.history"]
+    broken = (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+    assert (read.answered_by, read.overlay, read.flags) == ("live", "partial", broken)
+    assert read.response is not None and data_lines(read.response.body) == EMPTY_HISTORY
+    summary = shadow.summaries()
+    assert summary[summary.index(POSTED_LINE) + 1] == NOT_SHOWN_LINE
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_a_secret_a_write_ends_inside_is_redacted_in_the_joined_stream(run_workflow, mode):
     """A secret split across two chunk writes is redacted in the joined stream.

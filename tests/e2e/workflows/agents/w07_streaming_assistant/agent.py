@@ -1,6 +1,7 @@
 """W7 `streaming_assistant`: a chat endpoint that streams LLM output back to its own caller.
 
-`chat` embeds, streams Anthropic and OpenAI answers, and may post one Slack summary."""
+`chat` embeds, streams Anthropic and OpenAI answers, and may post one Slack summary and read it
+back."""
 
 from __future__ import annotations
 
@@ -34,6 +35,8 @@ EXIT = {"ok": 0, "client_gone": 3, "upstream_broke": 4}
 MODES = ("read_all", "hang_up", "two_callers", "hand_off")
 # `httpx` streams the model calls with httpx instead of urllib.
 STREAM_CLIENT_ENV = "W7_STREAM_CLIENT"
+# `true` reads the channel's history back after a post, as a stream.
+READ_BACK_ENV = "W7_READ_BACK"
 POST_SUMMARY = {
     "type": "function",
     "function": {"name": "post_summary", "parameters": {"type": "object"}},
@@ -240,6 +243,16 @@ def openai_stream(answer: str) -> tuple[str, list[dict[str, Any]]]:
     return content, [calls[i] for i in sorted(calls)]
 
 
+def read_back(channel: str, text: str) -> bool:
+    """Return whether the channel's history, read as a stream, holds a message with `text`."""
+    url = agentkit.base("slack") + "/api/conversations.history"
+    headers = {"Authorization": f"Bearer {agentkit.key('SLACK_BOT_TOKEN')}"}
+    events = sse_events(stream_post(url, {"channel": channel}, headers, "read_back"))
+    # Read to the end even once the post is found, so a broken stream raises bare and shadowed.
+    found = [m.get("text") for _, data in events for m in json.loads(data).get("messages", [])]
+    return text in found
+
+
 # The trigger takes the caller's writer as an argument, so its captured args cannot be replayed:
 # a streaming handler is the ordinary case of a trigger with a non-data argument.
 @observe.trigger
@@ -260,6 +273,8 @@ def chat(question: str, send: Callable[[str, dict[str, Any]], None]) -> dict[str
             args = json.loads(call["arguments"])
             doc = agentkit.slack("chat.postMessage", channel=args["channel"], text=args["text"])
             posted = {"ok": doc.get("ok"), "channel": doc.get("channel"), "text": args["text"]}
+            if os.environ.get(READ_BACK_ENV) == "true":
+                posted["seen"] = read_back(args["channel"], args["text"])
     if os.environ.get("LANGSMITH_TRACING") == "true":
         agentkit.http(
             "POST",

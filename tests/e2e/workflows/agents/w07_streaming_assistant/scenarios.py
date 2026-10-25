@@ -8,9 +8,11 @@ import threading
 from typing import Any, ClassVar
 
 from tests.e2e.workflows.agents import agentkit, credentials
+from tests.e2e.workflows.agents.w07_streaming_assistant.agent import READ_BACK_ENV
 from tests.e2e.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Req, Resp
 from tests.e2e.workflows.harness.scenario import Scenario, Workflow
 from tests.e2e.workflows.harness.services import (
+    FakeSlack,
     LlmCall,
     LlmTurn,
     ScriptedLLM,
@@ -244,6 +246,18 @@ class HeldStreamLLM(ScriptedLLM):
         return resp
 
 
+class StreamingHistorySlack(FakeSlack):
+    """Answers `conversations.history` as one server-sent event, so irimi streams the read.
+
+    Real Slack never streams; no shipped map has a streamed read that the overlay could edit."""
+
+    def handle(self, req: Req) -> Resp:
+        resp = super().handle(req)
+        if req.path != "/api/conversations.history":
+            return resp
+        return Resp(resp.status, chunks=[_sse(resp.body)])
+
+
 def _world(world: World) -> None:
     world.llm.script = chat_script
 
@@ -260,6 +274,15 @@ def _traced(world: World) -> None:
 def _splitting(world: World) -> None:
     world.llm = SplittingLLM(summarize_script)
     world.slack.add_channel(CHANNEL, "payments-team")
+
+
+def _history(req: Req) -> bool:
+    return req.path == "/api/conversations.history"
+
+
+def _streamed_read_back(world: World) -> None:
+    world.slack = StreamingHistorySlack()
+    _splitting(world)
 
 
 def _mid_line(world: World) -> None:
@@ -327,6 +350,21 @@ WORKFLOW = Workflow(
             ("Please post a summary of refunds", "read_all"),
             setup=_splitting,
             doc="a tool call streamed in pieces becomes a Slack post",
+        ),
+        "streamed_read_back": Scenario(
+            ("Please post a summary of refunds", "read_all"),
+            env={READ_BACK_ENV: "true"},
+            setup=_streamed_read_back,
+            doc="the post a streamed tool call made, read back from a channel history Slack "
+            "streams: irimi cannot show the faked post in it, and says so",
+        ),
+        "streamed_read_back_reset": Scenario(
+            ("Please post a summary of refunds", "read_all"),
+            env={READ_BACK_ENV: "true"},
+            setup=_streamed_read_back,
+            faults=(("slack.com", "reset-stream", _history, 1),),
+            doc="as `streamed_read_back`, but Slack resets the history stream after its event: "
+            "the run ends in error, and irimi still says the read did not show the post",
         ),
         "secret_split_across_writes": Scenario(
             ("What is the test key?", "read_all"),

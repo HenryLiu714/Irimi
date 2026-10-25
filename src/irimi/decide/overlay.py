@@ -1,7 +1,7 @@
 """The overlay: applies the run's faked writes to a live read, purely, so replay reuses it.
 
 The engine never calls it for reads sent to a target (`target_reads: true`; the target owns that
-state) or for streamed responses (headers already sent).
+state), and keeps only its fidelity for a streamed or cut answer: the agent gets those as sent.
 """
 
 import json
