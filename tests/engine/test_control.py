@@ -240,6 +240,8 @@ _NOT_JSON = "the body is not JSON: "
 # A replay's lookup of a read tool's recorded outcome.
 _LOOKUP = f"/_irimi/runs/{RUN}/tool-calls/recorded"
 LOOKUP: dict[str, JSONValue] = {"name": "db.balance", "args": {"account": "acc_1"}}
+# The SDK's release of a lookup's answer it could not use.
+_RELEASE = f"{_LOOKUP}/release"
 
 # (method, path, body, status, error). Every refusal names what was wrong in one line.
 REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
@@ -363,6 +365,25 @@ REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
     ("POST", _LOOKUP, {"name": "db.balance"}, 400, "missing required field 'args'"),
     ("POST", _LOOKUP, {"args": {}}, 400, "missing required field 'name'"),
     ("POST", _LOOKUP, {"name": 1, "args": {}}, 400, "'name' is an integer, not a string"),
+    ("GET", _RELEASE, None, 405, f"{_RELEASE} takes POST, not GET"),
+    ("POST", _RELEASE, {}, 400, "missing required field 'answer_id'"),
+    ("POST", _RELEASE, {"answer_id": 1}, 400, "'answer_id' is an integer, not a string"),
+    ("POST", _RELEASE, b"[]", 400, "the body is a list, not an object"),
+    ("POST", _RELEASE, b'{"answer_id": NaN}', 400, _NOT_JSON + "NaN is not a finite number"),
+    (
+        "POST",
+        "/_irimi/runs/../x/tool-calls/recorded/release",
+        {"answer_id": "a1"},
+        400,
+        "'../x' cannot name a run",
+    ),
+    (
+        "POST",
+        _RELEASE,
+        b" " * (MAX_CONTROL_BODY + 1),
+        413,
+        f"the body is {MAX_CONTROL_BODY + 1} bytes, over the {MAX_CONTROL_BODY} allowed",
+    ),
 ]
 
 
@@ -448,9 +469,10 @@ def test_every_control_answer_names_the_protocol_irimi_speaks(engine):
         engine.call("GET", "/_irimi/health"),
         engine.call("POST", _START, _start_body(1.0)),
         engine.call("POST", _LOOKUP, LOOKUP),
+        engine.call("POST", _RELEASE, {"answer_id": "a1"}),
         engine.call("POST", "/_irimi/nowhere", {}),
     ]
-    assert [status for status, _, _ in answers] == [200, 204, 404, 404]
+    assert [status for status, _, _ in answers] == [200, 204, 404, 204, 404]
     for _, headers, _ in answers:
         assert ("irimi-protocol", "1") in headers
     engine.finish()
@@ -464,6 +486,7 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", {**_end_body(3.0), **extra}))
     status, _, body = engine.call("POST", _LOOKUP, {**LOOKUP, **extra})
     assert (status, json.loads(body)) == (404, _refused("no recorded call"))
+    _ok(engine.call("POST", _RELEASE, {"answer_id": "a1", **extra}))
     reader = engine.finish()
     [run] = reader.list_runs()
     assert (run.run_id, run.end.outcome) == (RUN, "ok")
@@ -499,7 +522,9 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
         finally:
             reader = engine.finish()
     answer = {"result": {"n": 1}, "error": None, "awaited": False}
-    assert (hit[0], json.loads(hit[2])) == (200, answer)
+    found = json.loads(hit[2])
+    assert isinstance(found.pop("answer_id"), str)
+    assert (hit[0], found) == (200, answer)
     for status, _, body in (again, deep):
         assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     assert all(STAMP in headers for _, headers, _ in (hit, again, deep))
@@ -512,7 +537,7 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
     """A lookup whose policy raises is answered with irimi's stamped 500, a miss to the SDK."""
 
     class _Broken(ShadowPolicy):
-        def recorded_tool_call(self, name, args):
+        def recorded_tool_call(self, name, args, hold=None):
             raise RuntimeError("the recording is on fire")
 
     engine = _replaying(tmp_path, monkeypatch, policy=_Broken())
@@ -522,6 +547,91 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
         engine.finish()
     assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers and engine.seen == []
+
+
+class _Holds(ShadowPolicy):
+    """A policy that answers every lookup and notes each hold it answers under and is released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.answered: list[str | None] = []
+        self.released: list[str] = []
+
+    def recorded_tool_call(self, name, args, hold=None):
+        self.answered.append(hold)
+        return ToolCall("tc-1", "recorded01", name, "read", "real", args, {"n": 1}, None, 1.0, 2.0)
+
+    def release_tool_call(self, hold):
+        self.released.append(hold)
+
+
+@pytest.mark.parametrize("run_id", [RUN, PROCESS_RUN, "unattributed"])
+def test_a_lookup_s_answer_is_named_by_a_fresh_id_its_release_hands_the_policy(
+    tmp_path, monkeypatch, run_id
+):
+    """Each hit is answered under an id of its own and held for its run, which a release names.
+
+    A stamped 204. An id the policy never answered under is handed on too, and is no refusal."""
+    policy = _Holds()
+    engine = _replaying(tmp_path, monkeypatch, policy=policy)
+    lookup = f"/_irimi/runs/{run_id}/tool-calls/recorded"
+    try:
+        answers = [engine.call("POST", lookup, LOOKUP) for _ in range(2)]
+        ids = [json.loads(body)["answer_id"] for _, _, body in answers]
+        released = engine.call("POST", f"{lookup}/release", {"answer_id": ids[0]})
+        unknown = engine.call("POST", f"{lookup}/release", {"answer_id": "never-given"})
+    finally:
+        reader = engine.finish()
+    assert len(set(ids)) == 2 and all(isinstance(i, str) and i for i in ids)
+    assert policy.answered == [f"{run_id}/{i}" for i in ids]
+    assert policy.released == [f"{run_id}/{ids[0]}", f"{run_id}/never-given"]
+    for status, headers, body in (released, unknown):
+        assert (status, body) == (204, b"")
+        assert STAMP in headers
+    assert reader.list_runs() == [] and engine.seen == [] and engine.tool_calls == []
+
+
+def test_only_the_run_whose_lookup_got_an_answer_gives_it_back(tmp_path, monkeypatch):
+    """A release under another run's path gives back nothing; under the lookup's run, it does.
+
+    The recorded `db.balance` held a `db.rate` call in its span, which a later `db.rate` follows,
+    so the hit uses that inner call up until the answer is released."""
+
+    def call(name: str, result: JSONValue, start: float, end: float) -> ToolCall:
+        args: JSONValue = {"account": "acc_1"}
+        return ToolCall(
+            f"tc-{start}", "recorded01", name, "read", "real", args, result, None, start, end
+        )
+
+    inner, outer, later = (
+        call("db.rate", {"rate": 1}, 10.5, 10.6),
+        call("db.balance", {"n": 1}, 10.0, 11.0),
+        call("db.rate", {"rate": 2}, 12.0, 12.1),
+    )
+    rate: dict[str, JSONValue] = {"name": "db.rate", "args": {"account": "acc_1"}}
+    taken: list[JSONValue] = []
+
+    def replayed(*released_under: str) -> None:
+        engine = _replaying(tmp_path / str(len(taken)), monkeypatch, inner, outer, later)
+        try:
+            _, _, body = engine.call("POST", _LOOKUP, LOOKUP)
+            answer_id = json.loads(body)["answer_id"]
+            for run_id in released_under:
+                route = f"/_irimi/runs/{run_id}/tool-calls/recorded/release"
+                _ok(engine.call("POST", route, {"answer_id": answer_id}))
+            _, _, body = engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls/recorded", rate)
+            taken.append(json.loads(body)["result"])
+        finally:
+            engine.finish()
+
+    replayed(PROCESS_RUN, "unattributed", "sdkrun02")
+    replayed(RUN)
+    assert taken == [{"rate": 2}, {"rate": 1}]
+
+
+def test_a_release_under_an_engine_that_is_not_replaying_gives_back_nothing(engine):
+    _ok(engine.call("POST", _RELEASE, {"answer_id": "a1"}))
+    assert engine.finish().list_runs() == []
 
 
 def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine):
@@ -734,6 +844,24 @@ def test_a_posted_error_reaches_the_store_whole_so_a_key_straddling_a_cut_is_red
     ]
     store_files = (tmp_path / "store").rglob("*")
     assert not any(b"ghp_" in p.read_bytes() for p in store_files if p.is_file())
+
+
+def test_a_posted_tool_error_keeps_its_args_and_a_posted_end_is_stored_without_them(engine):
+    """A tool call's error keeps the args posted with it; a run's error keeps none.
+
+    Nothing raises a run's error again, and an end waits on the store's queue costing no bytes."""
+    error = {"type": "builtins.KeyError", "message": "'k'", "args": ["k", {"n": 1}]}
+    t0 = time.time()
+    _ok(engine.call("POST", _START, _start_body(t0)))
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/tool-calls", {**_tool_call(t0), "error": error}))
+    end = {"ended_at": t0 + 1, "outcome": "error", "error": error}
+    _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", end))
+    run = engine.finish().load_run(RUN)
+    [call] = run.events
+    assert call.error == ErrorInfo("builtins.KeyError", "'k'", ["k", {"n": 1}])
+    assert [c.error for c in engine.tool_calls] == [call.error]
+    assert run.record.end.error == ErrorInfo("builtins.KeyError", "'k'")
+    assert run.record.end.error.args is None
 
 
 def test_a_refusal_quotes_at_most_a_line_of_what_it_refused(engine):

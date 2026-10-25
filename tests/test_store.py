@@ -416,6 +416,26 @@ def test_an_error_and_a_trigger_name_are_redacted_before_they_reach_disk(root, k
     assert not any(SECRET.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
 
 
+def test_a_tool_call_s_error_args_are_redacted_and_a_run_s_end_is_stored_without_args(root, key):
+    """A tool call's error keeps its args, redacted as its own args are; a run's error has none.
+
+    A run's error is never raised again, and its end waits on the queue costing no bytes."""
+    s = DirectoryStore(root, key)
+    s.start_run(_record("r1"))
+    error = ErrorInfo("builtins.KeyError", "'k'", [SECRET, {"note": SECRET}, 3])
+    s.record_tool_call(dataclasses.replace(_tool_call("r1", None), error=error))
+    s.end_run("r1", 3.0, "error", error, exit_code=1)
+    s.close()
+    run = StoreReader(root).load_run("r1")
+    hidden = redact.placeholder(key, SECRET)
+    (stored,) = run.events
+    assert isinstance(stored, ToolCall) and stored.error is not None
+    assert stored.error.args == [hidden, {"note": hidden}, 3]
+    assert run.record.end is not None
+    assert run.record.end.error == ErrorInfo("builtins.KeyError", "'k'")
+    assert not any(SECRET.encode() in p.read_bytes() for p in root.rglob("*") if p.is_file())
+
+
 def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
     """An error is redacted whole and then cut, so a key across either limit leaves no part.
 

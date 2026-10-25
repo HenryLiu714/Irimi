@@ -122,10 +122,14 @@ to the model again.
 
 A read tool asks the recording first, by its name and its arguments. When the recorded run made the
 same call, nothing runs: the call returns the recorded result, rebuilt from its captured JSON, and
-is recorded `ran: recording`. A recorded exception is raised as `sdk.RecordedToolError`. The real
-function runs instead (`ran: real`, a miss) when the recording has no such call, when its result was
-stored only as a description (a `Decimal`, anything past 1 MiB), when the recorded call was
-cancelled before it finished, or when it was recorded after a write the replay has not made.
+is recorded `ran: recording`. A recorded exception is raised as `sdk.RecordedToolError`, with the
+original's `args` when they rebuild. The real function runs instead (`ran: real`, a miss) when the recording has no
+such call, when its result was stored only as a description (a `Decimal`, anything past 1 MiB), when
+the recorded call was cancelled before it finished, or when it was recorded after a write the replay
+has not made. It runs too when the replay cannot rebuild the recorded result, as for a class from a
+module the tool imports in its body; the requests and read tools that body makes are then answered
+from the recording, as they were for the recorded call. An async read tool cancelled while it waits
+for its answer records no call, and gives back what that answer used up in the same way.
 
 A write tool always runs its fake, as under shadow. Nothing shows a later read what a fake did, so
 a write tool never diverges a replay.

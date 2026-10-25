@@ -43,8 +43,12 @@ IRIMI_LOGGER = irimi.__name__
 # Set for an agent that reaches irimi's control endpoint through a gateway that forwards the routes
 # it knows and refuses the one a replay's read tools ask (`lookup_gateway`).
 LOOKUP_REFUSED_ENV = "WORKFLOW_LOOKUP_REFUSED"
-# That route's tail.
+# Its value for a gateway that sends each lookup on to a route irimi does not have, as an SDK newer
+# than its irimi would ask one.
+LOOKUP_UNROUTED = "unrouted"
+# That route's tail, and the tail an unrouted lookup is sent to instead.
 RECORDED_ROUTE = "/" + RECORDED_ACTION
+UNROUTED_ROUTE = RECORDED_ROUTE + "-by-a-newer-sdk"
 
 _obs_lock = threading.Lock()
 
@@ -313,10 +317,12 @@ def serve(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
 def lookup_gateway() -> Iterator[None]:
     """Reach the control endpoint through a gateway that refuses recorded lookups, if asked to.
 
-    With `LOOKUP_REFUSED_ENV` set, every post is forwarded but a read tool's lookup gets a 502, so
-    a replay misses it and runs the tool for real while the run is still recorded."""
+    With `LOOKUP_REFUSED_ENV` set, every post is forwarded but a read tool's lookup gets a 502, or,
+    set to `LOOKUP_UNROUTED`, irimi's own 404 for a route it does not have. Either way a replay
+    misses it and runs the tool for real while the run is still recorded."""
     control = os.environ.get(CONTROL_ENV)
-    if not os.environ.get(LOOKUP_REFUSED_ENV) or control is None:
+    how = os.environ.get(LOOKUP_REFUSED_ENV)
+    if not how or control is None:
         yield
         return
     irimi_control: str = control
@@ -326,11 +332,14 @@ def lookup_gateway() -> Iterator[None]:
     class Gateway(Handler):
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("content-length", 0)))
-            if self.path.endswith(RECORDED_ROUTE):
-                self.reply(502, {"error": "the gateway has no such route"})
-                return
+            path = self.path
+            if path.endswith(RECORDED_ROUTE):
+                if how != LOOKUP_UNROUTED:
+                    self.reply(502, {"error": "the gateway has no such route"})
+                    return
+                path = path.removesuffix(RECORDED_ROUTE) + UNROUTED_ROUTE
             sent = urllib.request.Request(
-                irimi_control + self.path.removeprefix(prefix),
+                irimi_control + path.removeprefix(prefix),
                 body,
                 {"Content-Type": self.headers.get("content-type", "application/json")},
                 method="POST",

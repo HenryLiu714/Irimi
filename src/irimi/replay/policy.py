@@ -67,13 +67,25 @@ class ReplayPolicy:
             reader=RecordingReader(recording), maps=self.maps, keys=self.idempotency
         )
 
-    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+    def recorded_tool_call(
+        self, name: str, args: JSONValue, hold: str | None = None
+    ) -> ToolCall | None:
         """Return the recording's answer to a read tool call, or None to run the tool for real."""
         try:
-            return self.recording.tool_answer_for(name, args)
+            return self.recording.tool_answer_for(name, args, hold)
         except Exception:
             logger.exception("irimi: the recording could not be searched; the tool runs for real")
             return None
+
+    def release_tool_call(self, hold: str) -> None:
+        """Give back what the hit held under `hold` used up, so its body's re-run is answered."""
+        try:
+            self.recording.release(hold)
+        except Exception:
+            logger.exception(
+                "irimi: the recording could not take an answer back; the tool's body is "
+                "answered as misses"
+            )
 
     def observe_read(self, service: str, body: bytes) -> None:
         self.shadow.observe_read(service, body)

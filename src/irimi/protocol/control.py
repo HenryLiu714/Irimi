@@ -1,11 +1,14 @@
 """The control endpoint's routes and bodies; a refused body raises `TraceFormatError`.
 
-POST /_irimi/runs/{run_id}/start                  a `RunStart`
-POST /_irimi/runs/{run_id}/tool-calls             a `trace.ToolCall`, its run id the path's
-POST /_irimi/runs/{run_id}/end                    a `trace.RunEnd` with no exit code
-POST /_irimi/runs/{run_id}/tool-calls/recorded    a lookup, answered a `RecordedOutcome`
+POST /_irimi/runs/{run_id}/start                         a `RunStart`
+POST /_irimi/runs/{run_id}/tool-calls                    a `trace.ToolCall`, its run id the path's
+POST /_irimi/runs/{run_id}/end                           a `trace.RunEnd` with no exit code
+POST /_irimi/runs/{run_id}/tool-calls/recorded           a lookup, answered a `RecordedOutcome`
+POST /_irimi/runs/{run_id}/tool-calls/recorded/release   a lookup's `answer_id`, its answer unused
 """
 
+import json
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, NoReturn, get_args
@@ -43,10 +46,22 @@ END_ACTION: RunAction = "end"
 RUN_ACTIONS: tuple[RunAction, ...] = get_args(RunAction)
 # A replay's lookup of a read tool's recorded result; it reports nothing, so is no run action.
 RECORDED_ACTION = f"{TOOL_CALLS_ACTION}/recorded"
+# Gives back what a lookup's answer used up, when the SDK cannot use that answer.
+RELEASE_ACTION = f"{RECORDED_ACTION}/release"
 # Tool-call routes, usable by a run with no SDK start (the process run, or `unattributed`).
-TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION})
+TOOL_ACTIONS = frozenset({TOOL_CALLS_ACTION, RECORDED_ACTION, RELEASE_ACTION})
 PROTOCOL_VERSION = "1"  # another major version gets a 426, so a mismatched SDK fails loudly
 RECORDED_LOOKUP_FIELDS = ("name", "args")
+# Names a lookup's answer in that answer and in its release.
+ANSWER_ID_FIELD = "answer_id"
+# The message of a lookup's 404 for a miss, or any lookup outside a replay. A route the endpoint
+# does not have is a 404 of the same type, `irimi_control_refused`, with another message.
+NO_RECORDED_CALL = "no recorded call"
+
+
+def new_answer_id() -> str:
+    """Return a fresh id for a lookup's answer, which the client treats as opaque."""
+    return secrets.token_hex(8)
 
 
 def protocol_major(version: str) -> str:
@@ -66,11 +81,14 @@ class RunStart:
 
 @dataclass(frozen=True)
 class RecordedOutcome:
-    """A recorded read tool call's outcome for a replay lookup; `result` is still captured JSON."""
+    """A recorded read tool call's outcome for a replay lookup; `result` is still captured JSON.
+
+    `answer_id` names the answer, to release it by; None from an irimi without the release route."""
 
     result: JSONValue
     error: ErrorInfo | None
     awaited: bool
+    answer_id: str | None = None
 
 
 def run_start_to_json(start: RunStart) -> dict[str, JSONValue]:
@@ -116,9 +134,16 @@ def run_end_from_json(d: Mapping[str, Any]) -> RunEnd:
     return RunEnd(ended_at, outcome, error, None)
 
 
-def recorded_outcome_to_json(call: ToolCall) -> dict[str, JSONValue]:
+def recorded_outcome_to_json(call: ToolCall, answer_id: str | None = None) -> dict[str, JSONValue]:
     """Return the recorded outcome of `call`, as the endpoint answers a lookup that hit."""
-    return {"result": call.result, "error": error_to_json(call.error), "awaited": call.awaited}
+    doc: dict[str, JSONValue] = {
+        "result": call.result,
+        "error": error_to_json(call.error),
+        "awaited": call.awaited,
+    }
+    if answer_id is not None:
+        doc[ANSWER_ID_FIELD] = answer_id
+    return doc
 
 
 def recorded_outcome_from_json(d: Mapping[str, Any]) -> RecordedOutcome:
@@ -127,7 +152,20 @@ def recorded_outcome_from_json(d: Mapping[str, Any]) -> RecordedOutcome:
         result=read_json(d, "result"),
         error=read_error(d, "error"),
         awaited=read_bool(d, "awaited"),
+        answer_id=read_str(d, ANSWER_ID_FIELD) if d.get(ANSWER_ID_FIELD) is not None else None,
     )
+
+
+def is_no_recorded_call(body: str) -> bool:
+    """Return whether a lookup's 404 `body` is the endpoint's answer for no recorded call.
+
+    Told apart by its message, as every irimi of this protocol major has worded it, not its type.
+    """
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):  # not JSON, or not an object: not the endpoint's answer
+        return False
+    return isinstance(error, dict) and error.get("message") == NO_RECORDED_CALL
 
 
 def _null(name: str) -> NoReturn:

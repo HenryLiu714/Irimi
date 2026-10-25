@@ -212,8 +212,9 @@ def redact_error(error: ErrorInfo | None, key: bytes) -> ErrorInfo | None:
     """Return `error` redacted whole and only then cut, so no half secret survives the cut."""
     if error is None:
         return None
+    args = None if error.args is None else redact_json(error.args, key)
     return ErrorInfo(
-        _redact_or_fail(error.type, key), _redact_or_fail(error.message, key)
+        _redact_or_fail(error.type, key), _redact_or_fail(error.message, key), args
     ).as_label()
 
 

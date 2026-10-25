@@ -216,8 +216,11 @@ CALLS_FEWER = {
 }
 # Rule 9's exceptions. The read tools a replay runs for real, by scenario, and why:
 _NOT_REVIVED = "its recorded result holds `Decimal` and `datetime` as `__irimi_repr__`"
+_NOT_IMPORTED = "its recorded result's class is in a module its body imports, not imported yet"
 TOOLS_RUN_FOR_REAL: dict[tuple[str, str], dict[str, str]] = {
     (W6, "enrich"): {"crm.score_account": _NOT_REVIVED},
+    (W6, "lazy_profile"): {"crm.account_profile": _NOT_IMPORTED},
+    (W6, "lazy_profile_async"): {"crm.account_profile_async": _NOT_IMPORTED},
 }
 
 

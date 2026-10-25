@@ -5,6 +5,7 @@ any proxy, and waits at most `TIMEOUT_S`.
 
 - Never raises (the SDK never raises); each kind of failure is warned of once per process.
 - A failed lookup is a miss, so the tool runs for real.
+- An answer the SDK cannot use is released, so the recording still answers the tool's body.
 - A timeout or unreachable endpoint pauses every send for `PAUSE_S`.
 - A proxy speaking another protocol major answers `426`.
 """
@@ -23,13 +24,16 @@ from typing import Any, Literal, Protocol
 from irimi.core.limits import MAX_ANSWER
 from irimi.core.opener import no_redirect_opener
 from irimi.protocol.control import (
+    ANSWER_ID_FIELD,
     PROTOCOL_VERSION,
     RECORDED_ACTION,
     RECORDED_LOOKUP_FIELDS,
+    RELEASE_ACTION,
     RUNS_ROUTE,
     TOOL_CALLS_ACTION,
     RecordedOutcome,
     RunAction,
+    is_no_recorded_call,
     recorded_outcome_from_json,
 )
 from irimi.protocol.env import CONTROL_ENV
@@ -53,20 +57,23 @@ PAUSING: frozenset[Failure] = frozenset({"timeout", "unreachable"})
 
 
 class Reporter(Protocol):
-    """Receive run starts, run ends and tool calls, and answer replay lookups."""
+    """Receive run starts, run ends and tool calls; answer replay lookups and take answers back."""
 
     def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None: ...
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None: ...
 
+    def release(self, run_id: str, answer_id: str) -> None: ...
+
 
 @dataclass(frozen=True)
 class _Failed:
-    """Describe a request that got no 2xx; `status` is set when there was an answer."""
+    """Describe a request that got no 2xx; `status` and its body's start, `said`, if answered."""
 
     kind: Failure
     detail: str
     status: int | None = None
+    said: str = ""
 
 
 class ControlClient:
@@ -99,14 +106,15 @@ class ControlClient:
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
         """Return the recorded outcome of read tool `name` called with `args`, or None for a miss.
 
-        A `404` is a silent miss; any other failure or undecodable answer is warned of once per
-        kind and is also a miss. Never raises (the SDK never raises).
+        The endpoint's `404` for a miss is silent; any other failure or undecodable answer,
+        including a `404` for a route this irimi does not have, is warned of once per kind and is
+        also a miss. Never raises (the SDK never raises).
         """
         lookup = dict(zip(RECORDED_LOOKUP_FIELDS, (name, args), strict=True))
         try:
             sent = self._send(f"{run_id}/{RECORDED_ACTION}", lookup)
             if isinstance(sent, _Failed):
-                if sent.status == 404 or sent.kind == "paused":
+                if sent.kind == "paused" or (sent.status == 404 and is_no_recorded_call(sent.said)):
                     return None
             else:
                 answer = json.loads(sent)
@@ -122,6 +130,22 @@ class ControlClient:
             "the tool runs for real",
         )
         return None
+
+    def release(self, run_id: str, answer_id: str) -> None:
+        """Give back the answer `answer_id` names, which the SDK cannot use; warn once per kind.
+
+        Never raises (the SDK never raises)."""
+        try:
+            sent = self._send(f"{run_id}/{RELEASE_ACTION}", {ANSWER_ID_FIELD: answer_id})
+        except Exception as exc:  # the SDK never raises
+            sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
+        if isinstance(sent, _Failed) and sent.kind != "paused":
+            self._warn_once(
+                "release",
+                sent,
+                f"give back a recorded answer the tool could not use in run {run_id}",
+                "the requests its body makes may miss the recording",
+            )
 
     def _send(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
         """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`; return the body or the failure."""
@@ -150,11 +174,12 @@ class ControlClient:
                 body: bytes = response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as exc:  # any non-2xx answer, redirects included
             with exc:
+                # A miss's answer is far shorter than MAX_DETAIL, so `said` holds it whole.
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
             if exc.code == 426:
                 theirs = exc.headers.get(PROTOCOL_HEADER) or "unknown"
                 return _Failed("mismatch", f"{base} speaks {theirs[:MAX_DETAIL]}", exc.code)
-            return _Failed("rejected", f"HTTP {exc.code}: {said}", exc.code)
+            return _Failed("rejected", f"HTTP {exc.code}: {said}", exc.code, said)
         except urllib.error.URLError as exc:  # no answer: urllib wraps the socket's error
             if isinstance(exc.reason, TimeoutError):
                 return _Failed("timeout", f"no answer in {TIMEOUT_S}s")

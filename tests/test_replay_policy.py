@@ -562,7 +562,7 @@ def test_a_tool_lookup_that_raises_is_a_miss(monkeypatch):
 
     monkeypatch.setattr(ReplayIndex, "tool_answer_for", broken)
     policy = ReplayPolicy(_recording(_tool()), SHIPPED)
-    assert policy.recorded_tool_call("db.balance", {"account": "acc_1"}) is None
+    assert policy.recorded_tool_call("db.balance", {"account": "acc_1"}, "a1") is None
     assert ShadowPolicy().recorded_tool_call("db.balance", {"account": "acc_1"}) is None
 
 
@@ -1086,15 +1086,101 @@ def test_a_recorded_error_whose_message_redaction_could_not_read_is_a_miss_in_it
     assert taken is not None and taken.result == {"balance": 2}
 
 
+def _answered_with_a_body():
+    """A recording whose tool's body made a read, a write and a read tool, then a later read tool.
+
+    The tool's lookup is held under `a1`."""
+    read = _stored(_req(), started_at=10.2, ended_at=10.3)
+    write = _recorded_refund(started_at=10.4, ended_at=10.5)
+    nested = _tool(name="db.rate", result={"rate": 1}, span=(10.6, 10.7))
+    tool = _tool(span=(10.0, 11.0))
+    later = _tool(name="db.rate", result={"rate": 2}, span=(12.0, 12.1))
+    recording = _recording(read, write, nested, tool, later)
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}, "a1") is tool
+    return recording, nested
+
+
+def test_a_released_answer_gives_back_what_its_tool_s_body_made_but_not_the_call():
+    """An answer the SDK cannot use is released, so the body's re-run is answered as recorded.
+
+    The call itself stays used up, as an unservable one is."""
+    recording, nested = _answered_with_a_body()
+    recording.release("a1")
+    assert recording.answer_for(_req(), "read") is not None
+    assert recording.answer_for(_refund_request(), "write") is not None
+    assert recording.tool_answer_for("db.rate", {"account": "acc_1"}) is nested
+    assert not recording.diverged
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}) is None
+
+
+def test_an_answer_never_released_keeps_what_its_tool_s_body_made_used_up():
+    recording, _nested = _answered_with_a_body()
+    assert recording.answer_for(_req(), "read") is None
+    taken = recording.tool_answer_for("db.rate", {"account": "acc_1"})
+    assert taken is not None and taken.result == {"rate": 2}
+
+
+def test_a_release_gives_back_only_what_its_answer_used_up():
+    """A body's read another request took before the lookup stays used up after the release."""
+    read = _stored(_req(), started_at=10.2, ended_at=10.3)
+    tool = _tool(span=(10.0, 11.0))
+    recording = _recording(read, tool)
+    assert recording.answer_for(_req(), "read") is not None
+    assert recording.tool_answer_for("db.balance", {"account": "acc_1"}, "a1") is tool
+    recording.release("a1")
+    assert recording.answer_for(_req(), "read") is None
+
+
+def test_a_release_by_an_unknown_or_spent_hold_gives_back_nothing():
+    """Only the hold the lookup named gives anything back, and only once."""
+    recording, _nested = _answered_with_a_body()
+    recording.release("another")
+    assert recording.answer_for(_req(), "read") is None
+    recording.release("a1")
+    assert recording.answer_for(_req(), "read") is not None
+    recording.release("a1")
+    assert recording.answer_for(_req(), "read") is None
+
+
+def test_no_release_makes_a_replay_forward_a_write():
+    """A release out of turn gives back recorded answers only: a write is never forwarded.
+
+    The agent can post any release. Released after its answer was used, the hit's write is
+    answered from the recording; a release spent or never given leaves the next write a miss,
+    which shadow mode fakes."""
+    recording, _nested = _answered_with_a_body()
+    policy = ReplayPolicy(recording, SHIPPED)
+    policy.release_tool_call("a1")
+    answers = [_answer(policy, _refund_request())]
+    for hold in ("a1", "another"):
+        policy.release_tool_call(hold)
+    answers.append(_answer(policy, _refund_request(key="k-2")))
+    assert [(a.answered_by, a.flags) for a in answers] == [
+        ("fake-L1", (Flag.FROM_RECORDING,)),
+        ("fake-L1", (Flag.REPLAY_MISS,)),
+    ]
+
+
+def test_a_release_the_recording_cannot_take_is_logged_and_never_raised(monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("the matcher broke")
+
+    monkeypatch.setattr(ReplayIndex, "release", broken)
+    ReplayPolicy(_recording(_tool()), SHIPPED).release_tool_call("a1")
+    assert "irimi: the recording could not take an answer back" in caplog.text
+    ShadowPolicy().release_tool_call("a1")
+
+
 @pytest.mark.parametrize(
     ("result", "error"),
     [
         ({"invoices": [{"due": 1, "amount": {"__irimi_repr__": "Decimal('49.00')"}}]}, None),
         ({"__irimi_truncated__": True, "bytes": 2_000_000}, None),
         (None, ErrorInfo("asyncio.exceptions.CancelledError", "")),
+        (None, ErrorInfo("trio.Cancelled", "")),
         (None, ErrorInfo("builtins.GeneratorExit", "")),
     ],
-    ids=["a-description", "truncated", "cancelled", "closed"],
+    ids=["a-description", "truncated", "cancelled", "cancelled-under-trio", "closed"],
 )
 def test_a_recorded_tool_with_no_outcome_to_give_leaves_its_body_s_http_to_answer_it(result, error):
     """A tool with no outcome to give is a miss whose body's HTTP the recording answers.

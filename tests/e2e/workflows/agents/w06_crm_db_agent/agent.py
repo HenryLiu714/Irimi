@@ -6,13 +6,17 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import errno
+import functools
+import inspect
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_type_hints
 
 from irimi import sdk
 from tests.e2e.workflows.agents import agentkit, observe
@@ -30,6 +34,9 @@ SCENARIOS = (
     "stand_in_http",
     "async_tools",
     "overlapping_writes",
+    "framework_unwraps",
+    "lazy_profile",
+    "lazy_profile_async",
 )
 STALE_BEFORE = "2025-06-01"
 # A database host the agent cannot reach: `connect_with` raises for it as a driver does, quoting
@@ -90,6 +97,31 @@ def fetch_enrichment(account_id: str) -> dict[str, Any]:
     return resp.json() or {}
 
 
+def _profile(account_id: str) -> Any:
+    """Read an account's company and count a view of it over HTTP, and return its profile.
+
+    The profile's class is in a module imported here, which a replay has not imported when it
+    asks the recording, so the replay runs the tool's body again."""
+    from tests.e2e.workflows.agents.w06_crm_db_agent import profiles
+
+    url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
+    company = agentkit.http("GET", url, label="profile_company").json() or {}
+    viewed = agentkit.http("POST", url + "/views", json_body={}, label="profile_view")
+    return profiles.Profile(account_id, company.get("industry"), (viewed.json() or {}).get("views"))
+
+
+@observe.read_tool(name="crm.account_profile")
+def account_profile(account_id: str) -> Any:
+    return _profile(account_id)
+
+
+@observe.read_tool(name="crm.account_profile_async")
+async def account_profile_async(account_id: str) -> Any:
+    """`account_profile` as an async tool, whose replay asks the recording in a worker thread."""
+    await asyncio.sleep(0)
+    return _profile(account_id)
+
+
 @observe.read_tool(name="crm.connect_with")
 def connect_with(dsn: str, options: DriverOptions | None = None) -> dict[str, Any]:
     """Connect with a DSN holding a credential, which a stored tool call must redact.
@@ -112,6 +144,27 @@ def score_account(account: dict[str, Any]) -> dict[str, Any]:
 @observe.read_tool(name="crm.flaky_lookup")
 def flaky_lookup(account_id: str) -> dict[str, Any]:
     raise KeyError(account_id)
+
+
+@observe.read_tool(name="crm.read_export")
+async def read_export(name: str) -> str:
+    """Read an export back in an async read tool; a missing one raises as `open` does.
+
+    It names the bare file, so what a run records is the same on every machine."""
+    await asyncio.sleep(0)
+    path = agentkit.state_dir() / "exports" / f"{name}.csv"
+    if not path.exists():
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path.name)
+    return path.read_text()
+
+
+@observe.read_tool(name="crm.validate_score")
+def validate_score(account_id: str, score: str) -> Decimal:
+    """Raise as a validator does, with the value refused, which JSON cannot hold, in its args."""
+    value = Decimal(score)
+    if not 0 <= value <= 1:
+        raise ValueError("score out of range", value)
+    return value
 
 
 @observe.read_tool(name="crm.lookup_owner")
@@ -385,6 +438,37 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
     if scenario == "outside_run":
         account = find_accounts(segment)[0]
         return {"upserted": upsert_account({**account, "score": 50})}
+    if scenario == "framework_unwraps":
+        # A framework that registers a tool by what `inspect.unwrap` gives, to read its signature,
+        # and then calls that.
+        registered = inspect.unwrap(upsert_account)
+        hints = get_type_hints(registered)
+        agentkit.obs(
+            "registered",
+            unwrapped=registered is not upsert_account,
+            wraps_more=hasattr(registered, "__wrapped__"),
+            parameters=list(inspect.signature(registered).parameters),
+            hints={name: repr(hint) for name, hint in hints.items()},
+        )
+        account = find_accounts(segment)[0]
+        notify = inspect.unwrap(notify_owner)
+        return {
+            "upserted": registered({**account, "name": "Unwrapped"}),
+            "notified": asyncio.run(notify(account["id"], "unwrapped")),
+        }
+    if scenario in ("lazy_profile", "lazy_profile_async"):
+        if scenario == "lazy_profile":
+            profile = account_profile("acc_1")
+        else:
+            profile = asyncio.run(account_profile_async("acc_1"))
+        # Recorded after the tool's write, so a replay answers it only once that write is matched.
+        again = agentkit.http(
+            "GET", agentkit.internal("enrich.internal") + "/v1/companies/acc_2", label="after"
+        )
+        return {
+            "profile": [type(profile).__name__, profile.id, profile.industry, profile.views],
+            "after": again.json(),
+        }
     if scenario == "stand_in_http":
         return {"synced": sync_industry("acc_1", "aerospace")}
     if scenario == "async_tools":
@@ -402,9 +486,34 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         try:
             flaky_lookup("acc_1")
         except KeyError as exc:
-            agentkit.obs("lookup_failed", error=type(exc).__name__, key=str(exc))
-        # Uncaught: the run ends in error.
-        score_account({"id": "acc_missing"})
+            agentkit.obs("lookup_failed", error=type(exc).__name__, key=str(exc), args=exc.args)
+        try:
+            asyncio.run(read_export("missing"))
+        except FileNotFoundError as exc:
+            agentkit.obs(
+                "export_missing",
+                error=type(exc).__name__,
+                message=str(exc),
+                errno=exc.errno,
+                strerror=exc.strerror,
+                filename=exc.filename,
+                args=exc.args,
+            )
+        try:
+            validate_score("acc_1", "1.5")
+        except ValueError as exc:
+            agentkit.obs(
+                "score_invalid",
+                message=str(exc),
+                args=exc.args,
+                arg_types=[type(arg).__name__ for arg in exc.args],
+            )
+        try:
+            score_account({"id": "acc_missing"})
+        except KeyError as exc:
+            # Raised again, uncaught: the run ends in error.
+            agentkit.obs("score_failed", args=exc.args)
+            raise
         return {}
     connect_with(f"postgres://crm:{agentkit.key('STRIPE_API_KEY')}@db.internal/crm")
     accounts = find_accounts(segment)
@@ -461,6 +570,20 @@ def decoration_errors() -> list[str]:
     def gen(x: int) -> Any:
         yield x
 
+    class Desk:
+        def file(self, x: int) -> int:
+            return x
+
+    def with_session(f: Callable[..., int]) -> Callable[..., int]:
+        @functools.wraps(f)
+        def supplied(*args: Any, **kwargs: Any) -> int:
+            return f("session", *args, **kwargs)
+
+        return supplied
+
+    def saved(session: str, x: int) -> int:
+        return x
+
     not_callable: Any = "mock_database_write"
     misused: Any = sdk  # each mistake below is a call the SDK's signature already refuses
     mistakes: dict[str, Callable[[], object]] = {
@@ -475,6 +598,16 @@ def decoration_errors() -> list[str]:
         # write under irimi.
         "generator_fake": lambda: observe.write_tool(fake=gen)(real),
         "fake_is_the_function": lambda: observe.write_tool(fake=real)(real),
+        # A partial of the function, or a wrapper built with `functools.wraps`, would run it too.
+        "fake_is_a_partial": lambda: observe.write_tool(fake=functools.partial(real))(real),
+        "fake_wraps_the_function": lambda: observe.write_tool(
+            fake=functools.wraps(real)(lambda x: x)
+        )(real),
+        "method_fake_without_self": lambda: observe.write_tool(fake=lambda x: x)(Desk.file),
+        # No mistake: the decorator beneath supplies `session`, so callers and the fake pass `x`.
+        "fake_for_a_supplied_argument": lambda: observe.write_tool(fake=lambda x: x)(
+            with_session(saved)
+        ),
     }
     raised = []
     for case, attempt in mistakes.items():

@@ -32,6 +32,10 @@ The protocol version is `1`.
   recorded until the two match.
 - Every route ignores body fields it does not know, so a minor version can add fields without
   breaking either side. A change a version-1 reader would misread bumps the major version.
+- A route added within version 1 is used only once irimi has shown it has it. A lookup's answer
+  names an `answer_id` only from an irimi that takes `tool-calls/recorded/release`, so a client
+  releases nothing to an older one, and an older client, which never releases, is answered as
+  before.
 
 ## Routes
 
@@ -41,6 +45,7 @@ The protocol version is `1`.
 | `POST` | `runs/{run_id}/tool-calls` | one tool call | `204` |
 | `POST` | `runs/{run_id}/end` | a run end | `204` |
 | `POST` | `runs/{run_id}/tool-calls/recorded` | a recorded-call lookup | `200` with the outcome, or `404` |
+| `POST` | `runs/{run_id}/tool-calls/recorded/release` | a lookup's answer the client did not use | `204` |
 | `GET` | `health` | none | `200` with the engine's state |
 
 Every answer carries `Irimi-Answered-By: control` and `Irimi-Protocol: 1`. Every body is a JSON
@@ -52,10 +57,10 @@ A `run_id` is 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`, chosen by 
 something unique, such as 16 random hex characters. Two ids that differ only in case may share a
 directory on a case-insensitive filesystem, and the second is then stored as unattributed.
 
-- `unattributed` may receive tool calls and lookups, not a start or an end: it is where calls made
-  outside any run go.
-- The process run (`IRIMI_RUN` under `irimi shadow`) belongs to irimi: it may receive tool calls
-  and lookups, and a start or end for it is refused `400`.
+- `unattributed` may receive tool calls, lookups and releases, not a start or an end: it is where
+  calls made outside any run go.
+- The process run (`IRIMI_RUN` under `irimi shadow`) belongs to irimi: it may receive tool calls,
+  lookups and releases, and a start or end for it is refused `400`.
 - A start for a run that has already ended is accepted (`204`) and dropped, counted in `health`'s
   `dropped`.
 
@@ -104,7 +109,10 @@ their `Irimi-Run`, but a run with no start is stored as a `header` run with no t
 The fields are a stored tool call's ([trace-format.md](trace-format.md#tool_call)), less `run_id`,
 which comes from the path; a body that names one is refused `400`. `ran` is `real` when the function
 ran, `shadow` when its fake ran, and `recording` when a replay answered it from the recording.
-`error` is `null` or `{"type": "module.QualName", "message": "..."}`.
+`error` is `null` or `{"type": "module.QualName", "message": "...", "args": [...]}`. Its `args`,
+which may be left out, are the exception's arguments, captured as the call's `args` are but with
+any `bytes` among them sent as `{"__irimi_repr__": "<bytes>"}`; past 1 MiB together with the call's
+`args`, they are sent as the truncation marker.
 
 ### `end`
 
@@ -112,7 +120,8 @@ ran, `shadow` when its fake ran, and `recording` when a replay answered it from 
 {"ended_at": 1792803261.737567, "outcome": "error", "error": {"type": "builtins.ValueError", "message": "no such charge"}}
 ```
 
-`ended_at` and `outcome` (`ok` or `error`) are required; `error` may be `null`.
+`ended_at` and `outcome` (`ok` or `error`) are required; `error` may be `null`. A run's error is
+stored without `args`.
 
 ### `tool-calls/recorded`
 
@@ -126,13 +135,36 @@ A replay's lookup of a read tool's recorded result, made before running the tool
 answers `200`:
 
 ```json
-{"result": {"charge": "ch_demo1", "name": "Ada Lovelace"}, "error": null, "awaited": false}
+{"result": {"charge": "ch_demo1", "name": "Ada Lovelace"}, "error": null, "awaited": false, "answer_id": "9f2c1e5b7a3d4c60"}
 ```
 
-Return `result` to the caller, raise `error` (a recorded exception), and, when `awaited` is true,
-return them through an awaitable. A miss, or any lookup outside a replay, answers `404`: run the
-tool for real. A lookup is not recorded as a tool call; post the call afterwards with
-`ran: recording` or `ran: real`.
+Return `result` to the caller, raise `error` (a recorded exception, with its `args` when it has
+them), and, when `awaited` is true, return them through an awaitable. When you cannot use the
+answer (`result` names a class you cannot rebuild yet, or the call was cancelled while it waited),
+release it by its `answer_id`, under the same run, before you run the tool for real. A miss, or
+any lookup outside a replay, answers `404` with the message `no recorded call`: run the tool for
+real. Any other `404` is a route this irimi does not have, as an irimi older than the client
+answers; warn, and run the tool for real. Tell the two by the message, which every irimi speaking
+protocol 1 has sent, not the `type`, which they share. A lookup is not recorded as a tool call;
+post the call afterwards with `ran: recording` or `ran: real`.
+
+### `tool-calls/recorded/release`
+
+A replay's release of a lookup's answer the client did not use:
+
+```json
+{"answer_id": "9f2c1e5b7a3d4c60"}
+```
+
+`answer_id` is required. irimi gives back what answering used up besides the recorded call
+itself: the exchanges recorded within that call's span, and the read tool calls within it that a
+later identical call would otherwise take. The call stays used up, as one irimi cannot hand back
+is, so run the tool for real, and the recording answers what its body sends. Release only an
+answer you did not use: released after you returned it, it gives back requests the recorded call's
+body already answered, which a later request may then take. irimi holds an answer for the run its
+lookup named, so post the release to that run: one under another run, or naming an `answer_id`
+irimi did not give or has released already, gives back nothing, and is still `204`, as is any
+release outside a replay. An answer never released keeps all of it used up.
 
 ### `health`
 
@@ -153,14 +185,14 @@ A refusal or failure answers with irimi's JSON error:
 | Status | When |
 | --- | --- |
 | `400` | the body is not a JSON object, is not valid JSON, nests too deeply, holds `NaN` or `Infinity`, lacks a field or holds a wrong type; the run id cannot name a run; a start or end for the process run |
-| `404` | no such route (`type` `irimi_control_refused`), or a recorded-call miss |
+| `404` | no such route, or a recorded-call miss, both `type` `irimi_control_refused`; a miss's message is `no recorded call` |
 | `405` | the wrong method; the `Allow` header names the right one |
 | `413` | the body is over 2 MiB, or decodes past irimi's limit |
 | `426` | another major protocol version |
 | `500` | irimi failed (`type` `irimi_internal_error`); the request may not have been recorded |
 
 The message is at most 200 characters and is for a person to read; its wording is not part of the
-protocol.
+protocol, except a recorded-call miss's `no recorded call`.
 
 ## Limits
 

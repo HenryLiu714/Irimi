@@ -19,7 +19,16 @@ def _enrichment(world: World) -> None:
         account = req.path.rsplit("/", 1)[1]
         return Resp(200, {"id": account, "industry": "manufacturing"})
 
-    world.extra.append(JsonService(("enrich.internal",), {("GET", r"/v1/companies/\w+"): company}))
+    def view(req: Req, state: dict[str, Any]) -> Resp:
+        state["views"] = state.get("views", 0) + 1
+        return Resp(200, {"views": state["views"]})
+
+    world.extra.append(
+        JsonService(
+            ("enrich.internal",),
+            {("GET", r"/v1/companies/\w+"): company, ("POST", r"/v1/companies/\w+/views"): view},
+        )
+    )
 
 
 WORKFLOW = Workflow(
@@ -49,8 +58,9 @@ WORKFLOW = Workflow(
             ("tool_raises",),
             doc="a read tool raises quoting a DSN, its key across the cut a trace makes of the "
             "message, given options whose repr holds a key across the cut the SDK makes of a "
-            "repr, and is caught; another raises and is caught; a third raises and ends the run "
-            "in error",
+            "repr, and is caught; another raises and is caught; an async one raises an OSError, "
+            "and another a ValueError whose args hold a Decimal, each caught; a last raises and "
+            "ends the run in error; the agent reads each error's args",
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),
@@ -65,6 +75,25 @@ WORKFLOW = Workflow(
             ("merge_once",),
             doc="merge_retry's merge made right the first time: one call, its fake run, which "
             "`irimi compare` holds the retry against",
+        ),
+        "framework_unwraps": Scenario(
+            ("framework_unwraps",),
+            doc="a framework unwraps a sync and an async write tool with inspect.unwrap and calls "
+            "what it gets: the tool itself, so its fake runs under shadow and the real write only "
+            "bare",
+        ),
+        "lazy_profile": Scenario(
+            ("lazy_profile",),
+            setup=_enrichment,
+            doc="a read tool reads a company and counts a view over HTTP, and returns a profile "
+            "whose class is in a module its body imports, so a replay cannot rebuild it before "
+            "the body runs again; the agent reads again after it",
+        ),
+        "lazy_profile_async": Scenario(
+            ("lazy_profile_async",),
+            setup=_enrichment,
+            doc="lazy_profile with an async read tool, whose replay asks the recording, and gives "
+            "back the answer it cannot rebuild, in a worker thread off the event loop",
         ),
         "outside_run": Scenario(
             ("outside_run",),

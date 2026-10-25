@@ -1,24 +1,31 @@
 """Label tools the proxy cannot see (database or file writes, library calls) as reads or writes."""
 
+import contextlib
 import functools
 import inspect
 import os
+import sys
+import threading
 import time
+import typing
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, overload
 
+from irimi.core.calls import signature
 from irimi.core.limits import MAX_CAPTURED_BYTES
 from irimi.protocol import trace
+from irimi.protocol.control import RecordedOutcome
 from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.protocol.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 from irimi.sdk import _context as context
-from irimi.sdk._capture import capture, capture_call, revive, serialized
-from irimi.sdk._errors import error_info, recorded_error
+from irimi.sdk._capture import NotReplayable, capture, capture_call, revive, serialized
+from irimi.sdk._errors import recorded_error, tool_error_info
 from irimi.sdk._runs import check_name, label, off_the_loop
 from irimi.sdk._state import state
 
 PROXY_HINTS = tuple(name for name in PROXY_ENVS if name.upper() == "HTTPS_PROXY")
+_VARIADIC = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
 
 
 @overload
@@ -66,11 +73,13 @@ def write_tool[F: Callable[..., Any]](
 
     Returns:
         A decorator that wraps the function, keeping its signature and its sync or async nature.
+        The wrapper has no `__wrapped__`, so nothing that unwraps it reaches the real function.
 
     Raises:
         TypeError: At decoration, for a fake that is not callable, is a generator function, is
-            the decorated function itself or differs from it in sync or async nature; for a
-            decorated generator function or a callable with no importable `module:qualname`;
+            the decorated function itself or a partial or `functools.wraps` wrapper of it,
+            differs from it in sync or async nature, or cannot take its required arguments; for
+            a decorated generator function or a callable with no importable `module:qualname`;
             or for a `name` that is not a string.
 
     Example:
@@ -104,36 +113,47 @@ def _decorator(
                 f"{api} cannot wrap the generator function {fn.__qualname__}: a call is "
                 "recorded when it returns, before a generator's body has run"
             )
-        if fake is fn:
-            # Reading `fake=` as "the function to fake" would run the write for real.
-            raise TypeError(
-                f"{api}: the fake for {fn.__qualname__} is the function itself: fake= names "
-                "the function that runs in its place under irimi"
-            )
-        is_async = inspect.iscoroutinefunction(fn)
-        if fake is not None and _is_async(fake) != is_async:
-            nature = "an async def" if is_async else "a sync function"
-            raise TypeError(
-                f"{api}: the fake for {fn.__qualname__} must be {nature}, as the function it "
-                "replaces is"
-            )
+        if fake is not None:
+            _check_fake(fake, fn, api)
         spec = _Tool(tool_name, kind, fn, fake)
 
-        if is_async:
+        if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await _call_async(spec, args, kwargs)
 
-            return async_wrapper
+            return _sealed(async_wrapper, fn) if kind == "write" else async_wrapper
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return _call(spec, args, kwargs)
 
-        return wrapper
+        return _sealed(wrapper, fn) if kind == "write" else wrapper
 
     return decorate
+
+
+def _check_fake(fake: Callable[..., Any], fn: Callable[..., Any], api: str) -> None:
+    """Raise TypeError at decoration if `fake` cannot run in `fn`'s place under irimi."""
+    if _reaches(fake, fn):
+        # Reading `fake=` as "the function to fake" would run the write for real.
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} is the function itself, or a partial or "
+            "wrapper of it: fake= names the function that runs in its place under irimi"
+        )
+    is_async = inspect.iscoroutinefunction(fn)
+    if _is_async(fake) != is_async:
+        nature = "an async def" if is_async else "a sync function"
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} must be {nature}, as the function it "
+            "replaces is"
+        )
+    if (refusal := _refused_call(fake, fn)) is not None:
+        raise TypeError(
+            f"{api}: the fake for {fn.__qualname__} cannot take its arguments ({refusal}): "
+            "it is called as the function is, a method's instance first"
+        )
 
 
 @dataclass(frozen=True)
@@ -144,6 +164,78 @@ class _Tool:
     kind: trace.ToolKind
     fn: Callable[..., Any]
     fake: Callable[..., Any] | None
+
+
+def _links(f: object) -> list[object]:
+    """Return `f`, then what each object partially applies, is a method of or wraps, once each."""
+    chain: list[object] = []
+    # Bounded as `inspect.unwrap` is, against a `__wrapped__` that makes a new object each time.
+    while f is not None and len(chain) < sys.getrecursionlimit():
+        if any(f is seen for seen in chain):
+            break
+        chain.append(f)
+        f = _link(f)
+    return chain
+
+
+def _link(f: object) -> object:
+    """Return what `f` partially applies, is a bound method of, or wraps; None if nothing."""
+    if isinstance(f, functools.partial):
+        return f.func
+    try:
+        method_of = getattr(f, "__func__", None)
+        return method_of if method_of is not None else getattr(f, "__wrapped__", None)
+    except Exception:  # an object's own `__getattr__` raised: the chain ends at it
+        return None
+
+
+def _reaches(fake: Callable[..., Any], fn: Callable[..., Any]) -> bool:
+    """Return whether `fake`, or what it partially applies or wraps, is `fn` or what `fn` wraps.
+
+    Such a fake would run the real write under irimi; a deliberate wrapper that never calls it
+    looks the same, and is refused too.
+    """
+    real = _links(fn)
+    return any(any(f is r for r in real) for f in _links(fake))
+
+
+def _refused_call(fake: Callable[..., Any], fn: Callable[..., Any]) -> str | None:
+    """Return why `fake` cannot take `fn`'s required arguments, passed as `fn` declares them.
+
+    None when it can, or when either signature cannot be read. Only required parameters are
+    passed, so a fake taking `*args, **kwargs`, or fewer optional ones, is never refused. Each
+    signature is the object's own, not one it wraps: a decorator beneath may supply an argument.
+    """
+    try:
+        params = list(signature(fn, follow_wrapped=False).parameters.values())
+        taking = signature(fake, follow_wrapped=False)
+    except Exception:  # no signature to read, as for many builtins: the call decides
+        return None
+    required = [p for p in params if p.default is p.empty and p.kind not in _VARIADIC]
+    args = [None for p in required if p.kind is not p.KEYWORD_ONLY]
+    kwargs = {p.name: None for p in required if p.kind is p.KEYWORD_ONLY}
+    # A function taking `*args` or `**kwargs` may be passed more than it requires.
+    bind = taking.bind_partial if any(p.kind in _VARIADIC for p in params) else taking.bind
+    try:
+        bind(*args, **kwargs)
+    except TypeError as exc:
+        return str(exc)
+    return None
+
+
+def _sealed[W: Callable[..., Any]](wrapper: W, fn: Callable[..., Any]) -> W:
+    """Return a write tool's `wrapper` without `__wrapped__`, which names the real function.
+
+    `inspect.unwrap`, and a framework that calls what it returns, would run the write for real
+    under irimi. `typing.get_type_hints` looked up string annotations' names through it, so they
+    are resolved here, where they can be; `__signature__` keeps the real function's signature.
+    """
+    del wrapper.__wrapped__  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):  # no signature to read: none to show
+        wrapper.__signature__ = signature(fn)  # type: ignore[attr-defined]
+    with contextlib.suppress(Exception):  # a name not defined yet: left as written
+        wrapper.__annotations__ = typing.get_type_hints(fn, include_extras=True)
+    return wrapper
 
 
 def _chosen(spec: _Tool, recorded: "_Recorded | None") -> tuple[Callable[..., Any], trace.Ran]:
@@ -192,7 +284,18 @@ async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]
     captured, _ = capture_call(spec.fn, args, kwargs)
     recorded = None
     if _asks_the_recording(spec):
-        recorded = await off_the_loop(_replay_answer, spec, captured)
+        asked = _Asked()
+        try:
+            recorded = await off_the_loop(_replay_answer, spec, captured, asked)
+        except GeneratorExit:
+            # A closed coroutine may not await, so the release is made inline.
+            if (kept := asked.abandon()) is not None:
+                state.reporter.release(*kept)
+            raise
+        except BaseException:  # cancelled while the lookup waits: its answer is never used
+            if (kept := asked.abandon()) is not None:
+                await off_the_loop(state.reporter.release, *kept)
+            raise
     body, ran = _chosen(spec, recorded)
     call = _Call(spec, ran, captured)
     try:
@@ -245,19 +348,62 @@ class _Recorded:
         return answer_async if is_async or self.awaited else answer
 
 
-def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
-    """Return this call's recorded outcome, or None (miss, unrevivable, stopped) to run it."""
+def _replay_answer(
+    spec: _Tool, args: trace.JSONValue, asked: "_Asked | None" = None
+) -> _Recorded | None:
+    """Return this call's recorded outcome, or None (miss, unrevivable, stopped) to run it.
+
+    An answer it cannot use, or that an async caller `asked` for and stopped waiting for, is
+    released, so the recording still answers what the tool's body makes."""
     try:
-        outcome = state.reporter.recorded(_run_id(), spec.name, args)
+        run_id = _run_id()
+        outcome = state.reporter.recorded(run_id, spec.name, args)
         if outcome is None:
             return None
-        if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
-            # The engine refuses these too; checking here means one is never raised again.
-            return None
-        result = None if outcome.error is not None else revive(outcome.result)
-        return _Recorded(result, outcome.error, outcome.awaited)
-    except Exception:  # NotReplayable: the tool runs for real
+        recorded = _usable(outcome)
+        if recorded is not None and (asked is None or asked.keep(run_id, outcome.answer_id)):
+            return recorded
+        if outcome.answer_id is not None:
+            state.reporter.release(run_id, outcome.answer_id)
         return None
+    except Exception:  # the SDK never raises: the tool runs for real
+        return None
+
+
+def _usable(outcome: RecordedOutcome) -> _Recorded | None:
+    """Return a recorded outcome as the tool hands it back, or None if this process cannot."""
+    if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
+        # The engine refuses these too; checking here means one is never raised again.
+        return None
+    try:
+        result = None if outcome.error is not None else revive(outcome.result)
+    except NotReplayable:  # a class not imported yet, or a constructor that raised
+        return None
+    return _Recorded(result, outcome.error, outcome.awaited)
+
+
+class _Asked:
+    """One async call's lookup, which its caller abandons if cancelled while it waits.
+
+    The lookup runs on in its thread, so whichever of the two ends second releases the answer."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._kept: tuple[str, str] | None = None
+
+    def keep(self, run_id: str, answer_id: str | None) -> bool:
+        """Return False if the caller abandoned the lookup, else keep the answer's answer_id."""
+        with self._lock:
+            if not self._abandoned and answer_id is not None:
+                self._kept = (run_id, answer_id)
+            return not self._abandoned
+
+    def abandon(self) -> tuple[str, str] | None:
+        """Abandon the lookup; return the run and answer_id of an answer it kept, to release."""
+        with self._lock:
+            self._abandoned = True
+            return self._kept
 
 
 class _Call:
@@ -275,8 +421,13 @@ class _Call:
         """Return the call with its outcome as posted, or None (warned once) if building fails."""
         try:
             captured: trace.JSONValue = None
+            error = None
             if exc is None:
                 captured = _bounded(self.args, capture(result)[0])
+            else:
+                error = tool_error_info(exc)
+                if error.args is not None:  # none recorded stays absent, never the marker
+                    error = replace(error, args=_bounded(self.args, error.args))
             call = trace.ToolCall(
                 tool_call_id=trace.new_tool_call_id(),
                 run_id=self.run_id,
@@ -285,7 +436,7 @@ class _Call:
                 ran=self.ran,
                 args=self.args,
                 result=captured,
-                error=None if exc is None else error_info(exc),
+                error=error,
                 started_at=self.started_at,
                 ended_at=time.time(),
                 awaited=self.awaited,

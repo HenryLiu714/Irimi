@@ -66,18 +66,21 @@ def _observed(name: str, called_with: dict[str, str] | None = None) -> Iterator[
         _logged_runs.discard(run_id)
 
 
+def _signature(f: Callable[..., Any], *, follow_wrapped: bool = True) -> inspect.Signature:
+    """Return `f`'s signature with annotations left unevaluated, as the SDK reads it."""
+    if sys.version_info >= (3, 14):
+        import annotationlib  # exists from 3.14 only
+
+        return inspect.signature(
+            f, follow_wrapped=follow_wrapped, annotation_format=annotationlib.Format.FORWARDREF
+        )
+    return inspect.signature(f, follow_wrapped=follow_wrapped)
+
+
 def _called_with(f: Callable[..., Any], args: Any, kwargs: Any) -> dict[str, str]:
-    """Return `{parameter: type name}` for a call of `f`, or empty if it does not bind.
-
-    Annotations stay unevaluated, as the SDK leaves them."""
+    """Return `{parameter: type name}` for a call of `f`, or empty if it does not bind."""
     try:
-        if sys.version_info >= (3, 14):
-            import annotationlib  # exists from 3.14 only
-
-            signature = inspect.signature(f, annotation_format=annotationlib.Format.FORWARDREF)
-        else:
-            signature = inspect.signature(f)
-        bound = signature.bind(*args, **kwargs)
+        bound = _signature(f).bind(*args, **kwargs)
     except Exception:
         return {}
     return {name: type(value).__qualname__ for name, value in bound.arguments.items()}
@@ -195,13 +198,22 @@ def _logged(fn: Callable[..., Any], tool_name: str, kind: str, ran: str) -> Call
             _log_tool(tool_name, kind, ran)
             return await fn(*args, **kwargs)
 
-        return async_wrapper
+        return _declared(async_wrapper, fn)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         _log_tool(tool_name, kind, ran)
         return fn(*args, **kwargs)
 
+    return _declared(wrapper, fn)
+
+
+def _declared[W: Callable[..., Any]](wrapper: W, fn: Callable[..., Any]) -> W:
+    """Give `wrapper` the signature `fn` itself declares, which the SDK checks a fake against.
+
+    Without it the SDK would read `(*args, **kwargs)` and check nothing the agent wrote."""
+    with contextlib.suppress(Exception):  # no signature to read: the SDK reads none either
+        wrapper.__signature__ = _signature(fn, follow_wrapped=False)  # type: ignore[attr-defined]
     return wrapper
 
 
