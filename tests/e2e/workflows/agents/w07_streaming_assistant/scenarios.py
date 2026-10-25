@@ -249,7 +249,7 @@ class HeldStreamLLM(ScriptedLLM):
 class StreamingHistorySlack(FakeSlack):
     """Answers `conversations.history` as one server-sent event, so irimi streams the read.
 
-    Real Slack never streams; no shipped map has a streamed read that the overlay could edit."""
+    Real Slack never streams, and no shipped map streams a read the overlay models."""
 
     def handle(self, req: Req) -> Resp:
         resp = super().handle(req)

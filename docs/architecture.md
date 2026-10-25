@@ -37,7 +37,8 @@ irimi's `Request` and `Response` and carries plans onto them. What irimi decides
    run's write log. `ShadowSession.record` hands the exchange to the `RunStore` and then to the
    CLI's callback.
 6. **`error` hook.** `ShadowSession.fail` records a lost connection or unreachable target with no
-   response, flagged, so a failed write is never missing from the trace.
+   response, or with what of a stream arrived, flagged, so a failed write is never missing from
+   the trace. A broken streamed read records its overlay fidelity as `complete` does.
 
 Every body a hook records is decoded by `engine.decoding.decode_body`, which never raises and stops
 at `limits.MAX_DECODED_BODY`, so a small compressed bomb cannot exhaust memory. Raw TCP relay is

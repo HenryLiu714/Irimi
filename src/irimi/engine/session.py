@@ -348,8 +348,8 @@ class ShadowSession:
             # Recorded without the stamp. A replayed read keeps the recorded read's fidelity.
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
+        # A target's read is not a Forward, so the overlay never touches it.
         elif isinstance(decision, Forward) and as_sent:
-            # A target's read is not a Forward, so the overlay never touches it.
             overlay = self._unedited(plan, decision, upstream)
         elif isinstance(decision, Forward):
             overlaid = self._overlaid(plan, decision, upstream)
