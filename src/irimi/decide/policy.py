@@ -91,8 +91,16 @@ class AnswerPolicy(Protocol):
         """Return how this request is answered; `target` comes from `targets.resolve`."""
         ...
 
-    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
-        """Return the recorded read tool call to hand back, or None to run it. Never raises."""
+    def recorded_tool_call(
+        self, name: str, args: JSONValue, answer_id: str | None = None
+    ) -> ToolCall | None:
+        """Return the recorded read tool call to hand back, or None to run it. Never raises.
+
+        A hit's `answer_id` names it for `release_tool_call`."""
+        ...
+
+    def release_tool_call(self, answer_id: str) -> None:
+        """Give back what the hit `answer_id` names used up, but the call itself. Never raises."""
         ...
 
     def observe_read(self, service: str, body: bytes) -> None:
@@ -127,9 +135,14 @@ class ShadowPolicy:
         self.idempotency = keys if keys is not None else idempotency.Store()
         self.slack_ts = services.TsClock()
 
-    def recorded_tool_call(self, name: str, args: JSONValue) -> ToolCall | None:
+    def recorded_tool_call(
+        self, name: str, args: JSONValue, answer_id: str | None = None
+    ) -> ToolCall | None:
         """Return None: shadow mode has no recording, so every read tool runs for real."""
         return None
+
+    def release_tool_call(self, answer_id: str) -> None:
+        """Do nothing: shadow mode answers no lookup, so holds nothing to give back."""
 
     def observe_read(self, service: str, body: bytes) -> None:
         services.observe_read(service, body, self.slack_ts)

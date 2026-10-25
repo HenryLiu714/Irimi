@@ -116,7 +116,7 @@ The interfaces a test or another mode substitutes. Each is a `Protocol`.
 | `decide.overlay.Overlay` | apply a run's faked writes to a live read, and translate a read before it is forwarded; pure | `ServiceOverlay`; `NoOverlay` for tests |
 | `decide.reader.Reader` | make irimi's check read | `UpstreamReader`, `NoReader` (no check), `replay.index.RecordingReader` |
 | `record.store.RunStore` | take run starts, exchanges, tool calls and run ends; never raises or blocks | `DirectoryStore`; `NullStore` in `tests/support` |
-| `sdk._control_client.Reporter` | post the SDK's runs and tool calls, and look up recorded tool calls | `ControlClient` |
+| `sdk._control_client.Reporter` | post the SDK's runs and tool calls, look up recorded tool calls, and release an answer the SDK could not use | `ControlClient` |
 
 Commands that start a proxy also take an `engine_factory`, so the tests and the sample workflow
 harness build their own engine without patching the composition root.

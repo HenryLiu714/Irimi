@@ -5,6 +5,7 @@ any proxy, and waits at most `TIMEOUT_S`.
 
 - Never raises (the SDK never raises); each kind of failure is warned of once per process.
 - A failed lookup is a miss, so the tool runs for real.
+- An answer the SDK cannot use is released, so the recording still answers the tool's body.
 - A timeout or unreachable endpoint pauses every send for `PAUSE_S`.
 - A proxy speaking another protocol major answers `426`.
 """
@@ -23,9 +24,11 @@ from typing import Any, Literal, Protocol
 from irimi.core.limits import MAX_ANSWER
 from irimi.core.opener import no_redirect_opener
 from irimi.protocol.control import (
+    ANSWER_ID_FIELD,
     PROTOCOL_VERSION,
     RECORDED_ACTION,
     RECORDED_LOOKUP_FIELDS,
+    RELEASE_ACTION,
     RUNS_ROUTE,
     TOOL_CALLS_ACTION,
     RecordedOutcome,
@@ -54,11 +57,13 @@ PAUSING: frozenset[Failure] = frozenset({"timeout", "unreachable"})
 
 
 class Reporter(Protocol):
-    """Receive run starts, run ends and tool calls, and answer replay lookups."""
+    """Receive run starts, run ends and tool calls; answer replay lookups and take answers back."""
 
     def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None: ...
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None: ...
+
+    def release(self, run_id: str, answer_id: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,22 @@ class ControlClient:
             "the tool runs for real",
         )
         return None
+
+    def release(self, run_id: str, answer_id: str) -> None:
+        """Give back the answer `answer_id` names, which the SDK cannot use; warn once per kind.
+
+        Never raises (the SDK never raises)."""
+        try:
+            sent = self._send(f"{run_id}/{RELEASE_ACTION}", {ANSWER_ID_FIELD: answer_id})
+        except Exception as exc:  # the SDK never raises
+            sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
+        if isinstance(sent, _Failed) and sent.kind != "paused":
+            self._warn_once(
+                "release",
+                sent,
+                f"give back a recorded answer the tool could not use in run {run_id}",
+                "the requests its body makes may miss the recording",
+            )
 
     def _send(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
         """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`; return the body or the failure."""

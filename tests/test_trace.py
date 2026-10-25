@@ -555,6 +555,18 @@ def test_a_recorded_outcome_round_trips_and_holds_a_tool_call_s_outcome():
     assert recorded_outcome_from_json(d).error == with_args.error
 
 
+def test_a_recorded_outcome_names_the_answer_it_is_released_by_when_given_an_id():
+    """An answer's id is written only when the endpoint gives one; absent or null, it is None."""
+    call = builders.filled(ToolCall)
+    d = recorded_outcome_to_json(call, "a1")
+    assert d["answer_id"] == "a1"
+    assert recorded_outcome_from_json(d).answer_id == "a1"
+    assert "answer_id" not in recorded_outcome_to_json(call)
+    assert recorded_outcome_from_json(d | {"answer_id": None}).answer_id is None
+    with pytest.raises(TraceFormatError, match="'answer_id' is an integer, not a string"):
+        recorded_outcome_from_json(d | {"answer_id": 1})
+
+
 def _error_of(record):
     if isinstance(record, RunRecord):
         assert record.end is not None

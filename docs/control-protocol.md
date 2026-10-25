@@ -32,6 +32,10 @@ The protocol version is `1`.
   recorded until the two match.
 - Every route ignores body fields it does not know, so a minor version can add fields without
   breaking either side. A change a version-1 reader would misread bumps the major version.
+- A route added within version 1 is used only once irimi has shown it has it. A lookup's answer
+  names an `answer_id` only from an irimi that takes `tool-calls/recorded/release`, so a client
+  releases nothing to an older one, and an older client, which never releases, is answered as
+  before.
 
 ## Routes
 
@@ -41,6 +45,7 @@ The protocol version is `1`.
 | `POST` | `runs/{run_id}/tool-calls` | one tool call | `204` |
 | `POST` | `runs/{run_id}/end` | a run end | `204` |
 | `POST` | `runs/{run_id}/tool-calls/recorded` | a recorded-call lookup | `200` with the outcome, or `404` |
+| `POST` | `runs/{run_id}/tool-calls/recorded/release` | a lookup's answer the client did not use | `204` |
 | `GET` | `health` | none | `200` with the engine's state |
 
 Every answer carries `Irimi-Answered-By: control` and `Irimi-Protocol: 1`. Every body is a JSON
@@ -130,16 +135,35 @@ A replay's lookup of a read tool's recorded result, made before running the tool
 answers `200`:
 
 ```json
-{"result": {"charge": "ch_demo1", "name": "Ada Lovelace"}, "error": null, "awaited": false}
+{"result": {"charge": "ch_demo1", "name": "Ada Lovelace"}, "error": null, "awaited": false, "answer_id": "9f2c1e5b7a3d4c60"}
 ```
 
 Return `result` to the caller, raise `error` (a recorded exception, with its `args` when it has
-them), and, when `awaited` is true, return them through an awaitable. A miss, or any lookup outside
+them), and, when `awaited` is true, return them through an awaitable. When you cannot use the
+answer (`result` names a class you cannot rebuild yet, or the call was cancelled while it waited),
+release it by its `answer_id` before you run the tool for real. A miss, or any lookup outside
 a replay, answers `404` with the message `no recorded call`: run the tool for real. Any other `404`
 is a route this irimi does not have, as an irimi older than the client answers; warn, and run the
 tool for real. Tell the two by the message, which every irimi speaking protocol 1 has sent, not the
 `type`, which they share. A lookup is not recorded as a tool call; post the call afterwards with
 `ran: recording` or `ran: real`.
+
+### `tool-calls/recorded/release`
+
+A replay's release of a lookup's answer the client did not use:
+
+```json
+{"answer_id": "9f2c1e5b7a3d4c60"}
+```
+
+`answer_id` is required. irimi gives back what answering used up besides the recorded call
+itself: the exchanges and read tool calls recorded within that call's span. The call stays used
+up, as one irimi cannot hand back is, so run the tool for real, and the recording answers what
+its body sends. Release only an answer you did not use: released after you returned it, it gives
+back requests the recorded call's body already answered, which a later request may then take. An
+`answer_id` irimi did not give, or has released already, gives back nothing, and is still `204`.
+An answer never released keeps all of it used up. The path's run is checked, as a lookup's is,
+but the `answer_id` alone names the answer.
 
 ### `health`
 

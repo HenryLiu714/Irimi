@@ -19,7 +19,16 @@ def _enrichment(world: World) -> None:
         account = req.path.rsplit("/", 1)[1]
         return Resp(200, {"id": account, "industry": "manufacturing"})
 
-    world.extra.append(JsonService(("enrich.internal",), {("GET", r"/v1/companies/\w+"): company}))
+    def view(req: Req, state: dict[str, Any]) -> Resp:
+        state["views"] = state.get("views", 0) + 1
+        return Resp(200, {"views": state["views"]})
+
+    world.extra.append(
+        JsonService(
+            ("enrich.internal",),
+            {("GET", r"/v1/companies/\w+"): company, ("POST", r"/v1/companies/\w+/views"): view},
+        )
+    )
 
 
 WORKFLOW = Workflow(
@@ -72,6 +81,13 @@ WORKFLOW = Workflow(
             doc="a framework unwraps a sync and an async write tool with inspect.unwrap and calls "
             "what it gets: the tool itself, so its fake runs under shadow and the real write only "
             "bare",
+        ),
+        "lazy_profile": Scenario(
+            ("lazy_profile",),
+            setup=_enrichment,
+            doc="a read tool reads a company and counts a view over HTTP, and returns a profile "
+            "whose class is in a module its body imports, so a replay cannot rebuild it before "
+            "the body runs again; the agent reads again after it",
         ),
         "outside_run": Scenario(
             ("outside_run",),

@@ -8,11 +8,14 @@ import copy
 import dataclasses
 import http.client
 import http.server
+import inspect
 import json
 import pickle
+import sys
 import threading
 import time
 import traceback
+import types
 from collections.abc import Callable, Coroutine, Iterator
 from decimal import Decimal
 from typing import Any
@@ -123,6 +126,26 @@ async def _history(account: str) -> list[int]:
 def history(account: str) -> Coroutine[Any, Any, list[int]]:
     """A sync read that returns a coroutine: recorded with what the coroutine returned."""
     return _history(account)
+
+
+@dataclasses.dataclass(frozen=True)
+class Profile:
+    account: str
+    balance: int
+
+
+# `Profile`'s module, which `profile`'s body imports: a replay has not imported it when it asks.
+_PROFILES = types.ModuleType("irimi_test_profiles")
+Profile.__module__ = _PROFILES.__name__
+_PROFILES.__dict__["Profile"] = Profile
+
+
+@sdk.read_tool(name="db.profile")
+def profile(account: str) -> Profile:
+    """A result named by a module the body imports, built from a read tool the body calls."""
+    sys.modules[_PROFILES.__name__] = _PROFILES
+    _real(account)
+    return Profile(account, balance("acc_1")["balance"])
 
 
 def _debit_stand_in(account: str, amount: int) -> dict[str, Any]:
@@ -464,7 +487,8 @@ def test_a_hit_is_used_up_and_is_not_itself_a_tool_call(irimi):
     finally:
         stop()
     answer = {"result": {"account": "acc_1", "balance": 100}, "error": None, "awaited": False}
-    assert first == (200, answer)
+    status, found = first
+    assert (status, {k: v for k, v in found.items() if k != "answer_id"}) == (200, answer)
     assert second == (
         404,
         {"error": {"type": "irimi_control_refused", "message": "no recorded call"}},
@@ -737,6 +761,191 @@ def test_a_recorded_call_closed_unawaited_or_cancelled_under_trio_is_a_miss(monk
     assert [doc["ran"] for doc in posted] == ["real"]
 
 
+# -- an answer the SDK cannot use ---------------------------------------------------------------
+
+
+def test_a_result_this_process_cannot_rebuild_is_released_so_its_body_is_answered(irimi, warnings):
+    """A recorded result whose class is not imported yet runs the tool again, its body answered.
+
+    The SDK releases the answer before the body runs, so the `db.balance` the body calls takes the
+    result it took when recorded, and the agent's own `db.balance` after it the next one."""
+
+    def script() -> list[Any]:
+        first = profile("acc_p")
+        _BALANCES["acc_1"] = 200
+        return [first, balance("acc_1")]
+
+    try:
+        run_id = irimi.record(script)
+        del sys.modules[_PROFILES.__name__]
+        _FORBIDDEN.add("acc_1")
+        result, calls = irimi.replay(run_id, script)
+    finally:
+        sys.modules.pop(_PROFILES.__name__, None)
+    assert result == [Profile("acc_p", 100), {"account": "acc_1", "balance": 200}]
+    assert [(c.name, c.ran) for c in calls] == [
+        ("db.balance", "recording"),
+        ("db.profile", "real"),
+        ("db.balance", "recording"),
+    ]
+    assert _REAL_READS == ["acc_p", "acc_1", "acc_1", "acc_p"]
+    assert warnings() == []
+
+
+def _replaying_with(monkeypatch, reporter: object) -> None:
+    monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
+    monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
+    monkeypatch.setattr(state, "reporter", reporter)
+
+
+_GONE: JSONValue = {"__irimi_type__": "nowhere:Gone", "value": {}}
+_ONE: JSONValue = {"account": "acc_1", "balance": 1}
+
+
+@pytest.mark.parametrize("tool", [balance, balance_async], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("outcome", "released"),
+    [
+        (RecordedOutcome(_GONE, None, False, "a1"), ["a1"]),
+        (RecordedOutcome(None, ErrorInfo("trio.Cancelled", ""), False, "a1"), ["a1"]),
+        (RecordedOutcome(_GONE, None, False), []),
+        (RecordedOutcome(_ONE, None, False, "a1"), []),
+    ],
+    ids=["not-rebuilt", "stopped", "from-an-irimi-without-release", "used"],
+)
+def test_an_answer_the_sdk_cannot_use_is_released_before_the_tool_runs(
+    monkeypatch, tool, outcome, released
+):
+    """An answer the SDK cannot use is released, if it came with an id, before the body runs."""
+    seen: list[str] = []
+
+    class _Answers:
+        def post(self, run_id: str, action: str, doc: Any) -> None:
+            seen.append(f"{action} {doc['ran']}")
+
+        def recorded(self, *args: Any) -> RecordedOutcome:
+            seen.append("lookup")
+            return outcome
+
+        def release(self, run_id: str, answer_id: str) -> None:
+            seen.append(f"release {run_id} {answer_id} after {len(_REAL_READS)} reads")
+
+    _replaying_with(monkeypatch, _Answers())
+    called = tool("acc_1")
+    if inspect.iscoroutine(called):
+        asyncio.run(called)
+    ran = "recording" if outcome.result == _ONE else "real"
+    assert seen == [
+        "lookup",
+        *[f"release abcd1234abcd1234 {a} after 0 reads" for a in released],
+        f"tool-calls {ran}",
+    ]
+
+
+def test_an_async_read_cancelled_while_it_asks_releases_the_answer_once_it_comes(monkeypatch):
+    """Cancelled while its lookup waits off the loop, a read releases the answer it then gets.
+
+    Nothing of it runs or is recorded, so a retry finds the recorded body's answers unused."""
+    asking, answering = threading.Event(), threading.Event()
+    seen: list[str] = []
+
+    class _Slow:
+        def post(self, *args: Any) -> None:
+            seen.append("tool-calls")
+
+        def recorded(self, *args: Any) -> RecordedOutcome:
+            asking.set()
+            answering.wait(10)
+            return RecordedOutcome(_ONE, None, False, "a1")
+
+        def release(self, run_id: str, answer_id: str) -> None:
+            seen.append(f"release {answer_id}")
+
+    async def main() -> None:
+        task = asyncio.create_task(balance_async("acc_1"))
+        await asyncio.to_thread(asking.wait, 10)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+        answering.set()
+
+    _replaying_with(monkeypatch, _Slow())
+    asyncio.run(main())  # which waits for the lookup's thread to end
+    assert seen == ["release a1"]
+    assert _REAL_READS == []
+
+
+def test_an_async_read_cancelled_once_its_answer_came_releases_it(monkeypatch):
+    """Cancelled after its lookup came back but before it resumed, a read releases the answer."""
+    seen: list[str] = []
+
+    class _Answers:
+        def post(self, *args: Any) -> None:
+            seen.append("tool-calls")
+
+        def recorded(self, *args: Any) -> RecordedOutcome:
+            return RecordedOutcome(_ONE, None, False, "a1")
+
+        def release(self, run_id: str, answer_id: str) -> None:
+            seen.append(f"release {answer_id}")
+
+    off_the_loop = runs.off_the_loop
+
+    async def cancelled_once_answered(fn: Callable[..., Any], *args: Any) -> Any:
+        if fn is tools._replay_answer:
+            fn(*args)
+            raise asyncio.CancelledError
+        return await off_the_loop(fn, *args)
+
+    _replaying_with(monkeypatch, _Answers())
+    monkeypatch.setattr(tools, "off_the_loop", cancelled_once_answered)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(balance_async("acc_1"))
+    assert seen == ["release a1"]
+    assert _REAL_READS == []
+
+
+def test_an_async_read_closed_once_its_answer_came_releases_it_inline(monkeypatch):
+    """Closed while it waits for its lookup, a read releases a kept answer without awaiting.
+
+    A closed coroutine may not await; one that did would raise `RuntimeError` into the closer."""
+    seen: list[str] = []
+    answering, kept = threading.Event(), threading.Event()
+    keep = tools._Asked.keep
+
+    class _Answers:
+        def post(self, *args: Any) -> None:
+            seen.append("tool-calls")
+
+        def recorded(self, *args: Any) -> RecordedOutcome:
+            answering.wait(10)
+            return RecordedOutcome(_ONE, None, False, "a1")
+
+        def release(self, run_id: str, answer_id: str) -> None:
+            seen.append(f"release {answer_id}")
+
+    def keeps(asked: Any, run_id: str, answer_id: str | None) -> bool:
+        try:
+            return keep(asked, run_id, answer_id)
+        finally:
+            kept.set()
+
+    async def main() -> None:
+        called = balance_async("acc_1")
+        called.send(None)  # suspended where it waits for the lookup's thread
+        answering.set()
+        await asyncio.to_thread(kept.wait, 10)
+        called.close()
+
+    _replaying_with(monkeypatch, _Answers())
+    monkeypatch.setattr(tools._Asked, "keep", keeps)
+    asyncio.run(main())
+    assert seen == ["release a1"]
+    assert _REAL_READS == []
+
+
 def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
     """With the SDK inactive, a leftover `IRIMI_REPLAY_RUN` does not make a replay."""
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
@@ -845,6 +1054,32 @@ def test_the_endpoint_s_404_for_a_miss_is_silent_whoever_sends_it(monkeypatch, w
     with _answering(monkeypatch, 404, _refused(NO_RECORDED_CALL)):
         assert balance("acc_1") == {"account": "acc_1", "balance": 100}
     assert _lookup_warnings(warnings) == []
+
+
+def test_a_release_is_posted_beside_the_lookup_and_said_by_no_warning(monkeypatch, warnings):
+    body = json.dumps({**_HIT, "result": _GONE, "answer_id": "a1"}).encode()
+    with _answering(monkeypatch, 200, body) as seen:
+        assert balance("acc_1") == {"account": "acc_1", "balance": 100}
+    route = "/_irimi/runs/abcd1234abcd1234/tool-calls"
+    assert [path for path, _ in seen] == [f"{route}/recorded", f"{route}/recorded/release", route]
+    assert warnings() == []
+
+
+def test_a_release_that_fails_is_warned_of_once(monkeypatch, warnings, refused_port):
+    """A release irimi does not get is warned of once; the breaker it opens skips the next."""
+    monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{refused_port}/_irimi")
+    reporter = client.ControlClient()
+    reporter.release("abcd1234abcd1234", "a1")
+    reporter.release("abcd1234abcd1234", "a2")
+    [said] = [w.getMessage() for w in warnings()]
+    assert said.startswith(
+        "irimi: could not give back a recorded answer the tool could not use in run "
+        "abcd1234abcd1234 (unreachable: "
+    )
+    assert said.endswith(
+        "; the requests its body makes may miss the recording; irimi is not asked again for 30s; "
+        "further failures of this kind are not logged"
+    )
 
 
 def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):

@@ -35,6 +35,7 @@ SCENARIOS = (
     "async_tools",
     "overlapping_writes",
     "framework_unwraps",
+    "lazy_profile",
 )
 STALE_BEFORE = "2025-06-01"
 # A database host the agent cannot reach: `connect_with` raises for it as a driver does, quoting
@@ -93,6 +94,20 @@ def fetch_enrichment(account_id: str) -> dict[str, Any]:
     url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
     resp = agentkit.http("GET", url, label="enrichment")
     return resp.json() or {}
+
+
+@observe.read_tool(name="crm.account_profile")
+def account_profile(account_id: str) -> Any:
+    """Read an account's company and count a view of it over HTTP, and return its profile.
+
+    The profile's class is in a module imported here, which a replay has not imported when it
+    asks the recording, so the replay runs this body again."""
+    from tests.e2e.workflows.agents.w06_crm_db_agent import profiles
+
+    url = agentkit.internal("enrich.internal") + f"/v1/companies/{account_id}"
+    company = agentkit.http("GET", url, label="profile_company").json() or {}
+    viewed = agentkit.http("POST", url + "/views", json_body={}, label="profile_view")
+    return profiles.Profile(account_id, company.get("industry"), (viewed.json() or {}).get("views"))
 
 
 @observe.read_tool(name="crm.connect_with")
@@ -428,6 +443,16 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
         return {
             "upserted": registered({**account, "name": "Unwrapped"}),
             "notified": asyncio.run(notify(account["id"], "unwrapped")),
+        }
+    if scenario == "lazy_profile":
+        profile = account_profile("acc_1")
+        # Recorded after the tool's write, so a replay answers it only once that write is matched.
+        again = agentkit.http(
+            "GET", agentkit.internal("enrich.internal") + "/v1/companies/acc_2", label="after"
+        )
+        return {
+            "profile": [type(profile).__name__, profile.id, profile.industry, profile.views],
+            "after": again.json(),
         }
     if scenario == "stand_in_http":
         return {"synced": sync_industry("acc_1", "aerospace")}

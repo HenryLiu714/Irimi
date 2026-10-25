@@ -5,6 +5,7 @@ import functools
 import inspect
 import os
 import sys
+import threading
 import time
 import typing
 from collections.abc import Callable, Coroutine
@@ -14,10 +15,11 @@ from typing import Any, overload
 from irimi.core.calls import signature
 from irimi.core.limits import MAX_CAPTURED_BYTES
 from irimi.protocol import trace
+from irimi.protocol.control import RecordedOutcome
 from irimi.protocol.env import ENGINE_ACTIVE_ENV, PROXY_ENVS, RUN_ENV
 from irimi.protocol.trace import STOPPED_ERROR_TYPES, TRUNCATED_KEY
 from irimi.sdk import _context as context
-from irimi.sdk._capture import capture, capture_call, revive, serialized
+from irimi.sdk._capture import NotReplayable, capture, capture_call, revive, serialized
 from irimi.sdk._errors import recorded_error, tool_error_info
 from irimi.sdk._runs import check_name, label, off_the_loop
 from irimi.sdk._state import state
@@ -282,7 +284,18 @@ async def _call_async(spec: _Tool, args: tuple[Any, ...], kwargs: dict[str, Any]
     captured, _ = capture_call(spec.fn, args, kwargs)
     recorded = None
     if _asks_the_recording(spec):
-        recorded = await off_the_loop(_replay_answer, spec, captured)
+        asked = _Asked()
+        try:
+            recorded = await off_the_loop(_replay_answer, spec, captured, asked)
+        except GeneratorExit:
+            # A closed coroutine may not await, so the release is made inline.
+            if (kept := asked.abandon()) is not None:
+                state.reporter.release(*kept)
+            raise
+        except BaseException:  # cancelled while the lookup waits: its answer is never used
+            if (kept := asked.abandon()) is not None:
+                await off_the_loop(state.reporter.release, *kept)
+            raise
     body, ran = _chosen(spec, recorded)
     call = _Call(spec, ran, captured)
     try:
@@ -335,19 +348,62 @@ class _Recorded:
         return answer_async if is_async or self.awaited else answer
 
 
-def _replay_answer(spec: _Tool, args: trace.JSONValue) -> _Recorded | None:
-    """Return this call's recorded outcome, or None (miss, unrevivable, stopped) to run it."""
+def _replay_answer(
+    spec: _Tool, args: trace.JSONValue, asked: "_Asked | None" = None
+) -> _Recorded | None:
+    """Return this call's recorded outcome, or None (miss, unrevivable, stopped) to run it.
+
+    An answer it cannot use, or that an async caller `asked` for and stopped waiting for, is
+    released, so the recording still answers what the tool's body makes."""
     try:
-        outcome = state.reporter.recorded(_run_id(), spec.name, args)
+        run_id = _run_id()
+        outcome = state.reporter.recorded(run_id, spec.name, args)
         if outcome is None:
             return None
-        if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
-            # The engine refuses these too; checking here means one is never raised again.
-            return None
-        result = None if outcome.error is not None else revive(outcome.result)
-        return _Recorded(result, outcome.error, outcome.awaited)
-    except Exception:  # NotReplayable: the tool runs for real
+        recorded = _usable(outcome)
+        if recorded is not None and (asked is None or asked.keep(run_id, outcome.answer_id)):
+            return recorded
+        if outcome.answer_id is not None:
+            state.reporter.release(run_id, outcome.answer_id)
         return None
+    except Exception:  # the SDK never raises: the tool runs for real
+        return None
+
+
+def _usable(outcome: RecordedOutcome) -> _Recorded | None:
+    """Return a recorded outcome as the tool hands it back, or None if this process cannot."""
+    if outcome.error is not None and outcome.error.type in STOPPED_ERROR_TYPES:
+        # The engine refuses these too; checking here means one is never raised again.
+        return None
+    try:
+        result = None if outcome.error is not None else revive(outcome.result)
+    except NotReplayable:  # a class not imported yet, or a constructor that raised
+        return None
+    return _Recorded(result, outcome.error, outcome.awaited)
+
+
+class _Asked:
+    """One async call's lookup, which its caller abandons if cancelled while it waits.
+
+    The lookup runs on in its thread, so whichever of the two ends second releases the answer."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._kept: tuple[str, str] | None = None
+
+    def keep(self, run_id: str, answer_id: str | None) -> bool:
+        """Return False if the caller abandoned the lookup, else keep the answer's answer_id."""
+        with self._lock:
+            if not self._abandoned and answer_id is not None:
+                self._kept = (run_id, answer_id)
+            return not self._abandoned
+
+    def abandon(self) -> tuple[str, str] | None:
+        """Abandon the lookup; return the run and answer_id of an answer it kept, to release."""
+        with self._lock:
+            self._abandoned = True
+            return self._kept
 
 
 class _Call:

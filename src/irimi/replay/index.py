@@ -3,6 +3,7 @@
 - Requests match on kind, method, host, path, sorted query, scope headers, compared body and
   idempotency standing; the live request is redacted with the store's key first.
 - Each recorded exchange answers once, in recorded order; read tool calls match by name and args.
+- A read tool's answer the SDK cannot use is released: its body's re-run is answered as recorded.
 - A stale answer is a recorded answer that depended on writes the replay has not made. It is
   never served, and reaching one in `answer_for` diverges the replay.
 """
@@ -255,6 +256,8 @@ class ReplayIndex:
         self._maps = maps
         self._redaction_key = redaction_key
         self._diverged = False
+        # What each hit used up besides its call, by the id its lookup's answer was given.
+        self._held: dict[str, list[_Entry | _ToolEntry]] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -335,12 +338,15 @@ class ReplayIndex:
                     return recorded
         return None
 
-    def tool_answer_for(self, name: str, args: JSONValue) -> ToolCall | None:
+    def tool_answer_for(
+        self, name: str, args: JSONValue, answer_id: str | None = None
+    ) -> ToolCall | None:
         """Return the recorded read tool call that answers this live one, or None for a miss.
 
         `args` are unredacted. An unservable match is a miss using up only itself; an answered
-        one also uses up what was recorded in its span. A stale match is a miss, is not used up,
-        and does not diverge the replay: the tool's body runs instead."""
+        one also uses up what was recorded in its span, held under `answer_id` for `release`. A
+        stale match is a miss, is not used up, and does not diverge the replay: the tool's body
+        runs instead."""
         redacted = redact.redact_json(args, self._redaction_key)
         if redacted == redact.REDACTION_FAILED:
             return None
@@ -357,12 +363,23 @@ class ReplayIndex:
                     if not _tool_servable(entry.call):
                         # Its body runs and makes its recorded requests, left unused to answer them.
                         return None
-                    for made in entry.inner:
+                    taken: list[_Entry | _ToolEntry] = [e for e in entry.inner if not e.consumed]
+                    taken += [nested for nested in entry.nested if not nested.consumed]
+                    for made in taken:
                         made.consumed = True
-                    for nested in entry.nested:
-                        nested.consumed = True
+                    if answer_id is not None:
+                        self._held[answer_id] = taken
                     return entry.call
         return None
+
+    def release(self, answer_id: str) -> None:
+        """Give back what the answer held under `answer_id` used up: the SDK could not use it.
+
+        The call stays used up, as an unservable one is, so the tool's body runs and the recording
+        answers what it makes. An id unknown, or released already, gives back nothing."""
+        with self._lock:
+            for made in self._held.pop(answer_id, ()):
+                made.consumed = False
 
     def _stale(self, position: int) -> bool:
         """Return True if diverged or a write before `position` is unused; call under the lock."""

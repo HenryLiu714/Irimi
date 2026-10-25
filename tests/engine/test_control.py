@@ -240,6 +240,8 @@ _NOT_JSON = "the body is not JSON: "
 # A replay's lookup of a read tool's recorded outcome.
 _LOOKUP = f"/_irimi/runs/{RUN}/tool-calls/recorded"
 LOOKUP: dict[str, JSONValue] = {"name": "db.balance", "args": {"account": "acc_1"}}
+# The SDK's release of a lookup's answer it could not use.
+_RELEASE = f"{_LOOKUP}/release"
 
 # (method, path, body, status, error). Every refusal names what was wrong in one line.
 REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
@@ -363,6 +365,10 @@ REFUSALS: list[tuple[str, str, bytes | dict | None, int, str]] = [
     ("POST", _LOOKUP, {"name": "db.balance"}, 400, "missing required field 'args'"),
     ("POST", _LOOKUP, {"args": {}}, 400, "missing required field 'name'"),
     ("POST", _LOOKUP, {"name": 1, "args": {}}, 400, "'name' is an integer, not a string"),
+    ("GET", _RELEASE, None, 405, f"{_RELEASE} takes POST, not GET"),
+    ("POST", _RELEASE, {}, 400, "missing required field 'answer_id'"),
+    ("POST", _RELEASE, {"answer_id": 1}, 400, "'answer_id' is an integer, not a string"),
+    ("POST", _RELEASE, b"[]", 400, "the body is a list, not an object"),
 ]
 
 
@@ -464,6 +470,7 @@ def test_every_route_ignores_a_field_it_does_not_know(engine):
     _ok(engine.call("POST", f"/_irimi/runs/{RUN}/end", {**_end_body(3.0), **extra}))
     status, _, body = engine.call("POST", _LOOKUP, {**LOOKUP, **extra})
     assert (status, json.loads(body)) == (404, _refused("no recorded call"))
+    _ok(engine.call("POST", _RELEASE, {"answer_id": "a1", **extra}))
     reader = engine.finish()
     [run] = reader.list_runs()
     assert (run.run_id, run.end.outcome) == (RUN, "ok")
@@ -499,7 +506,9 @@ def test_a_lookup_the_recording_answers_is_a_stamped_200_once_and_records_nothin
         finally:
             reader = engine.finish()
     answer = {"result": {"n": 1}, "error": None, "awaited": False}
-    assert (hit[0], json.loads(hit[2])) == (200, answer)
+    found = json.loads(hit[2])
+    assert isinstance(found.pop("answer_id"), str)
+    assert (hit[0], found) == (200, answer)
     for status, _, body in (again, deep):
         assert (status, json.loads(body)) == (404, _refused("no recorded call"))
     assert all(STAMP in headers for _, headers, _ in (hit, again, deep))
@@ -512,7 +521,7 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
     """A lookup whose policy raises is answered with irimi's stamped 500, a miss to the SDK."""
 
     class _Broken(ShadowPolicy):
-        def recorded_tool_call(self, name, args):
+        def recorded_tool_call(self, name, args, answer_id=None):
             raise RuntimeError("the recording is on fire")
 
     engine = _replaying(tmp_path, monkeypatch, policy=_Broken())
@@ -522,6 +531,52 @@ def test_a_policy_whose_lookup_raises_is_irimi_s_500_never_a_forward(tmp_path, m
         engine.finish()
     assert (status, json.loads(body)) == (500, INTERNAL)
     assert STAMP in headers and engine.seen == []
+
+
+class _Holds(ShadowPolicy):
+    """A policy that answers every lookup and notes each id it answers under and is released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.answered: list[str | None] = []
+        self.released: list[str] = []
+
+    def recorded_tool_call(self, name, args, answer_id=None):
+        self.answered.append(answer_id)
+        return ToolCall("tc-1", "recorded01", name, "read", "real", args, {"n": 1}, None, 1.0, 2.0)
+
+    def release_tool_call(self, answer_id):
+        self.released.append(answer_id)
+
+
+@pytest.mark.parametrize("run_id", [RUN, PROCESS_RUN, "unattributed"])
+def test_a_lookup_s_answer_is_named_by_a_fresh_id_its_release_hands_the_policy(
+    tmp_path, monkeypatch, run_id
+):
+    """Each hit is answered under an id of its own, which a release names: a stamped 204.
+
+    An id the policy never answered under is handed on too, and is no refusal."""
+    policy = _Holds()
+    engine = _replaying(tmp_path, monkeypatch, policy=policy)
+    lookup = f"/_irimi/runs/{run_id}/tool-calls/recorded"
+    try:
+        answers = [engine.call("POST", lookup, LOOKUP) for _ in range(2)]
+        ids = [json.loads(body)["answer_id"] for _, _, body in answers]
+        released = engine.call("POST", f"{lookup}/release", {"answer_id": ids[0]})
+        unknown = engine.call("POST", f"{lookup}/release", {"answer_id": "never-given"})
+    finally:
+        reader = engine.finish()
+    assert policy.answered == ids and len(set(ids)) == 2 and all(ids)
+    assert policy.released == [ids[0], "never-given"]
+    for status, headers, body in (released, unknown):
+        assert (status, body) == (204, b"")
+        assert STAMP in headers
+    assert reader.list_runs() == [] and engine.seen == [] and engine.tool_calls == []
+
+
+def test_a_release_under_an_engine_that_is_not_replaying_gives_back_nothing(engine):
+    _ok(engine.call("POST", _RELEASE, {"answer_id": "a1"}))
+    assert engine.finish().list_runs() == []
 
 
 def test_a_control_request_through_the_forward_proxy_is_answered_the_same(engine):
