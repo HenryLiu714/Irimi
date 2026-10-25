@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import errno
 import functools
 import inspect
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -115,6 +117,27 @@ def score_account(account: dict[str, Any]) -> dict[str, Any]:
 @observe.read_tool(name="crm.flaky_lookup")
 def flaky_lookup(account_id: str) -> dict[str, Any]:
     raise KeyError(account_id)
+
+
+@observe.read_tool(name="crm.read_export")
+async def read_export(name: str) -> str:
+    """Read an export back in an async read tool; a missing one raises as `open` does.
+
+    It names the bare file, so what a run records is the same on every machine."""
+    await asyncio.sleep(0)
+    path = agentkit.state_dir() / "exports" / f"{name}.csv"
+    if not path.exists():
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path.name)
+    return path.read_text()
+
+
+@observe.read_tool(name="crm.validate_score")
+def validate_score(account_id: str, score: str) -> Decimal:
+    """Raise as a validator does, with the value refused, which JSON cannot hold, in its args."""
+    value = Decimal(score)
+    if not 0 <= value <= 1:
+        raise ValueError("score out of range", value)
+    return value
 
 
 @observe.read_tool(name="crm.lookup_owner")
@@ -424,6 +447,27 @@ def enrich_accounts(scenario: str, segment: str) -> dict[str, Any]:
             flaky_lookup("acc_1")
         except KeyError as exc:
             agentkit.obs("lookup_failed", error=type(exc).__name__, key=str(exc), args=exc.args)
+        try:
+            asyncio.run(read_export("missing"))
+        except FileNotFoundError as exc:
+            agentkit.obs(
+                "export_missing",
+                error=type(exc).__name__,
+                message=str(exc),
+                errno=exc.errno,
+                strerror=exc.strerror,
+                filename=exc.filename,
+                args=exc.args,
+            )
+        try:
+            validate_score("acc_1", "1.5")
+        except ValueError as exc:
+            agentkit.obs(
+                "score_invalid",
+                message=str(exc),
+                args=exc.args,
+                arg_types=[type(arg).__name__ for arg in exc.args],
+            )
         try:
             score_account({"id": "acc_missing"})
         except KeyError as exc:

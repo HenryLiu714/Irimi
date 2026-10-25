@@ -2,6 +2,8 @@
 
 Which body ran is read from the agent's `tool` events and state, irimi's view from its store."""
 
+import errno
+import os
 from typing import cast
 
 import pytest
@@ -53,6 +55,37 @@ SEED_SMB = [
 
 # The CRM after `_touch_last_seen("acc_1")`, the write no label covers, which is real in every mode.
 TOUCHED = [("acc_1", "Acme", "smb", "2026-09-28", 0, None), *SEED[1:]]
+
+
+# `tool_raises`' async read tool's FileNotFoundError and validator's ValueError, as stored. The
+# first's filename is not among its args; the second's Decimal is held as its repr.
+NO_SUCH_FILE = os.strerror(errno.ENOENT)
+MISSING_EXPORT = ErrorInfo(
+    "builtins.FileNotFoundError",
+    f"[Errno {errno.ENOENT}] {NO_SUCH_FILE}: 'missing.csv'",
+    [errno.ENOENT, NO_SUCH_FILE],
+)
+SCORE_OUT_OF_RANGE = ErrorInfo(
+    "builtins.ValueError",
+    "('score out of range', Decimal('1.5'))",
+    ["score out of range", {REPR_KEY: "Decimal('1.5')"}],
+)
+# What the agent saw of each, run for real: bare, under shadow and beside serve.
+EXPORT_MISSING_SEEN = {
+    "event": "export_missing",
+    "error": "FileNotFoundError",
+    "message": MISSING_EXPORT.message,
+    "errno": errno.ENOENT,
+    "strerror": NO_SUCH_FILE,
+    "filename": "missing.csv",
+    "args": [errno.ENOENT, NO_SUCH_FILE],
+}
+SCORE_INVALID_SEEN = {
+    "event": "score_invalid",
+    "message": SCORE_OUT_OF_RANGE.message,
+    "args": ["score out of range", "Decimal('1.5')"],
+    "arg_types": ["str", "Decimal"],
+}
 
 
 def rows(result):
@@ -291,6 +324,8 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
             ("'acc_1'", ["acc_1"])
         ]
         assert [e["args"] for e in result.events("score_failed")] == [["acc_missing"]]
+        assert result.events("export_missing", with_time=False) == [EXPORT_MISSING_SEEN]
+        assert result.events("score_invalid", with_time=False) == [SCORE_INVALID_SEEN]
     ends = shadow.events("run.end")
     assert [(e["outcome"], e["error"]) for e in ends] == [("error", "KeyError")]
     # Stored under the exception's full name.
@@ -303,6 +338,8 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
     assert [(c.name, c.result, c.error) for c in tool_calls(shadow)] == [
         ("crm.connect_with", None, connect_error(shadow)),
         ("crm.flaky_lookup", None, ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        ("crm.read_export", None, MISSING_EXPORT),
+        ("crm.validate_score", None, SCORE_OUT_OF_RANGE),
         (
             "crm.score_account",
             None,
@@ -312,6 +349,8 @@ def test_a_raising_read_tool_ends_the_run_in_error_under_shadow(run_workflow, mo
     assert shadow.tool_call_lines() == [
         "tool-real     read      crm.connect_with -> raised builtins.ConnectionError",
         "tool-real     read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-real     read      crm.read_export -> raised builtins.FileNotFoundError",
+        "tool-real     read      crm.validate_score -> raised builtins.ValueError",
         "tool-real     read      crm.score_account -> raised builtins.KeyError",
     ]
     # Bare, the SDK is inactive: no run is opened at all.
@@ -817,14 +856,28 @@ def test_tool_raises_replayed_raises_what_was_recorded_and_the_agent_catches_it_
     assert replay.events("score_failed", with_time=False) == [
         {"event": "score_failed", "args": ["acc_missing"]}
     ]
+    # The async tool's FileNotFoundError gets its errno and strerror back from its args, and no
+    # filename, which an OSError keeps outside its args; its message still names the file.
+    assert replay.events("export_missing", with_time=False) == [
+        {**EXPORT_MISSING_SEEN, "filename": None}
+    ]
+    # Args holding a repr cannot be rebuilt, so the ValueError's args are its message alone; it is
+    # still a ValueError, caught as one.
+    assert replay.events("score_invalid", with_time=False) == [
+        {**SCORE_INVALID_SEEN, "args": [SCORE_OUT_OF_RANGE.message], "arg_types": ["str"]}
+    ]
     assert replay.tool_call_lines() == [
         "tool-recorded read      crm.connect_with -> raised builtins.ConnectionError",
         "tool-recorded read      crm.flaky_lookup -> raised builtins.KeyError",
+        "tool-recorded read      crm.read_export -> raised builtins.FileNotFoundError",
+        "tool-recorded read      crm.validate_score -> raised builtins.ValueError",
         "tool-recorded read      crm.score_account -> raised builtins.KeyError",
     ]
     assert [(c.name, c.error) for c in replayed_calls(replay)] == [
         ("crm.connect_with", connect_error(recorded)),
         ("crm.flaky_lookup", ErrorInfo("builtins.KeyError", "'acc_1'", ["acc_1"])),
+        ("crm.read_export", MISSING_EXPORT),
+        ("crm.validate_score", SCORE_OUT_OF_RANGE),
         ("crm.score_account", ErrorInfo("builtins.KeyError", "'acc_missing'", ["acc_missing"])),
     ]
     # The run ends on the recorded type: `irimi replay` ends it with what the child said it raised.

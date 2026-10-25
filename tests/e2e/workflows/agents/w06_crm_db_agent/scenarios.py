@@ -49,8 +49,9 @@ WORKFLOW = Workflow(
             ("tool_raises",),
             doc="a read tool raises quoting a DSN, its key across the cut a trace makes of the "
             "message, given options whose repr holds a key across the cut the SDK makes of a "
-            "repr, and is caught; another raises and is caught; a third raises and ends the run "
-            "in error; the agent reads each KeyError's args",
+            "repr, and is caught; another raises and is caught; an async one raises an OSError, "
+            "and another a ValueError whose args hold a Decimal, each caught; a last raises and "
+            "ends the run in error; the agent reads each error's args",
         ),
         "decoration_errors": Scenario(
             ("decoration_errors",),
