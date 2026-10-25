@@ -83,16 +83,18 @@ def _gzip(body: bytes, limit: int) -> tuple[bytes, bool]:
     member that start none are ignored, as urllib3 ignores them.
     """
     view = memoryview(body)
-    out = bytearray()
+    # `getvalue` hands over BytesIO's buffer uncopied; `bytes(bytearray)` would copy the cap.
+    out = io.BytesIO()
+    size = 0
     inflater = zlib.decompressobj(_GZIP_WBITS)
     at = 0
     while at < len(body):
         step = view[at : at + _GZIP_STEP]
         # One byte past the room tells a cut from a fit, and zlib reads a limit of 0 as none.
-        out += inflater.decompress(step, limit - len(out) + 1)
-        if len(out) > limit:
-            del out[limit:]
-            return bytes(out), True
+        size += out.write(inflater.decompress(step, limit - size + 1))
+        if size > limit:
+            out.truncate(limit)
+            return out.getvalue(), True
         if not inflater.eof:
             at += len(step)
             continue
@@ -101,7 +103,7 @@ def _gzip(body: bytes, limit: int) -> tuple[bytes, bool]:
             break
         at = found.start()
         inflater = zlib.decompressobj(_GZIP_WBITS)
-    return bytes(out), not inflater.eof
+    return out.getvalue(), not inflater.eof
 
 
 def _deflate(body: bytes, limit: int) -> tuple[bytes, bool]:

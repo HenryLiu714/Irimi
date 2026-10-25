@@ -332,8 +332,10 @@ def test_aws_chunked_is_undone_first_wherever_the_list_names_it(content_encoding
     assert decode_body(framed, content_encoding) == Decoded(b"zipped", False)
 
 
-def test_an_aws_chunked_body_past_the_cap_keeps_its_start(cap_of_10_lines):
+def test_an_aws_chunked_body_past_the_cap_keeps_its_start_and_one_at_it_is_whole(cap_of_10_lines):
+    """Chunks that fill the cap exactly, then the last chunk, are the whole body."""
     assert decode_body(_aws_chunked(LINE * 6, LINE * 6), "aws-chunked") == Decoded(LINE * 10, True)
+    assert decode_body(_aws_chunked(LINE * 4, LINE * 6), "aws-chunked") == Decoded(LINE * 10, False)
 
 
 @pytest.mark.parametrize(
@@ -416,6 +418,24 @@ def test_a_bomb_never_holds_more_than_twice_the_cap(bombs, content_encoding):
         tracemalloc.stop()
     assert body == Decoded(b"", True)
     assert peak < 2 * CAP + 4 * MIB, peak
+
+
+def test_a_gzip_bomb_holds_less_than_twice_the_cap_however_its_output_grows(monkeypatch):
+    """gzip's output grows in steps, with room to spare; it is handed over without a copy.
+
+    A `bytearray` copied out at the end holds its growth room beside the copy: 2.125 caps."""
+    cap = 8 * MIB
+    monkeypatch.setattr(decoding, "MAX_DECODED_BODY", cap)
+    message = tutils.tresp(content=None, headers=((b"content-encoding", b"gzip"),))
+    message.raw_content = gzip.compress(bytes(2 * cap), compresslevel=9)
+    tracemalloc.start()
+    try:
+        body = mitm._body(message)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert body == Decoded(b"", True)
+    assert peak < 2 * cap, peak
 
 
 def test_a_stacked_body_holds_at_most_three_times_the_cap(monkeypatch):
