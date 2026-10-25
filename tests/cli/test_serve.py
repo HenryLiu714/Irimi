@@ -409,7 +409,9 @@ def test_a_run_s_writes_and_keys_are_dropped_once_its_end_is_on_disk(tmp_path, m
 
 
 def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, caplog):
-    """A raising `on_run_ended` logs one warning naming its type, and the store writes on."""
+    """A raising `on_run_ended`, at an end or late, logs a warning naming its type.
+
+    The store writes on, the late event included."""
     from irimi.record.store.reader import StoreReader
     from irimi.record.store.writer import DirectoryStore
 
@@ -421,13 +423,16 @@ def test_a_callback_that_raises_is_logged_and_the_store_carries_on(tmp_path, cap
     store = DirectoryStore(root, b"k" * 32, ended)
     store.start_run(builders.run_record("r1"))
     store.end_run("r1", 20.0, "ok")
+    store.record(builders.exchange(run_id="r1"))
     store.record(builders.exchange(run_id="r2"))
     store.close()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert warnings == ["irimi: the end-of-run callback raised ValueError"]
-    end = StoreReader(root).load_run("r1").record.end
-    assert end is not None
-    assert end.outcome == "ok"
+    # The end's call, then the late event's, which is still written and counted no drop.
+    assert warnings == ["irimi: the end-of-run callback raised ValueError"] * 2
+    stored = StoreReader(root).load_run("r1")
+    assert stored.record.end is not None
+    assert stored.record.end.outcome == "ok"
+    assert len(stored.events) == 1
     assert len(StoreReader(root).load_run("r2").events) == 1
     assert store.stats().dropped == 0
 

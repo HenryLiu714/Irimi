@@ -149,6 +149,10 @@ class _OpenRun:
     dropped_before: int = 0
     dropped_written: int = 0  # the `dropped_events` its run.json last said
 
+    def ended(self) -> bool:
+        """Return True when the run's run.json holds an end."""
+        return self.record is not None and self.record.end is not None
+
 
 class DirectoryStore:
     """A RunStore writing the layout `docs/trace-format.md` describes under `root`."""
@@ -359,7 +363,7 @@ class DirectoryStore:
         run = self._run_dir(record.run_id)
         # A start after the run's end would overwrite its end, so it is dropped and counted on
         # the store alone; the run lost nothing. A `header` run has no end, so a start rewrites it.
-        if run.record is not None and run.record.end is not None:
+        if run.ended():
             self._drop(UNATTRIBUTED, "a start was posted for a run that has already ended")
             self._forget(record.run_id, run)
             return
@@ -428,7 +432,7 @@ class DirectoryStore:
         run.next_seq += 1
         with self._lock:
             self._written += 1
-        if run.record is not None and run.record.end is not None:
+        if run.ended():
             self._announce(event.run_id, run.next_seq - 1, late=True)
 
     def _prepare(self, event: Exchange | ToolCall | TelemetrySeen, *, bad_run_id: bool) -> Event:
