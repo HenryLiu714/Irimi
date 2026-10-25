@@ -609,6 +609,95 @@ def test_late_events_queued_together_print_their_run_again_once(tmp_path, monkey
     assert held.asked == ["r0", "r1", "r1", "r2"]
 
 
+def test_a_run_printed_late_prints_late_again_at_most_once_per_late_every_s(
+    tmp_path, monkeypatch, capsys
+):
+    """A late event soon after its run printed late is held, and the stop prints the newest.
+
+    So an agent naming an ended run on every request costs a read-back per LATE_EVERY_S, not per
+    request, and the run's last block is still the run whole."""
+    from irimi.record.store.reader import StoreReader
+
+    monkeypatch.setattr(serve, "LATE_EVERY_S", 3600.0)
+    asked: list[str] = []
+    real = compose.load_stored_run
+
+    def counted(root, run_id, **kwargs):
+        asked.append(run_id)
+        return real(root, run_id, **kwargs)
+
+    monkeypatch.setattr(compose, "load_stored_run", counted)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    with output.summaries(), run:
+        run.store.start_run(builders.run_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+        run.store.record(builders.exchange(run_id="r1"))
+        eventually(lambda: len(asked) == 2, timeout=5)
+        for written in (2, 3, 4):
+            run.store.record(builders.exchange(run_id="r1"))
+            _written(run, written)
+        time.sleep(0.3)
+        assert len(asked) == 2, "a late event printed again inside LATE_EVERY_S"
+    reader = StoreReader(output.store_root)
+
+    def block(events: int) -> list[str]:
+        stored = reader.load_run("r1")
+        return summary_lines(RunView(stored.record, stored.events[:events]), run.index)
+
+    assert asked == ["r1"] * 3
+    assert capsys.readouterr().out.splitlines() == [
+        "--- run r1 ---",
+        *block(0),
+        "--- run r1 (late) ---",
+        *block(1),
+        "--- run r1 (late) ---",
+        *block(4),
+    ]
+
+
+def test_a_held_late_summary_prints_once_late_every_s_has_passed(tmp_path, monkeypatch, capsys):
+    """A late summary held back prints when its run's LATE_EVERY_S is up, before any stop."""
+    monkeypatch.setattr(serve, "LATE_EVERY_S", 0.2)
+    output = serve._ServeOutput(tmp_path / "store")
+    run = _served(tmp_path, monkeypatch, output)
+    printed: list[str] = []
+
+    def late_blocks() -> int:
+        printed.extend(capsys.readouterr().out.splitlines())
+        return printed.count("--- run r1 (late) ---")
+
+    with output.summaries(), run:
+        run.store.start_run(builders.run_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+        run.store.record(builders.exchange(run_id="r1"))
+        eventually(lambda: late_blocks() == 1, timeout=5)
+        run.store.record(builders.exchange(run_id="r1"))
+        eventually(lambda: late_blocks() == 2, timeout=5)
+    assert printed.count("--- run r1 ---") == 1
+    assert printed[-1].startswith("  2 exchanges · ")
+
+
+def test_a_late_summary_is_dropped_only_when_a_later_one_of_its_run_follows():
+    """`_newest` keeps every end, and a late summary unless the same run's next one follows."""
+    index = servicemaps.MapIndex()
+    batch = [
+        (index, "r1", 1, True),
+        (index, "r2", 1, True),
+        (index, "r1", 2, False),
+        (index, "r1", 3, True),
+        (index, "r2", 2, False),
+        (index, "r2", 3, False),
+        None,
+    ]
+    assert serve._newest(batch) == [
+        (index, "r1", 2, False),
+        (index, "r1", 3, True),
+        (index, "r2", 2, False),
+        (index, "r2", 3, False),
+    ]
+
+
 def test_a_summary_that_cannot_be_printed_is_one_warning_and_the_next_still_prints(
     tmp_path, monkeypatch, capsys, caplog
 ):

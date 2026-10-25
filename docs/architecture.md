@@ -59,8 +59,8 @@ endpoint.
 
 When the store reports a run ended, the composition root drops that run's write log and
 idempotency entries, then (under serve) queues its summary. The store reports the run again after
-each event it stores in the run after its end, and serve prints the run again, marked late. A run
-is never visible to another.
+each event it stores in the run after its end; that report drops nothing, and serve prints the run
+again, marked late, at most once a second per run. A run is never visible to another.
 
 ## Threads
 

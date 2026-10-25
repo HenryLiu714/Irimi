@@ -6,7 +6,7 @@ import logging
 import queue
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -29,6 +29,11 @@ SERVE_POLL_S = 0.1
 # How long serve's stop gives its store to write what is queued and its printer the summaries left,
 # together, from when the store starts closing: the store's own bound, so a stop takes no longer.
 SUMMARIES_TIMEOUT_S = writer.CLOSE_TIMEOUT_S
+
+# A run printed late prints late again at most this often, its newest summary held until then and
+# printed by the stop at the latest. Each late block reads the whole run back, so an agent naming
+# an ended run on every request would otherwise cost a read of the run per request.
+LATE_EVERY_S = 1.0
 
 # An ended run's summary to print: the maps, the run id, its last `seq`, and whether it is late.
 _Ended = tuple[MapIndex, str, int | None, bool]
@@ -163,15 +168,28 @@ class _ServeOutput:
                 _print(lines, err)
 
     def _print_summaries(self) -> None:
+        held: dict[str, _Ended] = {}  # each run's newest late summary, until its `due`
+        due: dict[str, float] = {}  # when a run printed late may print late again
         stopped = False
         while not stopped:
+            soonest = min((due.get(run_id, 0.0) for run_id in held), default=None)
+            wait = None if soonest is None else max(0.0, soonest - monotonic())
             # Everything queued meanwhile is taken at once, so a burst of late events prints once.
-            batch = [self._ended.get()]
+            batch: list[_Ended | None] = []
             with contextlib.suppress(queue.Empty):
+                batch.append(self._ended.get(timeout=wait))
                 while batch[-1] is not None:
                     batch.append(self._ended.get_nowait())
-            stopped = batch[-1] is None
-            for index, run_id, last_seq, late in _newest(batch):
+            stopped = bool(batch) and batch[-1] is None
+            waited, held = [*held.values()], {}
+            now = monotonic()
+            for run_id in [run_id for run_id, at in due.items() if at <= now]:
+                del due[run_id]
+            for ended in _newest([*waited, *batch]):
+                index, run_id, last_seq, late = ended
+                if late and not stopped and run_id in due:
+                    held[run_id] = ended
+                    continue
                 try:
                     self._print_summary(index, run_id, last_seq, late)
                 except Exception as exc:
@@ -181,6 +199,9 @@ class _ServeOutput:
                         run_id,
                         type(exc).__name__,
                     )
+                if late:
+                    # Timed from the block's end, so a slow read-back still rests between reads.
+                    due[run_id] = monotonic() + LATE_EVERY_S
 
     def _print_summary(
         self, index: MapIndex, run_id: str, last_seq: int | None, late: bool
@@ -201,7 +222,7 @@ class _ServeOutput:
         self._say_summary([header, *summary])
 
 
-def _newest(batch: list[_Ended | None]) -> list[_Ended]:
+def _newest(batch: Sequence[_Ended | None]) -> list[_Ended]:
     """Return the summaries in `batch` in order, each late one dropped when its run's next follows.
 
     The next one prints the run whole too, through a later `seq`.
