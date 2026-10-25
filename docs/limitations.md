@@ -17,6 +17,10 @@ all is listed under [known bypasses](security.md#known-bypasses).
   from its mutations ([service-maps.md](service-maps.md#limits)).
 - **The overlay edits bodies, not headers.** Pagination or caching carried in headers (`Link`,
   `ETag`) is left as the service sent it.
+- **The overlay never edits a streamed read**, or one whose body is cut at irimi's decoding cap. A
+  `text/event-stream` answer reaches the agent as it arrives, so a read that streams after a faked
+  write it would have shown does not show it. It is recorded `overlay: partial`, and the
+  summary's `↳` line says it did not show the write.
 - **No overlay for tools.** A read tool after a write tool's fake reads what was there before;
   nothing applies the fake's write to it.
 - **The overlay models what its effects name.** A read the overlay could express only in part is

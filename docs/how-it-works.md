@@ -43,8 +43,9 @@ flowchart LR
      with the service's own error;
    - any other write is faked, from its fixture or as an echo.
 3. **Answer.** A forwarded read's body passes the overlay, which applies the run's faked writes. A
-   `text/event-stream` answer streams through chunk by chunk and is never edited. Every answer
-   irimi decided is stamped `Irimi-Answered-By`.
+   `text/event-stream` answer streams through chunk by chunk and is never edited; it is recorded
+   `overlay: partial` when the run has a faked write it would have shown. Every answer irimi
+   decided is stamped `Irimi-Answered-By`.
 4. **Record.** The exchange, and any check read irimi made for it, go to the trace store, which
    redacts them on its own thread. A faked write joins its run's write log.
 

@@ -324,20 +324,21 @@ class ShadowSession:
     def complete(self, plan: Plan, received: Received) -> Completed:
         """Return the exchange a planned request became, and what to send instead of its answer.
 
-        A streamed response is already sent, so it is not overlaid. A body cut at the cap is not
-        observed or overlaid: the agent gets the service's bytes and only the recording is short.
+        A streamed answer is already sent and a cut one is recorded short, so neither is observed
+        or edited: the agent gets the service's bytes, and a read is recorded `partial` when the
+        run has a write it would have shown.
         """
         upstream = received.response
         assert upstream is not None
         flags = plan.flags
         if received.cut is not None and received.cut not in flags:
             flags += (received.cut,)
-        cut = received.cut is not None
+        as_sent = received.streamed or received.cut is not None
         cls = plan.classification
         decision = plan.decision
         # Later faked writes sort after the real values seen here; a target's read counts too,
         # since its values are what the agent sees.
-        if not received.streamed and not cut and cls.kind == "read":
+        if not as_sent and cls.kind == "read":
             self._observe_read(cls.service, upstream.body)
         answered_by = plan.answered_by
         response = upstream
@@ -347,18 +348,16 @@ class ShadowSession:
             # Recorded without the stamp. A replayed read keeps the recorded read's fidelity.
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
+        # A target's read is not a Forward, so the overlay never touches it.
+        elif isinstance(decision, Forward) and as_sent:
+            overlay = self._unedited(plan, decision, upstream)
         elif isinstance(decision, Forward):
-            # A target's read is not a Forward, so the overlay never touches it.
-            if not received.streamed and cls.kind == "read" and self.write_log.for_run(plan.run_id):
-                overlaid = self._overlaid(plan, decision, upstream)
-                if cut:
-                    # `partial` when the run has a write this read would have shown.
-                    overlay = None if overlaid.fidelity is None else "partial"
-                else:
-                    response, overlay = overlaid.response, overlaid.fidelity
-                if response is not upstream:
-                    # The bytes are no longer the service's, so the answer must carry a header.
-                    answered_by = "overlay"
+            overlaid = self._overlaid(plan, decision, upstream)
+            if overlaid is not None:
+                response, overlay = overlaid.response, overlaid.fidelity
+            if response is not upstream:
+                # The bytes are no longer the service's, so the answer must carry a header.
+                answered_by = "overlay"
         exchange = self._exchange(
             plan, response, answered_by, flags, overlay, received.stream_chunks
         )
@@ -374,8 +373,9 @@ class ShadowSession:
     def fail(self, plan: Plan, received: Received | None) -> Exchange:
         """Return the exchange for a connection that failed before an answer arrived.
 
-        `received` is what of a streamed answer reached the agent, or None. A live forward is
-        flagged `upstream-error`, a target `target-failed`; the plan's own flags are always kept.
+        `received` is what of a streamed answer reached the agent, or None; a streamed read is
+        recorded `partial` when the run has a write it would have shown. A live forward is flagged
+        `upstream-error`, a target `target-failed`; the plan's own flags are always kept.
         """
         flags = plan.flags
         if plan.answered_by == "live":
@@ -388,6 +388,8 @@ class ShadowSession:
             response, stream_chunks = received.response, received.stream_chunks
             flags += (Flag.STREAM_TRUNCATED,)
         overlay = plan.decision.overlay if isinstance(plan.decision, Respond) else None
+        if isinstance(plan.decision, Forward) and response is not None:
+            overlay = self._unedited(plan, plan.decision, response)
         return self._exchange(plan, response, plan.answered_by, flags, overlay, stream_chunks)
 
     def record(self, exchange: Exchange) -> None:
@@ -449,15 +451,30 @@ class ShadowSession:
         except Exception:
             logger.exception("irimi: the policy could not observe a read")
 
-    def _overlaid(self, plan: Plan, decision: Forward, upstream: Response) -> Overlaid:
-        """Return the overlay's answer for a live read, or the upstream one if it raised."""
+    def _overlaid(self, plan: Plan, decision: Forward, upstream: Response) -> Overlaid | None:
+        """Return the overlay's answer for a live read, or the upstream one if it raised.
+
+        None when the request is not a read or its run has no faked write: nothing to show.
+        """
+        writes = self.write_log.for_run(plan.run_id)
+        if plan.classification.kind != "read" or not writes:
+            return None
         try:
-            writes = self.write_log.for_run(plan.run_id)
             removed = decision.translation.removed if decision.translation is not None else None
             return self.overlay(writes, plan.classification, plan.request, upstream, removed)
         except Exception:
             logger.exception("irimi: the overlay raised; the agent gets the upstream read")
             return Overlaid(upstream, "partial")
+
+    def _unedited(
+        self, plan: Plan, decision: Forward, upstream: Response
+    ) -> OverlayCoverage | None:
+        """Return the fidelity of a live read the agent got as sent; never an edit of it.
+
+        `partial` when the run has a write the read would have shown, else None.
+        """
+        overlaid = self._overlaid(plan, decision, upstream)
+        return None if overlaid is None or overlaid.fidelity is None else "partial"
 
 
 def _probe_target(target: Target) -> None:
