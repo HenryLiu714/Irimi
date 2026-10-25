@@ -135,8 +135,10 @@ agent never see a placeholder.
 - **Streams.** A streamed body is redacted joined, never chunk by chunk, so a secret split across
   two chunks is still found on its line. A model's streamed text is joined too: the deltas of each
   Anthropic content block, OpenAI chat choice or tool call, and OpenAI Responses item are joined in
-  order, and a secret shape that runs across several is replaced whole. Its placeholder goes in the
-  first delta that holds part of it, and its text is cut from the others; each event keeps its line.
+  order, and each secret shape the joined text holds is replaced whole, also one that runs across
+  several deltas or that only an earlier delta's text lets start (a `%20`, an escaped letter). Its
+  placeholder goes in the first delta that holds part of it, and its text is cut from the others;
+  each event keeps its line.
 - **Cuts never split a secret.** A body is redacted whole and only then cut to its stored size.
   Text the SDK must shorten before irimi can redact it (trigger and tool names, captured `repr`s,
   error messages) is cut at its limit, or earlier where a secret's shape crosses the limit.

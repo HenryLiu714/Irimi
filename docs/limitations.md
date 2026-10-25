@@ -58,8 +58,7 @@ all is listed under [known bypasses](security.md#known-bypasses).
   are joined before shapes are matched. Any other delta (a thinking block's, a refusal's, another
   provider's format) is redacted one SSE event at a time, so a secret it sends across several
   events reaches disk in pieces. Joined text is matched for shapes only, so a secret key's value
-  that a tool call's arguments send in pieces is stored as sent, and so is the rest of a key that
-  follows a JSON `\u` escape of a letter (`"\u0041sk_live_…"`) and runs on into the next delta.
+  that a tool call's arguments send in pieces is stored as sent.
 - **Business data is not redacted.** Customers, amounts and messages are stored as sent; delete
   old runs with `irimi runs prune`.
 - **The key is per install.** One secret gets different placeholders on two machines, so recordings

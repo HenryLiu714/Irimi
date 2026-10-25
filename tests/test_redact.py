@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import stat
 import subprocess
 import sys
@@ -425,6 +426,34 @@ def test_only_an_escaped_letter_or_digit_glues_to_the_shape_after_it():
         for spelling in (f"{code:04x}", f"{code:04X}"):
             glued = secret_shapes.shapes_after_escaped_letters(f'"\\u{spelling}{LIVE_KEY}"')
             assert glued == ({LIVE_KEY} if chr(code).isalnum() else set()), spelling
+
+
+def test_escaped_letters_says_where_each_decoded_string_has_a_letter_its_json_escapes():
+    """Offsets count decoded characters: an escape is one, a surrogate pair's two escapes one.
+
+    An escaped backslash before `u0041` escapes no letter, a key counts as any string, and two
+    strings that decode alike share their offsets."""
+    text = (
+        '{"a": "x\\u0041y", "b": "\\\\u0041", "c": "\\ud83d\\ude00\\n\\u0062", '
+        '"\\u0064": 1, "e": "xA\\u0079", "f": "\\u00e9"}'
+    )
+    assert secret_shapes.escaped_letters(text) == {
+        "xAy": {1, 2},
+        "\U0001f600\nb": {2},
+        "d": {0},
+    }
+    assert secret_shapes.escaped_letters('{"a": "xAy", "b": "\\n\\u00e9"}') == {}
+
+
+def test_shape_spans_finds_a_shape_after_an_escaped_letter_only_where_it_is_told_one_is():
+    glued = "A" + LIVE_KEY + " " + LIVE_KEY
+    after = len("A" + LIVE_KEY + " ")
+    assert secret_shapes.shape_spans(glued) == [(after, after + len(LIVE_KEY))]
+    assert secret_shapes.shape_spans(glued, [0]) == [
+        (after, after + len(LIVE_KEY)),
+        (1, 1 + len(LIVE_KEY)),
+    ]
+    assert secret_shapes.shape_spans(glued, [len(glued) - 1]) == [(after, after + len(LIVE_KEY))]
 
 
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
@@ -1108,6 +1137,75 @@ def test_a_shape_after_an_escaped_letter_that_runs_into_a_split_key_is_hidden_wi
     sent = f"data: {first}\n\n".encode() + _model_stream([_chat_delta("abc123 y")])
     stored = [_chat_delta("A" + _ph(glued + "abc123")), _chat_delta(" y")]
     assert _response_body(sent, SSE) == _model_stream(stored, compact=(0, 1))
+
+
+def _content_events(raws: list[str]) -> bytes:
+    """An OpenAI chat stream whose pieces of content are `raws`, each spelled as raw JSON."""
+    return "".join(
+        f'data: {{"choices":[{{"index":0,"delta":{{"content":"{raw}"}}}}]}}\n\n' for raw in raws
+    ).encode()
+
+
+def _stored_text(body: bytes) -> str:
+    """The content an OpenAI chat stream's stored events join into, read without `stream_deltas`."""
+    events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: ")]
+    return "".join(event["choices"][0]["delta"]["content"] for event in events)
+
+
+# A raw JSON string's characters, each as it is spelled: an escape is one, a surrogate pair's two.
+_RAW_CHARACTER = re.compile(r"\\ud8[0-9a-f]{2}\\ud[c-f][0-9a-f]{2}|\\u[0-9A-Fa-f]{4}|\\.|.")
+
+
+@pytest.mark.parametrize(
+    "before",
+    ["", "x ", "(", "%20", "a\\\\n", "\\n", "\\u0041", "q \\u0037", "\\u00e9", "\\ud83d\\ude00"],
+)
+@pytest.mark.parametrize("after", ["", " y", "y", "Z9", "-"])
+def test_a_text_sent_in_two_pieces_is_stored_as_it_is_sent_whole_wherever_it_is_cut(before, after):
+    """Wherever a stream cuts its text, the stored pieces join into what one piece is stored as.
+
+    So no piece keeps a key's tail, even where what lets the key start (a separator, a `%20`, an
+    escaped letter) is in the piece before, and a key whole in one piece is stored as any is."""
+    raw = [*_RAW_CHARACTER.findall(before), *LIVE_KEY, *_RAW_CHARACTER.findall(after)]
+    whole = _stored_text(_response_body(_content_events(["".join(raw)]), SSE))
+    assert LIVE_KEY not in whole
+    for cut in range(1, len(raw)):
+        sent = _content_events(["".join(raw[:cut]), "".join(raw[cut:])])
+        assert _stored_text(_response_body(sent, SSE)) == whole, cut
+
+
+def test_a_key_after_an_escaped_letter_is_hidden_whole_wherever_the_stream_cuts_it():
+    """The shape rule lets a key follow a letter its JSON escapes, in the pieces it is sent in too.
+
+    The key goes, as one placeholder, in the piece it starts in, after the escaped letter."""
+    sent = ["Key: ", "x \\u0041", LIVE_KEY[:9], LIVE_KEY[9:] + " y"]
+    stored = ["Key: ", "x \\u0041", _ph(LIVE_KEY), " y"]
+    assert _response_body(_content_events(sent), SSE) == _content_events(stored)
+    sent = ["\\u0041" + LIVE_KEY[:9], LIVE_KEY[9:] + " y"]
+    stored = ["A" + _ph(LIVE_KEY), " y"]
+    assert _response_body(_content_events(sent), SSE) == _content_events(stored)
+
+
+def test_a_key_a_piece_shows_alone_is_hidden_in_a_piece_a_split_key_touches_too():
+    """A piece's own keys are hidden in it as its event's walk hides them, beside a split key.
+
+    Here the piece's first key reads glued to the piece before once joined, so only the piece's
+    own shapes find it."""
+    sent = ["q", f"{LIVE_KEY} sk_live_", "zz9 b"]
+    stored = ["q", f"{_ph(LIVE_KEY)} {_ph(STRIPE_LIVE + 'zz9')}", " b"]
+    assert _response_body(_content_events(sent), SSE) == _content_events(stored)
+
+
+def test_a_placeholder_does_not_make_the_text_after_it_a_key():
+    """A key the joined text holds is hidden as a JSON body hides it, and the walk ends there.
+
+    The text after the key is glued to it as sent, so it is no key, whichever piece it is in."""
+    glued = AWS + "ABCDEFGHIJKLMNOP" + LIVE_KEY
+    as_json = json.loads(_body(json.dumps([glued]).encode(), JSON))[0]
+    assert as_json == _ph(AWS + "ABCDEFGHIJKLMNOP") + LIVE_KEY
+    for cut in (0, 5, 22):
+        sent = _model_stream([_chat_delta(glued[:cut]), _chat_delta(glued[cut:])])
+        assert _stored_text(_response_body(sent, SSE)) == as_json, cut
 
 
 def test_a_piece_in_an_event_of_several_data_lines_is_joined_with_the_rest_of_its_text():
