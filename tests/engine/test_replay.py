@@ -259,10 +259,12 @@ def test_a_replayed_stream_is_recorded_with_its_recorded_chunks_and_replays_agai
     assert replay_stubs.llm.seen == []
 
 
-def test_an_answer_sent_without_its_body_is_recorded_without_its_chunks(home, maps, replay_stubs):
-    """An answer's chunks are recorded only while they split what was sent: a HEAD's has no body.
+def test_an_answer_is_recorded_with_its_chunks_only_while_they_split_the_body_sent(
+    home, maps, replay_stubs
+):
+    """A HEAD's answer goes without its body, and a recording's chunks may not split its own.
 
-    A policy that answers with a stream's chunks, as a replay does, decides both requests."""
+    A policy that answers with a stream's chunks, as a replay does, decides every request."""
     stripe, _ = replay_stubs
     sse = Response(200, (("content-type", "text/event-stream"),), b"data: 1\n\ndata: 2\n\n")
 
@@ -270,7 +272,8 @@ def test_an_answer_sent_without_its_body_is_recorded_without_its_chunks(home, ma
         name = "streams"
 
         def decide(self, request, classification, write_log=(), run_id="", target=None):
-            return Decided(Respond(sse, "recording", stream_chunks=(9, 9)))
+            chunks = (9, 8) if request.path.endswith("ch_SHORT") else (9, 9)
+            return Decided(Respond(sse, "recording", stream_chunks=chunks))
 
         def observe_read(self, service, body):
             pass
@@ -279,11 +282,13 @@ def test_an_answer_sent_without_its_body_is_recorded_without_its_chunks(home, ma
     try:
         assert _charge(session, stripe)[2] == sse.body
         session.call("HEAD", f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1")
+        assert session.call("GET", f"http://127.0.0.1:{stripe}/v1/charges/ch_SHORT")[2] == sse.body
     finally:
         session.stop()
     assert [(ex.request.method, ex.stream_chunks) for ex in session.seen] == [
         ("GET", (9, 9)),
         ("HEAD", ()),
+        ("GET", ()),
     ]
     assert replay_stubs.stripe.seen == []
 

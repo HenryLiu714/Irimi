@@ -346,12 +346,14 @@ class ShadowSession:
         send: Response | None = None
         stream_chunks = received.stream_chunks
         if isinstance(decision, Respond):
-            # Recorded without the stamp. A replayed read keeps the recorded read's fidelity, and
-            # a replayed stream its chunks if its body was sent as decided (a HEAD's is not).
+            # Recorded without the stamp. A replayed read keeps the recorded read's fidelity, and a
+            # replayed stream its chunks while they split the body sent: a HEAD's goes empty, and
+            # chunks read off disk may not add up.
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
-            if response.body == decision.response.body:
-                stream_chunks = decision.stream_chunks
+            chunks = decision.stream_chunks
+            if response.body == decision.response.body and sum(chunks) == len(response.body):
+                stream_chunks = chunks
         # A target's read is not a Forward, so the overlay never touches it.
         elif isinstance(decision, Forward) and as_sent:
             overlay = self._unedited(plan, decision, upstream)
