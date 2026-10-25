@@ -65,9 +65,10 @@ run, irimi prints `stopped · N exchanges not in any run: irimi runs show unattr
 - **Binding.** irimi listens on `127.0.0.1` unless `--bind` names another address. A wider bind
   prints a warning: the control endpoint has no authentication, so bind wider only on a network
   that holds the agent and nothing else ([security.md](security.md#trust-boundaries)).
-- **Stopping.** SIGINT and SIGTERM stop the proxy, write what is queued (for up to 10 seconds) and
-  exit 0. A run whose end arrived before the signal still prints its summary, for up to 10 seconds
-  more; a run still open is left `incomplete`. A proxy that stops on its own exits 2.
+- **Stopping.** SIGINT and SIGTERM stop the proxy, write what is queued and print the summaries
+  left (for up to 10 seconds in all) and exit 0. A run whose end arrived before the signal still
+  prints its summary; if time runs out first, serve warns on stderr and `irimi runs list` has the
+  run. A run still open is left `incomplete`. A proxy that stops on its own exits 2.
 - **One serve per store.** A serve holds `serve.lock` in its store while it runs, and a second
   serve on the same store exits 2 at once. A supervisor's restart succeeds once the old process
   has exited. `irimi runs rm` and `runs prune` are refused while a serve, or any other irimi

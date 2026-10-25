@@ -35,6 +35,13 @@ from tests.support.servers import stop_server
 from tests.support.waiting import eventually
 
 
+@pytest.fixture(autouse=True)
+def _no_printer_left():
+    """Every way serve stops, its summaries printer has stopped by the time it returns."""
+    yield
+    assert "irimi-summaries" not in {t.name for t in threading.enumerate() if t.is_alive()}
+
+
 def _config(tmp_path, monkeypatch, listen_host="127.0.0.1"):
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
     p = ca.ca_paths()
@@ -562,7 +569,9 @@ def test_serve_waits_its_time_for_a_summary_still_being_read_back_then_says_so(
 def test_serve_stops_though_its_printer_is_stuck_writing_to_a_pipe_no_one_reads(
     tmp_path, monkeypatch, capsys
 ):
-    """A printer stuck writing a summary holds serve's lock, and serve still stops and warns."""
+    """A printer stuck writing a summary holds serve's lock, and serve's stop still ends and warns.
+
+    Its store is closed and its lock released by then; only the process's exit waits on the pipe."""
     monkeypatch.setattr(serve, "SUMMARIES_TIMEOUT_S", 0.2)
     writing, unblocked = threading.Event(), threading.Event()
 
@@ -640,6 +649,90 @@ def test_a_run_whose_end_is_written_as_serve_stops_prints_its_block(home, monkey
     assert stored.record.end is not None
     summary = summary_lines(RunView(stored.record, stored.events), prepared[0].index)
     assert capsys.readouterr().out.splitlines() == ["--- run r1 ---", *summary]
+
+
+def test_the_store_s_close_and_the_summaries_left_share_one_stop_budget(home, monkeypatch, capsys):
+    """A stop whose store takes all of SUMMARIES_TIMEOUT_S to close gives the summaries no more.
+
+    So serve stops within the store's own bound. Serve's clock is moved on as the store closes;
+    the read-back here never returns."""
+    from irimi.record.store.reader import StoreReader
+    from irimi.record.store.writer import DirectoryStore
+
+    held = _HeldReads(monkeypatch)
+    moved = [0.0]
+    monkeypatch.setattr(serve, "monotonic", lambda: time.monotonic() + moved[0])
+    close = DirectoryStore.close
+
+    def slow(self):
+        close(self)
+        moved[0] += serve.SUMMARIES_TIMEOUT_S
+
+    monkeypatch.setattr(DirectoryStore, "close", slow)
+    prepared: list[compose.Run] = []
+    prepare = compose.prepare_run
+
+    def preparing(*args, **kwargs):
+        run = prepare(*args, **kwargs)
+        assert run is not None
+        prepared.append(run)
+        return run
+
+    stop = threading.Event()
+
+    def startup(*args):
+        [run] = prepared
+        run.store.start_run(builders.run_record("r1"))
+        run.store.end_run("r1", 20.0, "ok")
+        eventually(lambda: held.asked == ["r1"], timeout=5)
+        stop.set()
+
+    monkeypatch.setattr(compose, "prepare_run", preparing)
+    monkeypatch.setattr(compose, "print_startup", startup)
+    started = time.monotonic()
+    try:
+        assert serve.cmd_serve(cli.parse_args(["serve", "--port", "0"]), stop) == exitcodes.OK
+        took = time.monotonic() - started
+    finally:
+        held.release.set()
+    assert took < serve.SUMMARIES_TIMEOUT_S / 2
+    assert capsys.readouterr() == (
+        "",
+        "warning: serve stopped before printing every ended run's summary; "
+        "irimi runs list shows the runs\n",
+    )
+    assert StoreReader(home / "store").load_run("r1").record.end is not None
+    eventually(lambda: "irimi-summaries" not in {t.name for t in threading.enumerate()})
+
+
+def test_a_store_that_cannot_open_stops_serve_with_nothing_left_running(home, capsys):
+    """A store root that is a file exits 2 with one line, no writer or printer left, and no lock."""
+    (home / "not-a-dir").write_text("")
+    args = cli.parse_args(["serve", "--port", "0", "--store", str(home / "not-a-dir")])
+    assert serve.cmd_serve(args, threading.Event()) == exitcodes.ERROR
+    err = capsys.readouterr().err
+    assert err == f"error: the trace store {home / 'not-a-dir'} is not a writable directory\n"
+    assert "irimi-store" not in {t.name for t in threading.enumerate()}
+
+
+def test_a_printer_that_cannot_start_leaves_no_store_or_lock_behind(home, monkeypatch):
+    """The printer starts before the store opens, so its failure leaves nothing to close."""
+    from irimi.record.store.lock import ServeLock
+
+    start = threading.Thread.start
+
+    def refused(self):
+        if self.name == "irimi-summaries":
+            raise RuntimeError("can't start new thread")
+        start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", refused)
+    opened = []
+    monkeypatch.setattr(compose, "prepare_run", lambda *args, **kwargs: opened.append(args))
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        serve.cmd_serve(cli.parse_args(["serve", "--port", "0"]), threading.Event())
+    assert opened == []
+    ServeLock.hold(home / "store").release()
 
 
 def test_one_serve_per_store_root(tmp_path):

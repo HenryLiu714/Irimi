@@ -144,6 +144,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - `irimi serve` reads each ended run back for its summary on a thread of its own, so a run with
   large bodies or a slow disk no longer holds up the store's writer, and a busy serve no longer
   drops events while it prints. A block is still the run as it stood when its end was written.
+  A stop still takes at most 10 seconds after the proxy stops; a summary left unprinted then is
+  named by one warning on stderr.
 
 ## [0.1.0] - 2026-10-20
 

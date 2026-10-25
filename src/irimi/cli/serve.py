@@ -8,6 +8,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from irimi.cli import CliError, compose, runner
@@ -15,6 +16,7 @@ from irimi.cli.options import DEFAULT_PORT, add_proxy_options, epilog, help_form
 from irimi.core import exitcodes
 from irimi.core.exchange import Exchange
 from irimi.protocol.trace import UNATTRIBUTED, ToolCall
+from irimi.record.store import writer
 from irimi.report import terminal
 from irimi.report.model import RunView
 from irimi.report.summary import summary_lines, tls_failure_lines
@@ -24,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 # How often the main thread checks for a recorded signal or a stop.
 SERVE_POLL_S = 0.1
-# How long serve waits, once its store has closed, for the summaries still to print.
-SUMMARIES_TIMEOUT_S = 10.0
+# How long serve's stop gives its store to write what is queued and its printer the summaries left,
+# together, from when the store starts closing: the store's own bound, so a stop takes no longer.
+SUMMARIES_TIMEOUT_S = writer.CLOSE_TIMEOUT_S
 
 
 def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
@@ -84,6 +87,7 @@ class _ServeOutput:
             queue.SimpleQueue()
         )
         self._summaries_given_up = False  # set under `_printing` when serve stops waiting
+        self._stop_by: float | None = None  # when the printer must be done (`stopping`)
 
     def say(self, lines: list[str], *, err: bool = False) -> None:
         with self._printing:
@@ -112,11 +116,16 @@ class _ServeOutput:
         """Queue the run's summary; the store calls this on its writer once the end is written."""
         self._ended.put((index, run_id, last_seq))
 
+    def stopping(self) -> None:
+        """Start the stop's clock as the store starts closing; the summaries left share it."""
+        self._stop_by = monotonic() + SUMMARIES_TIMEOUT_S
+
     @contextlib.contextmanager
     def summaries(self) -> Iterator[None]:
         """Print each ended run's summary on a thread of serve's own until the block exits.
 
-        On exit it prints those still queued, for up to SUMMARIES_TIMEOUT_S.
+        On exit it prints those still queued, until SUMMARIES_TIMEOUT_S after `stopping` (or after
+        the exit, if `stopping` was never called).
         """
         printer = threading.Thread(
             target=self._print_summaries, name="irimi-summaries", daemon=True
@@ -126,7 +135,8 @@ class _ServeOutput:
             yield
         finally:
             self._ended.put(None)
-            printer.join(SUMMARIES_TIMEOUT_S)
+            stop_by = monotonic() + SUMMARIES_TIMEOUT_S if self._stop_by is None else self._stop_by
+            printer.join(max(0.0, stop_by - monotonic()))
             if printer.is_alive():
                 self._give_up_summaries()
 
@@ -214,6 +224,7 @@ def _run_serve(
             finally:
                 stop.set()  # before the engine stops, so `watch_engine` sees serve stopping it
                 handle.stop()
+                output.stopping()  # the store closes next
     if output.unattributed:
         count = output.unattributed
         exchanges = "1 exchange" if count == 1 else f"{count} exchanges"
