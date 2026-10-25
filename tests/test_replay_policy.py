@@ -281,6 +281,7 @@ def test_an_event_stream_that_sent_no_body_still_streamed():
         {"flags": (Flag.DECISION_FAILED,)},
         {"flags": (Flag.TARGET_FAILED,)},
         {"flags": (Flag.UPSTREAM_ERROR,)},
+        {"flags": (Flag.AGENT_DISCONNECTED,)},
         {"flags": (Flag.REDACTION_FAILED,)},
         {"answered_by": "delegated"},
     ],

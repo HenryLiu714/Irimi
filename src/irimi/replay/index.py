@@ -58,6 +58,7 @@ UNSERVABLE_FLAGS = frozenset(
         Flag.DECISION_FAILED,
         Flag.TARGET_FAILED,
         Flag.UPSTREAM_ERROR,
+        Flag.AGENT_DISCONNECTED,
         Flag.REDACTION_FAILED,
     }
 )

@@ -30,7 +30,7 @@ from irimi.config import ca, paths
 from irimi.core.exchange import Exchange
 from irimi.decide.overlay import NoOverlay
 from irimi.decide.policy import ShadowPolicy
-from irimi.engine import EngineConfig, Serve
+from irimi.engine import EngineConfig, Serve, mitm
 from irimi.engine.capture import recorded_stream
 from irimi.engine.control import ControlEndpoint
 from irimi.engine.mitm import MitmEngine
@@ -70,6 +70,18 @@ def live_summary(seen, maps):
     """The summary `irimi shadow` prints for a run whose engine reported `seen`."""
     view = RunView(RunRecord.header("t3st"), [*map(model.for_summary, seen)])
     return summary.summary_lines(view, maps, 1.0, summary.Live())
+
+
+def close_idle_connections_after(monkeypatch, seconds: int) -> None:
+    """Make engines started after this close a connection idle for `seconds` (mitmproxy: 600)."""
+    options = mitm._mitm_options
+
+    def shorter(config):
+        opts = options(config)
+        opts.update(tcp_timeout=seconds)
+        return opts
+
+    monkeypatch.setattr(mitm, "_mitm_options", shorter)
 
 
 def start_engine(

@@ -60,6 +60,8 @@ class Flag(StrEnum):
     REFUSED = "refused"
     # A live forward lost the real service before it answered.
     UPSTREAM_ERROR = "upstream-error"
+    # The agent hung up before a live or target answer was complete, so no one upstream is blamed.
+    AGENT_DISCONNECTED = "agent-disconnected"
     # The route names a `fixture:` this install could not read, so it was answered with an echo.
     FIXTURE_FAILED = "fixture-failed"
     # A retry with a used idempotency key and the same parameters got the first answer's bytes.

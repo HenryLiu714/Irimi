@@ -377,6 +377,7 @@ An event's `type` (`trace.EventType`):
 | `decision-failed` | 2 | irimi's decision failed; the agent got irimi's `502` and nothing was forwarded. |
 | `refused` | 3 | irimi refused the request before deciding it: unparseable, unroutable, a base-URL host it does not relay, or a base-URL request it could not rewrite. |
 | `upstream-error` | 2 | A forwarded request lost the real service before it answered. |
+| `agent-disconnected` | 3 | The agent hung up before a forwarded or target answer was complete; the exchange is not flagged `upstream-error` or `target-failed`. |
 | `fixture-failed` | 2 | The route's fixture could not be read, so the write was answered with an echo. |
 | `idempotent-replay` | 2 | A retry with a used idempotency key and the same parameters; it got the first answer again. |
 | `idempotency-conflict` | 2 | A used idempotency key with other parameters; it got the service's idempotency error. |
@@ -404,7 +405,7 @@ An event's `type` (`trace.EventType`):
 | Version | Written by | Changes |
 | --- | --- | --- |
 | 2 | irimi 0.1.0 | The first released version. |
-| 3 | irimi 0.2 | Added `irimi` to `answered_by` and the `refused` flag. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
+| 3 | irimi 0.2 | Added `irimi` to `answered_by`, and the `refused` and `agent-disconnected` flags. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`, and an agent that hung up as `upstream-error` or `target-failed`. |
 
 ## Example
 

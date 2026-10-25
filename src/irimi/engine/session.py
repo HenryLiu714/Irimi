@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 # The probe runs on the decision's worker thread, so a slow target stalls only its own request.
 TARGET_PROBE_TIMEOUT_S = 2.0
+# Whom a failed connection blames, unless the agent hung up first; irimi's own answers blame no one.
+_FAILED_BY: dict[AnsweredBy, Flag] = {"live": Flag.UPSTREAM_ERROR, "delegated": Flag.TARGET_FAILED}
 
 
 class RequestBodyCut(Exception):
@@ -371,17 +373,17 @@ class ShadowSession:
                 send = stamped
         return Completed(exchange, send)
 
-    def fail(self, plan: Plan, received: Received | None) -> Exchange:
+    def fail(self, plan: Plan, received: Received | None, *, agent_hung_up: bool) -> Exchange:
         """Return the exchange for a connection that failed before an answer arrived.
 
         `received` is what of a streamed answer reached the agent, or None. A live forward is
-        flagged `upstream-error`, a target `target-failed`; the plan's own flags are always kept.
+        flagged `upstream-error` and a target `target-failed`, or either `agent-disconnected` when
+        the agent hung up first; the plan's own flags are always kept.
         """
         flags = plan.flags
-        if plan.answered_by == "live":
-            flags += (Flag.UPSTREAM_ERROR,)
-        elif plan.answered_by == "delegated":
-            flags += (Flag.TARGET_FAILED,)
+        blamed = _FAILED_BY.get(plan.answered_by)
+        if blamed is not None:
+            flags += (Flag.AGENT_DISCONNECTED if agent_hung_up else blamed,)
         response: Response | None = None
         stream_chunks: tuple[int, ...] = ()
         if received is not None:

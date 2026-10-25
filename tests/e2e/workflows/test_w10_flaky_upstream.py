@@ -84,18 +84,17 @@ def test_a_server_error_on_a_read_is_forwarded_and_retried(run_workflow):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflow, mode):
+def test_a_read_the_agent_abandoned_is_recorded_as_its_hang_up(run_workflow, mode):
     shadow = run_workflow(W, "read_timeout", mode)
     assert statuses(shadow, "list_charges") == ["TimeoutError", 200]
     assert statuses(run_workflow(W, "read_timeout", "bare"), "list_charges") == [
         "TimeoutError",
         200,
     ]
-    # KNOWN BUG (#93): an exchange the agent hung up on is recorded with no response and
-    # `upstream-error`, which reads as the service's fault, though the upstream only answered late.
+    # The agent hung up on a read the upstream only answered late, so the service is not blamed.
     # The two reads race to print first, so their order is not pinned.
     assert sorted(shadow.exchange_lines()[:2]) == [
-        "real          read      GET api.stripe.com/v1/charges -> -  [upstream-error]",
+        "real          read      GET api.stripe.com/v1/charges -> -  [agent-disconnected]",
         "real          read      GET api.stripe.com/v1/charges -> 200",
     ]
     # Two agent reads and irimi's check read: irimi itself does not retry the stall.
@@ -104,8 +103,8 @@ def test_a_read_the_agent_abandoned_is_recorded_as_an_upstream_error(run_workflo
         "/v1/charges",
         "/v1/charges/ch_PAYOUT1",
     ]
-    # The known bug above, as stored: the hang-up is the upstream's fault on disk too.
-    assert unanswered(shadow) == [("/v1/charges", (Flag.UPSTREAM_ERROR,))]
+    # Stored as printed: an exchange with no response, the hang-up the agent's.
+    assert unanswered(shadow) == [("/v1/charges", (Flag.AGENT_DISCONNECTED,))]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -549,20 +548,23 @@ def test_a_read_the_service_refused_replays_its_refusal_and_the_retry(replayed, 
     assert replay.internet.requests() == []
 
 
-@pytest.mark.parametrize("scenario", ["reset_on_read", "read_timeout"])
-def test_a_read_whose_recording_lost_its_upstream_fails_again_live(replayed, scenario):
+@pytest.mark.parametrize(
+    ("scenario", "lost"),
+    [("reset_on_read", Flag.UPSTREAM_ERROR), ("read_timeout", Flag.AGENT_DISCONNECTED)],
+)
+def test_a_read_recorded_with_no_answer_fails_again_live(replayed, scenario, lost):
     """A read recorded with no answer misses on replay, fails again live, and the retry replays.
 
-    The miss keeps `upstream-error` beside `replay-miss`."""
+    The miss keeps the flag that says who lost the answer beside `replay-miss`."""
     recorded, replay = replayed(W, scenario)
-    [lost] = [ex for ex in recorded.reported if Flag.UPSTREAM_ERROR in ex.flags]
+    [unanswered_read] = [ex for ex in recorded.reported if lost in ex.flags]
     first, retry = [ex for ex in replay.reported if ex.request.path == "/v1/charges"]
     assert (first.answered_by, first.response, first.flags) == (
         "live",
         None,
-        ("replay-miss", Flag.UPSTREAM_ERROR),
+        ("replay-miss", lost),
     )
-    assert lost.flags == (Flag.UPSTREAM_ERROR,)
+    assert unanswered_read.flags == (lost,)
     assert (retry.answered_by, retry.flags) == (
         "recording",
         ("from-recording",),

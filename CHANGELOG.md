@@ -57,8 +57,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
   `{"error": {"type": ..., "message": ...}}`, carry `Irimi-Answered-By: irimi`, and are recorded
   in the run. They were plain text, unstamped and unrecorded, or stamped `delegated` or `fake-L0`.
 - **Breaking:** the trace format is schema 3. It adds the `irimi` answered-by value and the
-  `refused` flag, and drops the `validation` field and the `fidelity:*` flags. irimi still reads
-  runs that 0.1.0 stored.
+  `refused` and `agent-disconnected` flags, and drops the `validation` field and the `fidelity:*`
+  flags. irimi still reads runs that 0.1.0 stored.
 - **Breaking:** a control-protocol client posting a tool call must send `awaited`. The SDK does;
   a client in another language must add it.
 - **Breaking:** the CA `irimi init` generates is valid for 825 days, not ten years. A CA already
@@ -136,6 +136,9 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.
+- An agent that closes its connection before an answer is complete, over HTTP/1 or HTTP/2, is
+  flagged `agent-disconnected` instead of `upstream-error` (or `target-failed`), so the run no
+  longer blames the service for it.
 
 ## [0.1.0] - 2026-10-20
 

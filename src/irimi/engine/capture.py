@@ -1,5 +1,7 @@
 """Capturing a streamed response for the trace while every chunk goes on to the agent unchanged."""
 
+import time
+
 from irimi.core.exchange import Headers, Response, clip_chunks
 from irimi.core.limits import MAX_STORED_BODY
 from irimi.engine.decoding import decode_body
@@ -10,14 +12,17 @@ class StreamCapture:
     """`flow.response.stream` callable: return each chunk unchanged and keep a copy for the trace.
 
     Never raises (fail-closed hook rule). Copying stops at MAX_STORED_BODY or on error.
+    `last_chunk_at` is when the last chunk passed, copied or not, or 0.0 before the first.
     """
 
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
         self._size = 0
         self.truncated = False
+        self.last_chunk_at = 0.0
 
     def __call__(self, chunk: bytes) -> bytes:
+        self.last_chunk_at = time.time()
         try:
             self._capture(chunk)
         except Exception:

@@ -4,14 +4,19 @@ import gzip
 import http.client
 import itertools
 import threading
+import time
+import types
 
 import pytest
+from mitmproxy import ctx
+from mitmproxy.connection import ConnectionState
 from mitmproxy.net import encoding
+from mitmproxy.test import tflow
 
 from irimi import services
 from irimi.core.exchange import Exchange, Flag
 from irimi.core.limits import MAX_STORED_BODY
-from irimi.engine import capture
+from irimi.engine import capture, mitm
 from irimi.engine.capture import StreamCapture
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
@@ -19,6 +24,7 @@ from irimi.record.store.writer import DirectoryStore
 from tests.support.credentials import TORN_STREAM_SECRET
 from tests.support.engine import (
     THREE_CHUNKS,
+    close_idle_connections_after,
     engine_config,
     leaf_cert_for_loopback,
     open_stream,
@@ -30,6 +36,7 @@ from tests.support.engine import (
 from tests.support.maps import READ_STREAM_MAP, STREAM_MAP, map_index
 from tests.support.servers import stop_server
 from tests.support.upstreams import SSE_FIRST, SSE_SECOND, StreamUpstream, serve
+from tests.support.waiting import eventually
 
 
 def _stream_three_chunks(tmp_path, monkeypatch, store=None):
@@ -144,6 +151,104 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
     assert ex.response is not None
     assert (ex.response.status, ex.response.body) == (200, THREE_CHUNKS[0])
     assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
+
+
+def test_an_agent_that_hangs_up_mid_stream_is_flagged_and_the_upstream_is_not_blamed(
+    tmp_path, monkeypatch
+):
+    """An agent that closes its connection after one chunk is flagged, not `upstream-error`.
+
+    The upstream holds the second chunk until the exchange is recorded, so nothing failed there."""
+    gates = [threading.Event(), threading.Event()]
+    srv = stream_server(THREE_CHUNKS, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        assert resp.status == 200
+        assert resp.read(len(THREE_CHUNKS[0])) == THREE_CHUNKS[0]
+        resp.close()
+        conn.close()
+        eventually(lambda: seen, message="the abandoned stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED)
+    assert ex.response is not None
+    assert (ex.response.status, ex.response.body) == (200, THREE_CHUNKS[0])
+    assert ex.stream_chunks == (len(THREE_CHUNKS[0]),)
+
+
+def test_an_agent_that_hangs_up_after_a_long_stream_is_flagged_though_its_headers_are_old(
+    tmp_path, monkeypatch
+):
+    """A stream that ran past mitmproxy's idle limit, its chunks never idle, was the agent's to end.
+
+    It is the last chunk that says the connection was busy, not the headers."""
+    close_idle_connections_after(monkeypatch, 3)
+    chunks = [b"data: %d\n\n" % i for i in range(8)]
+    gates = [threading.Event() for _ in chunks]  # the last one holds the stream open
+    srv = stream_server(chunks, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        for chunk, gate in zip(chunks[:-1], gates[:-1], strict=True):
+            assert resp.read(len(chunk)) == chunk
+            time.sleep(0.5)  # 3.5 s of stream in all, no gap near the 3 s limit
+            gate.set()
+        assert resp.read(len(chunks[-1])) == chunks[-1]
+        resp.close()
+        conn.close()
+        eventually(lambda: seen, message="the abandoned stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED)
+
+
+def test_a_stream_mitmproxy_closes_for_idleness_is_not_blamed_on_the_agent(tmp_path, monkeypatch):
+    """mitmproxy closes the agent's connection itself when nothing moves for its idle limit."""
+    close_idle_connections_after(monkeypatch, 2)
+    gates = [threading.Event(), threading.Event()]
+    srv = stream_server(THREE_CHUNKS, gates)
+    cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
+    eng, seen, stop = start_engine(cfg)
+    try:
+        conn, resp = open_stream(eng, srv)
+        assert resp.read(len(THREE_CHUNKS[0])) == THREE_CHUNKS[0]
+        with pytest.raises(http.client.IncompleteRead):
+            resp.read()  # the agent waits; the upstream sends nothing more
+        conn.close()
+        eventually(lambda: seen, message="the idle stream was never recorded")
+    finally:
+        for gate in gates:
+            gate.set()
+        stop()
+        stop_server(srv)
+    (ex,) = seen
+    assert ex.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+
+
+@pytest.mark.parametrize(
+    ("heard_ago", "hung_up"),
+    [(598.5, True), (599.5, False)],
+)
+def test_a_flow_heard_just_inside_the_idle_limit_is_not_blamed_on_the_agent(
+    monkeypatch, heard_ago, hung_up
+):
+    """mitmproxy times its idleness a moment before irimi times the flow, so the slack is its."""
+    flow = tflow.tflow()
+    flow.client_conn.state = ConnectionState.CLOSED
+    flow.request.timestamp_end = time.time() - heard_ago
+    monkeypatch.setattr(ctx, "options", types.SimpleNamespace(tcp_timeout=600), raising=False)
+    assert mitm._agent_hung_up(flow, None) is hung_up
 
 
 def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
@@ -387,6 +492,17 @@ def test_the_tee_cuts_the_chunk_that_crosses_its_cap_and_keeps_nothing_after(sma
     assert tee(b"89abc") == b"89abc"
     assert tee(b"def") == b"def"
     assert (tee.chunks, tee.truncated) == ([b"1234567", b"89a"], True)
+
+
+def test_the_tee_times_every_chunk_even_past_its_cap(small_cap, monkeypatch):
+    """A chunk it no longer copies is still timed, since that time tells a hang-up from idleness."""
+    clock = iter([10.0, 20.0])
+    monkeypatch.setattr(capture, "time", types.SimpleNamespace(time=lambda: next(clock)))
+    tee = StreamCapture()
+    assert tee.last_chunk_at == 0.0
+    assert tee(b"12345678901") == b"12345678901"
+    assert tee(b"more") == b"more"
+    assert (tee.truncated, tee.chunks, tee.last_chunk_at) == (True, [b"1234567890"], 20.0)
 
 
 def test_the_tee_stops_copying_for_good_once_its_copy_raises(monkeypatch):

@@ -20,6 +20,7 @@ from irimi.engine import session, wire
 from irimi.engine.capture import StreamCapture
 from irimi.engine.mitm import IrimiAddon
 from irimi.protocol.headers import ANSWERED_BY_HEADER
+from irimi.report import model
 from tests.support.credentials import BEARER_SECRET
 from tests.support.doubles import NullStore
 from tests.support.engine import engine_config, start_engine, via_proxy, via_tls_proxy
@@ -34,6 +35,7 @@ from tests.support.upstreams import (
     TargetStub,
     serve,
 )
+from tests.support.waiting import eventually
 
 
 def _host_header(headers: dict) -> str:
@@ -381,10 +383,12 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
     assert (ex.answered_by, ex.flags) == ("irimi", (Flag.TARGET_FAILED,))
 
 
-def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):
-    """The `error` hook adds no `upstream-error` to a write irimi answered itself.
+@pytest.mark.parametrize("client", ["open", "closed"])
+def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch, client):
+    """The `error` hook adds no `upstream-error` or `agent-disconnected` to a write irimi answered.
 
     Driven through the addon: a client vanishing between two hooks cannot be staged live."""
+    from mitmproxy.connection import ConnectionState
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -402,6 +406,8 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
     flow = tflow.tflow(req=tutils.treq(method=b"POST", host="127.0.0.1", port=80, path=b"/things"))
     flow.client_conn.sockname = ("127.0.0.1", 4000)
     asyncio.run(addon.request(flow))
+    if client == "closed":
+        flow.client_conn.state = ConnectionState.CLOSED
     addon.error(flow)
 
     (ex,) = seen
@@ -677,3 +683,42 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
     assert (ex.answered_by, ex.target) == ("delegated", f"http://127.0.0.1:{stream_port}/v1/stream")
     assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND
     assert ex.stream_chunks == (len(SSE_FIRST), len(SSE_SECOND))
+
+
+def test_an_agent_that_hangs_up_on_a_target_s_stream_does_not_fail_the_target(
+    tmp_path, monkeypatch
+):
+    """An agent that leaves a target's stream after one event is flagged, not `target-failed`."""
+    srv = serve(StreamUpstream)
+    try:
+        maps = targeted_index(
+            tmp_path,
+            monkeypatch,
+            targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{srv}/v1/stream")],
+        )
+        eng, seen, stop = start_engine(engine_config(tmp_path, monkeypatch, maps=maps))
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
+            conn.request(
+                "POST",
+                "http://127.0.0.1:1/things",
+                body=b"{}",
+                headers={"host": "127.0.0.1:1", "content-type": "application/json"},
+            )
+            resp = conn.getresponse()
+            assert resp.read(len(SSE_FIRST)) == SSE_FIRST
+            resp.close()
+            conn.close()
+            eventually(lambda: seen, message="the abandoned stream was never recorded")
+        finally:
+            srv.gate.set()
+            stop()
+    finally:
+        srv.stop()
+    (ex,) = seen
+    assert (ex.answered_by, ex.flags) == (
+        "delegated",
+        (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED),
+    )
+    assert model.answered(ex) == "target"  # the summary counts it sent, not unreached
+    assert ex.response is not None and ex.response.body == SSE_FIRST

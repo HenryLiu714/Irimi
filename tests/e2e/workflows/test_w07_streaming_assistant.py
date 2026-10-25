@@ -41,6 +41,11 @@ BROKEN_STREAM_LINE = (
     "real          llm       POST api.anthropic.com/v1/messages -> 200"
     "  [upstream-error, stream-truncated]"
 )
+# A stream the agent closed after irimi had sent it the headers: the upstream is not blamed.
+ABANDONED_STREAM_LINE = (
+    "real          llm       POST api.anthropic.com/v1/messages -> 200"
+    "  [agent-disconnected, stream-truncated]"
+)
 MESSAGE_START = b"event: message_start\n"
 MESSAGE_STOP = b'event: message_stop\ndata: {"type": "message_stop"}\n\n'
 
@@ -251,12 +256,10 @@ def test_a_caller_that_hangs_up_ends_the_run_in_error(run_workflow, mode):
     # The agent stopped reading Anthropic's stream when its own caller left, and never asked
     # OpenAI anything.
     assert [c["label"] for c in shadow.calls()] == ["embed", "anthropic_stream"]
-    # KNOWN BUG (#93): irimi records a stream the agent closed as an upstream failure, though the
-    # upstream answered fine.
-    assert shadow.exchange_lines() == [LLM_LINES[0], BROKEN_STREAM_LINE]
+    assert shadow.exchange_lines() == [LLM_LINES[0], ABANDONED_STREAM_LINE]
     # The abandoned stream is stored as far as irimi had copied it, flagged as not whole.
     stream = stored_exchanges(shadow)["/v1/messages"]
-    assert stream.flags == (Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED)
+    assert stream.flags == (Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED)
     assert stream.response is not None and stream.response.status == 200
     assert stream.response.body.startswith(MESSAGE_START)
     assert not stream.response.body.endswith(MESSAGE_STOP)
@@ -679,10 +682,10 @@ def test_a_secret_stored_redacted_replays_as_its_placeholder(replayed):
     assert replay.internet.requests() == []
 
 
-# The replay's flags for a stream recorded cut: a miss, which the fake's fault cuts again. A miss
-# keeps `replay-miss` beside the engine's `upstream-error`.
+# The replay's flags for a stream recorded cut: a miss, which the fake's fault or the agent cuts
+# again. A miss keeps `replay-miss` beside the engine's `upstream-error` or `agent-disconnected`.
 CUT_STREAMS = {
-    "caller_disconnects": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED),
+    "caller_disconnects": (Flag.REPLAY_MISS, Flag.AGENT_DISCONNECTED, Flag.STREAM_TRUNCATED),
     "upstream_reset": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR, Flag.STREAM_TRUNCATED),
     "reset_before_stream": (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR),
     "gzip_bomb_stream": (Flag.REPLAY_MISS, Flag.STREAM_TRUNCATED),
@@ -694,7 +697,7 @@ def test_a_stream_recorded_cut_is_never_served_and_goes_to_the_model_again(repla
     """A replay never serves a stream recorded cut: it is a miss, sent to the model again."""
     recorded, replay = replayed(W, scenario, command=True)
     [cut] = [ex for ex in recorded.reported if ex.request.path == "/v1/messages"]
-    assert {Flag.STREAM_TRUNCATED, Flag.UPSTREAM_ERROR} & set(cut.flags)
+    assert cut.flags == CUT_STREAMS[scenario][1:]
     [stream] = [ex for ex in replay.reported if ex.request.path == "/v1/messages"]
     assert (stream.answered_by, stream.flags) == ("live", CUT_STREAMS[scenario])
     assert [ex.answered_by for ex in replay.reported if ex.request.path == "/v1/embeddings"] == [
@@ -710,7 +713,7 @@ def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workfl
     """Replaying one of two lockstep chats leaves the other's live stream waiting, and exits 4.
 
     The replayed chat is answered from the recording; the other misses, and its stream waits for a
-    partner until the fake gives up. No write is forwarded."""
+    partner until the agent gives up. No write is forwarded."""
     recorded = run_workflow(W, "two_callers", "shadow")
     for source in recorded.sdk_runs():
         _, replay = replayed(W, "two_callers", run_id=source.run_id, command=True)
@@ -727,8 +730,9 @@ def test_replaying_one_of_two_lockstep_chats_leaves_the_other_waiting(run_workfl
             for ex in replay.reported
             if ex.request.path == "/v1/messages" and (ex.answered_by == "live")
         ]
-        # A miss whose upstream failed, and says both, as above.
-        assert (left.response, left.flags) == (None, (Flag.REPLAY_MISS, Flag.UPSTREAM_ERROR))
+        # A miss the agent gave up on: its 5 s timeout (`harness/execute.py`) ends before the
+        # fake's 10 s wait for a partner (`LockstepLLM`).
+        assert (left.response, left.flags) == (None, (Flag.REPLAY_MISS, Flag.AGENT_DISCONNECTED))
         assert [r.path for r in replay.internet.requests()] == ["/v1/embeddings", "/v1/messages"]
         assert replay.internet.writes() == []
 
