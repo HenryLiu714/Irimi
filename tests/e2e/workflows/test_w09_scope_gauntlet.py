@@ -40,10 +40,11 @@ from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     LONG_MESSAGE_CHARS,
     OVERSIZED_BODY_BYTES,
     REFUSED_BASE_URL_HOST,
+    WEBHOOK_HOST,
 )
 from tests.e2e.workflows.agents.w09_scope_gauntlet.scenarios import BIG_DESCRIPTION_BYTES, WORKFLOW
 from tests.e2e.workflows.harness.compare import rows_not_shown
-from tests.e2e.workflows.harness.invariants import check_invariants
+from tests.e2e.workflows.harness.invariants import CANARIES, check_invariants
 
 W = "w09_scope_gauntlet"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -329,17 +330,22 @@ BASE_URL_REFUSALS = {
     "no_host_post": NO_HOST,
     "empty_host_post": NO_HOST,
     "bad_port_post": f"bad port in base-URL host '{ALLOWED_BASE_URL_HOST}:99999'",
+    "webhook_bad_port_post": f"bad port in base-URL host '{WEBHOOK_HOST}:99999'",
     "head_unknown_host": f"base-URL host {HEAD_HOST!r} is not in a loaded map or --base-url-host",
     "get_after_head": UNKNOWN_HOST,
 }
+# The refused webhook post's path as sent: it names the webhook's host, then its secret path.
+WEBHOOK_BAD_PORT = f"/{WEBHOOK_HOST}:99999{CANARIES['SLACK_WEBHOOK_PATH']}"
 # Each request `base_url_hosts` sends that irimi refuses, as stored: method, path, kind, and
-# whether it is unclassified. Its host is the listener's: a refused request is never rewritten.
+# whether it is unclassified. Its host is the listener's: a refused request is never rewritten,
+# so the webhook's path is stored as the one placeholder `hidden` gives it.
 REFUSED_AS_STORED = [
     ("POST", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "unknown", True),
     ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
     ("POST", "/", "unknown", True),
     ("POST", "//v1/entries", "unknown", True),
     ("POST", f"/{ALLOWED_BASE_URL_HOST}:99999/v1/invoices", "unknown", True),
+    ("POST", WEBHOOK_BAD_PORT, "unknown", True),
     ("HEAD", f"/{HEAD_HOST}/x", "read", False),
     ("GET", f"/{REFUSED_BASE_URL_HOST}/v1/entries", "read", False),
 ]
@@ -356,8 +362,12 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     """Only `--base-url-host`'s host is relayed; every other base-URL request is refused, 403.
 
     A refusal is stamped `irimi`, says why in JSON, is stored `refused` with its classification
-    (GET and HEAD are reads), and never reaches the fake internet, which bare calls do reach."""
+    (GET and HEAD are reads), and never reaches the fake internet, which bare calls do reach.
+    The webhook's secret path is hidden in the store and the line alike."""
     shadow = run_workflow(W, "base_url_hosts", mode)
+    hidden = {
+        WEBHOOK_BAD_PORT: "/" + redact.placeholder(redact.load_key(shadow.home), WEBHOOK_BAD_PORT)
+    }
     assert shadow.by_label() == {
         "allowed_post": (200, "fake-L0"),
         **dict.fromkeys(BASE_URL_REFUSALS, (403, "irimi")),
@@ -379,7 +389,14 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     ] == [
         ("POST", ALLOWED_BASE_URL_HOST, "/v1/invoices", "unknown", "fake-L0", unclassified),
         *(
-            (method, "127.0.0.1", path, kind, "irimi", unclassified * odd + (Flag.REFUSED,))
+            (
+                method,
+                "127.0.0.1",
+                hidden.get(path, path),
+                kind,
+                "irimi",
+                unclassified * odd + (Flag.REFUSED,),
+            )
             for method, path, kind, odd in REFUSED_AS_STORED
         ),
     ]
@@ -390,7 +407,7 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
     assert shadow.exchange_lines() == [
         f"faked         unknown   POST {ALLOWED_BASE_URL_HOST}/v1/invoices -> 200  [unclassified]",
         *(
-            f"irimi         {kind:<9} {method} 127.0.0.1{path} -> 403  "
+            f"irimi         {kind:<9} {method} 127.0.0.1{hidden.get(path, path)} -> 403  "
             f"[{'unclassified, ' if odd else ''}refused]"
             for method, path, kind, odd in REFUSED_AS_STORED
         ),
@@ -402,22 +419,23 @@ def test_a_base_url_request_irimi_will_not_relay_is_answered_stamped_and_stored_
             f"  ○ {ALLOWED_BASE_URL_HOST}  POST {ALLOWED_BASE_URL_HOST}/v1/invoices  faked; not "
             "checked (unclassified)",
             *(
-                f"  ✗ 127.0.0.1  POST 127.0.0.1{path}  refused by irimi"
+                f"  ✗ 127.0.0.1  POST 127.0.0.1{hidden.get(path, path)}  refused by irimi"
                 for method, path, _, _ in REFUSED_AS_STORED
                 if method == "POST"
             ),
             "",
-            "  127.0.0.1             3 reads refused by irimi  4 writes refused by irimi",
+            "  127.0.0.1             3 reads refused by irimi  5 writes refused by irimi",
             f"  {ALLOWED_BASE_URL_HOST}  1 faked write (1 unclassified)",
             "",
-            "  8 exchanges · 0 real · 8 answered by irimi (1 faked write) · 0 sent to targets",
+            "  9 exchanges · 0 real · 9 answered by irimi (1 faked write) · 0 sent to targets",
         ]
     else:
-        stopped = "stopped · 8 exchanges not in any run: irimi runs show unattributed"
+        stopped = "stopped · 9 exchanges not in any run: irimi runs show unattributed"
         assert shadow.irimi[-1] == stopped
     bare = run_workflow(W, "base_url_hosts", "bare")
     assert bare.by_label() == dict.fromkeys(shadow.by_label(), (502, None))
     assert bare.exit_code == shadow.exit_code == 0
+    assert check_invariants(shadow, bare) == []
 
 
 @pytest.mark.parametrize("mode", MODES)

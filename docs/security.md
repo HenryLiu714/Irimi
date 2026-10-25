@@ -125,10 +125,12 @@ agent never see a placeholder.
   character ends an escape such as `\n` or `%20`.
 - **Credential-path hosts.** On `hooks.slack.com`, and any host a map lists under
   `credential_path_hosts:`, the URL path is the secret, so the whole path is replaced wherever the
-  exchange carries it. The lines irimi prints as a run goes show a request's path as it is stored,
-  so a webhook prints as its placeholder, and irimi's errors and warnings name a target by its
-  origin alone (`target 'http://127.0.0.1:9' could not be reached`), since a target that is a bare
-  origin takes the request's path.
+  exchange carries it. So is a path whose first segment names such a host
+  (`/hooks.slack.com/...`), which is how a base-URL request irimi refuses is kept. The lines irimi
+  prints as a run goes show a request's path as it is stored, so a webhook prints as its
+  placeholder, and irimi's errors and warnings name a target by its origin alone
+  (`target 'http://127.0.0.1:9' could not be reached`), since a target that is a bare origin
+  takes the request's path.
 - **How a body is read.** A body that is one JSON document is walked as JSON, whatever its content
   type says. Otherwise a form content type is read as a form, and anything else line by line: a
   line that is one JSON document (NDJSON), or an SSE `data:` field holding one, is walked as JSON,

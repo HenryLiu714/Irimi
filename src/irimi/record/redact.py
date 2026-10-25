@@ -400,9 +400,19 @@ def _is_credential_path_host(host: str) -> bool:
     return host.lower().rstrip(".") in shipped_credential_hosts()
 
 
+def _is_credential_path(host: str, path: str) -> bool:
+    """Return True for a path on a credential-path host, or one that names such a host first.
+
+    A base-URL request irimi refuses is kept as it reached the listener: `/hooks.slack.com/...`."""
+    if _is_credential_path_host(host):
+        return True
+    named = path.removeprefix("/").partition("/")[0].partition(":")[0]
+    return _is_credential_path_host(named)
+
+
 def _secret_path(request: Request) -> str | None:
-    """Return a credential-path host's non-root path, a secret wherever it reappears, else None."""
-    if _is_credential_path_host(request.host) and request.path.strip("/"):
+    """Return a credential path that is not the root, a secret wherever it reappears, else None."""
+    if _is_credential_path(request.host, request.path) and request.path.strip("/"):
         return request.path
     return None
 
@@ -424,7 +434,7 @@ def _secret_path_swaps(secret_path: str | None, key: bytes) -> list[tuple[str, s
 
 def _redact_path(host: str, path: str, key: bytes) -> str:
     """Redact a path; on a credential-path host (`hooks.slack.com`) the whole path is the secret."""
-    if _is_credential_path_host(host):
+    if _is_credential_path(host, path):
         return _hidden_path(path, key)
     return _redact_text(path, key)
 

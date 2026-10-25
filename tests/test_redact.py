@@ -484,7 +484,7 @@ def test_a_credential_path_host_spelled_with_its_root_dot_is_the_same_host():
 
 
 def test_a_credential_path_is_replaced_wherever_else_the_exchange_carries_it():
-    """A credential path is replaced in the 502 for an unreachable target and in echoed headers.
+    """A credential path is replaced in a 502 body that quotes it and in echoed headers.
 
     `/` alone is every URL's path and is left alone."""
     path = "/services/T000/B000/XXXXsecret"
@@ -872,6 +872,35 @@ def test_stored_path_is_the_path_the_store_keeps(host, path, shown):
     request = _request(host=host, path=path)
     assert redact.stored_path(request, KEY) == shown
     assert redact_exchange(_exchange(request), KEY).request.path == shown
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/hooks.slack.com/services/T0/B0/XXXXsecret",
+        "/HOOKS.Slack.com.:99999/services/T0/B0/XXXXsecret",
+        "/hooks.slack.com",
+    ],
+)
+def test_a_path_naming_a_credential_path_host_first_is_hidden_whole_on_any_host(path):
+    """A base-URL request irimi refuses is kept as it reached the listener, its secret in its path.
+
+    Hidden on the disk and in the line alike, and wherever else the exchange carries it."""
+    request = _request(host="127.0.0.1", path=path, headers=(("x-note", f"see {path}"),))
+    hidden = "/" + _ph(path)
+    assert redact.stored_path(request, KEY) == hidden
+    stored = redact_exchange(_exchange(request), KEY)
+    assert stored.request.path == hidden
+    assert stored.request.headers == (("x-note", f"see {hidden}"),)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api.stripe.com/v1/charges", "//hooks.slack.com/services/T0/B0/x", "/v1/hooks.slack.com"],
+)
+def test_a_path_naming_another_host_first_or_no_host_keeps_its_shape_rule(path):
+    request = _request(host="127.0.0.1", path=path)
+    assert redact.stored_path(request, KEY) == path
 
 
 def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():

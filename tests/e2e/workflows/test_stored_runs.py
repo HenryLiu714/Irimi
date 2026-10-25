@@ -449,7 +449,8 @@ def test_a_serve_stores_no_process_run_and_drops_nothing(run_workflow, name, sce
 def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, name, scenario):
     """A summary over all of a serve's stored runs equals the summary of what it reported live.
 
-    So redacting and storing changes nothing a summary shows, and no event is lost between runs."""
+    So redacting and storing changes nothing a summary shows, and no event is lost between runs.
+    What was reported is summarised as `irimi shadow` summarises it, through `with_stored_path`."""
     serve = run_workflow(name, scenario, "serve")
     if not started(serve):
         return
@@ -462,7 +463,8 @@ def test_all_of_a_serves_runs_together_are_what_it_reported_live(run_workflow, n
     union = StoredRun(RunRecord.header(trace.UNATTRIBUTED), [*exchanges, *telemetry, *tool_calls])
     maps = serve.maps()
     handed_calls = [e for e in serve.handed_events if isinstance(e, ToolCall)]
-    events = [*map(for_summary, serve.reported), *handed_calls]
+    key = redact.load_key(serve.home) if serve.reported else b""
+    events = [*(for_summary(with_stored_path(e, key)) for e in serve.reported), *handed_calls]
     view = RunView(RunRecord.header(trace.UNATTRIBUTED), events)
     live = summary_lines(view, maps, 0.0, Live())
     # The one line only a live block prints, for a run that saw no traffic.
