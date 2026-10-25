@@ -39,6 +39,8 @@ class Scenario:
     serve_flags: tuple[str, ...] = ()
     # The irimi flags it runs with under `irimi shadow -- <cmd>`.
     shadow_flags: tuple[str, ...] = ()
+    # Entered around irimi in the harness's own process, so a scenario can patch irimi there.
+    inside_irimi: Callable[[], contextlib.AbstractContextManager[object]] = contextlib.nullcontext
 
 
 @dataclass(frozen=True)

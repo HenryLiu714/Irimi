@@ -28,7 +28,7 @@ and whether the invariants below held.
 
 | | Workflow | Trigger | What it exercises |
 |---|---|---|---|
-| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, idempotency, `irimi compare`, most of `irimi replay`, and deleting runs mid-run |
+| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, a decision that fails after its check read, idempotency, `irimi compare`, most of `irimi replay`, and deleting runs mid-run |
 | W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination over a cursor irimi minted, 40 writes in one run, a block with no entrypoint to replay, look-alike fields and a key across a run name's cut |
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads |
 | W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks and one whose target is down, posts that print alike |
@@ -82,7 +82,8 @@ A new workflow is found by name, so it is held to these without an edit to the t
 2. In `agent.py`, call `agentkit.start()` first, label each call a test keys on (`label=`), and
    log a final `result`. Take `trigger`, `run` and the tool decorators from `observe`, and the rest
    of the SDK from `irimi.sdk`. Give the agent real inputs through argv and environment, set by
-   the scenario, rather than branching on the scenario's name.
+   the scenario, rather than branching on the scenario's name. To make irimi itself fail, a
+   scenario's `inside_irimi` patches it: irimi runs in the harness's process.
 3. Add `test_wNN_<name>.py` beside this file, pinning what irimi does in each scenario.
 4. Run `uv run pytest -q -n auto tests/e2e/workflows`; the invariants and the cross-workflow
    tests pick the new scenarios up.

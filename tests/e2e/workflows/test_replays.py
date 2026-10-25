@@ -20,7 +20,8 @@ from tests.e2e.workflows.harness.result import Result
 from tests.e2e.workflows.harness.scenario import workflows
 
 CASES = [(name, scenario) for name, wf in workflows().items() for scenario in wf.scenarios]
-W2, W3, W5, W6 = (
+W1, W2, W3, W5, W6 = (
+    "w01_ticket_triage",
     "w02_nightly_reconcile",
     "w03_queue_worker",
     "w05_dispute_responder",
@@ -176,6 +177,9 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
 # Rule 3's exception: the engine refuses a write whose body decodes past irimi's cap before any
 # policy is asked, so no replay flag is due.
 CUT_BEFORE_THE_POLICY = {(W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
+# And a decision that raises is answered with irimi's 502, which keeps no flag the policy would
+# have added.
+DECISION_RAISES = {(W1, "too_large_decision_fails")}
 # Rule 2's exception: (recorded exit, replay's agent exit, why).
 EXIT_DIFFERS = {
     (W7, "two_callers"): (
@@ -472,6 +476,8 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             lost = [
                 x for x in lost if Flag.DECISION_FAILED not in x or Flag.BODY_TRUNCATED not in x
             ]
+        if case in DECISION_RAISES:
+            lost = [x for x in lost if Flag.DECISION_FAILED not in x]
         assert lost == [], r.run_id
         # 4. Every answer irimi decided reached the agent stamped as irimi recorded it.
         if not alone_differs:
@@ -531,7 +537,7 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
         assert {ending(r) for r in replays} == ALONE[case].ends
     if case in REACHES_THE_INTERNET:
         assert any(r.replay.internet.requests() for r in replays)
-    if case in CUT_BEFORE_THE_POLICY:
+    if case in CUT_BEFORE_THE_POLICY | DECISION_RAISES:
         assert any(flag_problems(r.replay) for r in replays)
     if case in COMPARE_DIFFERS:
         assert any(r.compared and r.compared[0] == 1 for r in replays)
@@ -574,6 +580,7 @@ def test_the_tables_name_only_scenarios_that_exist():
         | set(ALONE)
         | set(REACHES_THE_INTERNET)
         | CUT_BEFORE_THE_POLICY
+        | DECISION_RAISES
         | set(EXIT_DIFFERS)
         | set(COMPARE_DIFFERS)
         | set(ENDS_DIFFER)

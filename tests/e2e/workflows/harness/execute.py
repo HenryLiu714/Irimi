@@ -364,7 +364,7 @@ def _as_irimi(
     workdir: Path,
     logs: list[str],
 ) -> Iterator[None]:
-    """Set this process up for irimi: environment, `cwd`, TMPDIR, maps, fake resolver and a CA.
+    """Set this process up for irimi: environment, `cwd`, TMPDIR, maps, resolver, CA, patches.
 
     irimi's check read is urllib in this process, and urllib on macOS falls back to the system
     proxy, so `no_proxy=*` keeps it direct. The agent still gets irimi's own `NO_PROXY`. What
@@ -377,6 +377,7 @@ def _as_irimi(
         scenario_maps(scenario, workdir),
         internet.resolving(),
         _keeping_logs(logs),
+        scenario.inside_irimi(),
     ):
         ca.generate_ca(ca.ca_paths())
         yield
