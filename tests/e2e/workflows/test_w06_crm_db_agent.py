@@ -792,20 +792,45 @@ def test_async_tools_replayed_answers_each_read_with_what_its_await_got(replayed
     assert replay.returned() == recorded.returned()
 
 
+# What `irimi replay` prints for a merge scenario replayed alone, after its header.
+MERGES_REPLAYED_ALONE = {
+    "merge_once": [
+        "  ~ A ○ tool  crm.merge_accounts  fake ran instead",
+        "    B ○ tool  crm.merge_accounts  fake raised sqlite3.OperationalError",
+        SENT_ALIKE,
+        '      raised: (absent) -> "sqlite3.OperationalError"',
+        "",
+        "  0 same · 1 changed · 0 only in A · 0 only in B",
+    ],
+    # The agent catches only the `LookupError` its first merge raised, so the replay ends there.
+    "merge_retry": [
+        "  ~ A ○ tool  crm.merge_accounts  fake raised builtins.LookupError",
+        "    B ○ tool  crm.merge_accounts  fake raised sqlite3.OperationalError",
+        SENT_ALIKE,
+        '      raised: "builtins.LookupError" -> "sqlite3.OperationalError"',
+        "  - ○ tool  crm.merge_accounts  fake ran instead",
+        "",
+        "  0 same · 1 changed · 1 only in A · 0 only in B",
+    ],
+}
+
+
 @pytest.mark.parametrize("mode", MODES)
-def test_merge_once_replayed_alone_says_its_merge_sent_the_same_and_only_raised_otherwise(
-    replayed, mode
+@pytest.mark.parametrize("scenario", MERGES_REPLAYED_ALONE)
+def test_a_merge_replayed_alone_says_it_sent_the_same_and_names_what_its_fake_raised(
+    replayed, scenario, mode
 ):
     """Called alone, the trigger finds no accounts table, so the merge's fake raises.
 
-    The agent made the recorded call with the recorded args, so `irimi replay` says the two merges
-    sent the same and names what their fakes did, rather than reading as a change the agent made.
-    The recording ran under shadow or serve."""
-    recorded, replay = replayed(W, "merge_once", mode=mode)
+    The agent made its first recorded call with the recorded args, so `irimi replay` says the two
+    merges sent the same and names what their fakes raised, rather than reading as a change the
+    agent made. The recording ran under shadow or serve."""
+    recorded, replay = replayed(W, scenario, mode=mode)
     assert check_invariants(replay) == []
     assert (recorded.exit_code, replay.agent_exit_code(), replay.exit_code) == (0, 1, 1)
     [merge] = replayed_calls(replay)
-    assert (merge.name, merge.args) == ("crm.merge_accounts", {"keep": "acc_1", "drop": "acc_2"})
+    [first, *_] = [c for c in tool_calls(recorded) if c.name == "crm.merge_accounts"]
+    assert (merge.name, merge.args) == (first.name, first.args)
     assert merge.error == ErrorInfo("sqlite3.OperationalError", "no such table: accounts")
     source = recorded.one("run.start")["run"]
     assert replay.replay_result() == [
@@ -814,10 +839,5 @@ def test_merge_once_replayed_alone_says_its_merge_sent_the_same_and_only_raised_
         "  no divergence: every call was answered from the recording",
         "  0 from the recording · 0 missed",
         "",
-        "  ~ A ○ tool  crm.merge_accounts  fake ran instead",
-        "    B ○ tool  crm.merge_accounts  fake raised sqlite3.OperationalError",
-        SENT_ALIKE,
-        '      raised: (absent) -> "sqlite3.OperationalError"',
-        "",
-        "  0 same · 1 changed · 0 only in A · 0 only in B",
+        *MERGES_REPLAYED_ALONE[scenario],
     ]
