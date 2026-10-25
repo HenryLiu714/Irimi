@@ -825,6 +825,11 @@ def test_an_sdk_from_before_the_release_route_is_answered_as_it_was(irimi, monke
             found = self.reporter.recorded(*args)
             return None if found is None else dataclasses.replace(found, answer_id=None)
 
+        def release(self, *args: Any) -> None:
+            # Noted, never sent: an answer with no id must not be released at all.
+            released.append(args)
+
+    released: list[tuple[Any, ...]] = []
     try:
         run_id = irimi.record(_profile_then_balance)
         del sys.modules[_PROFILES.__name__]
@@ -833,6 +838,7 @@ def test_an_sdk_from_before_the_release_route_is_answered_as_it_was(irimi, monke
     finally:
         sys.modules.pop(_PROFILES.__name__, None)
     assert (result, [(c.name, c.ran) for c in calls]) == _USED_UP_WITH_ITS_BODY
+    assert released == []
     assert warnings() == []
 
 

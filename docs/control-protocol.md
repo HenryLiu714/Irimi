@@ -57,10 +57,10 @@ A `run_id` is 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`, chosen by 
 something unique, such as 16 random hex characters. Two ids that differ only in case may share a
 directory on a case-insensitive filesystem, and the second is then stored as unattributed.
 
-- `unattributed` may receive tool calls and lookups, not a start or an end: it is where calls made
-  outside any run go.
-- The process run (`IRIMI_RUN` under `irimi shadow`) belongs to irimi: it may receive tool calls
-  and lookups, and a start or end for it is refused `400`.
+- `unattributed` may receive tool calls, lookups and releases, not a start or an end: it is where
+  calls made outside any run go.
+- The process run (`IRIMI_RUN` under `irimi shadow`) belongs to irimi: it may receive tool calls,
+  lookups and releases, and a start or end for it is refused `400`.
 - A start for a run that has already ended is accepted (`204`) and dropped, counted in `health`'s
   `dropped`.
 
@@ -157,13 +157,14 @@ A replay's release of a lookup's answer the client did not use:
 ```
 
 `answer_id` is required. irimi gives back what answering used up besides the recorded call
-itself: the exchanges and read tool calls recorded within that call's span. The call stays used
-up, as one irimi cannot hand back is, so run the tool for real, and the recording answers what
-its body sends. Release only an answer you did not use: released after you returned it, it gives
-back requests the recorded call's body already answered, which a later request may then take.
-irimi holds an answer for the run its lookup named, so post the release to that run: one under
-another run, or naming an `answer_id` irimi did not give or has released already, gives back
-nothing, and is still `204`. An answer never released keeps all of it used up.
+itself: the exchanges recorded within that call's span, and the read tool calls within it that a
+later identical call would otherwise take. The call stays used up, as one irimi cannot hand back
+is, so run the tool for real, and the recording answers what its body sends. Release only an
+answer you did not use: released after you returned it, it gives back requests the recorded call's
+body already answered, which a later request may then take. irimi holds an answer for the run its
+lookup named, so post the release to that run: one under another run, or naming an `answer_id`
+irimi did not give or has released already, gives back nothing, and is still `204`, as is any
+release outside a replay. An answer never released keeps all of it used up.
 
 ### `health`
 
