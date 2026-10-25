@@ -127,6 +127,34 @@ REUSED_KEY = (
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_a_reused_key_whose_error_cannot_be_built_is_irimis_502_not_a_refund(run_workflow, mode):
+    """A reused key whose `idempotency_error` cannot be built is refused with irimi's 502.
+
+    Faked afresh it would be a refund Stripe refuses, answered 200 after a check read of its own.
+    Every other call is answered as in `idempotency`."""
+    shadow = run_workflow(W, "idempotency_conflict_fails", mode)
+    plain = run_workflow(W, "idempotency", mode)
+    assert shadow.exit_code == plain.exit_code
+    assert shadow.by_label() == {**plain.by_label(), "refund_key_reused": (502, "irimi")}
+    refund = "POST api.stripe.com/v1/refunds"
+    assert [line for line in shadow.exchange_lines() if refund in line] == [
+        f"faked         write     {refund} -> 200",
+        f"faked         write     {refund} -> 200  [idempotent-replay]",
+        f"irimi         unknown   {refund} -> 502  [unclassified, decision-failed]",
+        f"faked         write     {refund} -> 200",
+        f"faked         write     {refund} -> 200",
+    ]
+    engine_reads = [r for r in shadow.internet.requests() if r.path == "/v1/charges/ch_GAUNTLET"]
+    assert len(engine_reads) == 3
+    summary = "\n".join(summary_of(shadow))
+    assert REUSED_KEY not in summary
+    assert (
+        "refund 200 (minor units, currency unknown) on ch_GAUNTLET  refused by irimi: "
+        "irimi could not decide how to answer it"
+    ) in summary
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
     shadow = run_workflow(W, "bodies", mode)
     assert shadow.by_label() == {
@@ -208,6 +236,8 @@ def test_the_big_charge_is_past_irimis_body_limit():
 
 # The scenarios that send one write whose body decodes past irimi's cap.
 CUT_WRITES = ("bombs", "cut_refund", "cut_update")
+# Scenarios that make irimi's own answer raise, so one write is irimi's 502 and nothing else.
+RAISES_INSIDE_IRIMI = ("idempotency_conflict_fails",)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -216,12 +246,16 @@ def test_no_decision_ever_fails(run_workflow, scenario, mode):
     """No gauntlet edge makes a decision fail, except a write cut at the cap, refused by design.
 
     A failed decision answers 502 `decision-failed` (fail-closed hook rule). Each `CUT_WRITES`
-    scenario reaches that path once, and every agent call gets an HTTP answer."""
+    and `RAISES_INSIDE_IRIMI` scenario reaches that path once, and every agent call gets an HTTP
+    answer."""
     shadow = run_workflow(W, scenario, mode)
     assert shadow.exchange_lines()
     failed = [line for line in shadow.exchange_lines() if "decision-failed" in line]
-    assert [line for line in failed if not line.endswith("decision-failed, body-truncated]")] == []
-    assert len(failed) == (scenario in CUT_WRITES)
+    end = "[unclassified, decision-failed]"
+    if scenario not in RAISES_INSIDE_IRIMI:
+        end = "decision-failed, body-truncated]"
+    assert [line for line in failed if not line.endswith(end)] == []
+    assert len(failed) == (scenario in CUT_WRITES + RAISES_INSIDE_IRIMI)
     assert all(isinstance(c.get("status"), int) for c in shadow.calls())
 
 

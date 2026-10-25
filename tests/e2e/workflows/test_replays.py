@@ -177,9 +177,13 @@ REACHES_THE_INTERNET: dict[tuple[str, str], str] = {
 # Rule 3's exception: the engine refuses a write whose body decodes past irimi's cap before any
 # policy is asked, so no replay flag is due.
 CUT_BEFORE_THE_POLICY = {(W9, "bombs"), (W9, "cut_refund"), (W9, "cut_update")}
-# And a decision that raises is answered with irimi's 502, which keeps no flag the policy would
-# have added.
-DECISION_RAISES = {(W1, "too_large_decision_fails")}
+# KNOWN BUG: a decision that raises is answered with irimi's 502, which keeps no flag the policy
+# would have added, so a replayed one is a miss that carries no `replay-miss`.
+DECISION_RAISES = {(W1, "too_large_decision_fails"), (W9, "idempotency_conflict_fails")}
+# Rule 7's exception: the misses of a replay that diverges at a write the recording holds only
+# as irimi's 502, so the writes after it are decided afresh.
+_REFUND_MISSED = "fake-L1 POST api.stripe.com/v1/refunds (<Flag.REPLAY_MISS: 'replay-miss'>,)"
+MISSES_AFTER_A_FAILED_DECISION = {(W9, "idempotency_conflict_fails"): [_REFUND_MISSED] * 2}
 # Rule 2's exception: (recorded exit, replay's agent exit, why).
 EXIT_DIFFERS = {
     (W7, "two_callers"): (
@@ -502,9 +506,14 @@ def test_every_run_of_every_scenario_replays_from_its_recording(
             # and the replay says so.
             missed = [line(ex) for ex in replay.reported if Flag.REPLAY_MISS in ex.flags]
             if not alone_differs:
-                assert missed == [], r.run_id
+                assert missed == MISSES_AFTER_A_FAILED_DECISION.get(case, []), r.run_id
             # A read tool run for real is a miss too, which a scenario's table names.
-            whole = not (alone_differs or case in TOOLS_RUN_FOR_REAL or case in NAMES_ITS_OWN_RUNS)
+            whole = not (
+                alone_differs
+                or case in TOOLS_RUN_FOR_REAL
+                or case in NAMES_ITS_OWN_RUNS
+                or case in MISSES_AFTER_A_FAILED_DECISION
+            )
             if whole:
                 assert f"  {replay_report.NO_DIVERGENCE}" in replay.replay_result(), r.run_id
         if alone_differs:
@@ -581,6 +590,7 @@ def test_the_tables_name_only_scenarios_that_exist():
         | set(REACHES_THE_INTERNET)
         | CUT_BEFORE_THE_POLICY
         | DECISION_RAISES
+        | set(MISSES_AFTER_A_FAILED_DECISION)
         | set(EXIT_DIFFERS)
         | set(COMPARE_DIFFERS)
         | set(ENDS_DIFFER)
