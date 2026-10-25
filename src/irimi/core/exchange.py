@@ -1,7 +1,7 @@
 """Engine-independent record of one HTTP exchange."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, Protocol
@@ -219,16 +219,28 @@ def clip_chunks(chunks: tuple[int, ...], size: int) -> tuple[int, ...]:
 def is_authored_write(exchange: Exchange) -> bool:
     """Return True if irimi faked this write itself, so later reads may show its effect.
 
-    A run's write log holds exactly these. Excluded: live kinds; live, target and irimi answers;
-    `decision-failed` (schema 2 recorded that 502 as `fake-L0`); rejections; idempotent retries
-    and conflicts, which would apply one write twice or a write that never happened.
+    A run's write log holds exactly these (`is_authored_answer`).
+    """
+    return is_authored_answer(
+        exchange.kind, exchange.answered_by, exchange.flags, exchange.precondition
+    )
+
+
+def is_authored_answer(
+    kind: Kind, answered_by: AnsweredBy, flags: Sequence[Flag], precondition: Precondition
+) -> bool:
+    """Return True if an answer with these fields is a write irimi faked itself.
+
+    Excluded: live kinds; live, target and irimi answers; `decision-failed` (schema 2 recorded
+    that 502 as `fake-L0`); rejections; idempotent retries and conflicts, which would apply one
+    write twice or a write that never happened.
     """
     return (
-        exchange.kind not in LIVE_KINDS
-        and exchange.answered_by not in ("live", "delegated", "irimi")
-        and Flag.DECISION_FAILED not in exchange.flags
-        and exchange.precondition.outcome != "rejected"
-        and not any(flag in exchange.flags for flag in IDEMPOTENCY_FLAGS)
+        kind not in LIVE_KINDS
+        and answered_by not in ("live", "delegated", "irimi")
+        and Flag.DECISION_FAILED not in flags
+        and precondition.outcome != "rejected"
+        and not any(flag in flags for flag in IDEMPOTENCY_FLAGS)
     )
 
 

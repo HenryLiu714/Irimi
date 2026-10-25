@@ -41,15 +41,16 @@ class ReplayPolicy:
     | --- | --- | --- |
     | llm; read before the replay diverged | the recorded response | live |
     | read, after the replay diverged | never taken | live, with the overlay |
-    | write, unknown | the recorded answer, at its recorded level | faked; the replay diverges |
+    | write, unknown | the recorded answer, at its recorded level | faked; diverges unless refused |
     | telemetry, sent to a target | not looked up, no flag | as in shadow mode |
 
     A write is looked up with its idempotency standing; a checked write is served only while the
-    replay has not diverged. A write miss or a stale recorded answer diverges it; a read or llm
-    miss does not. A recorded read is not overlaid again: its bytes already show the matched
-    writes. A recorded answer keeps its `answered_by`, overlay and minted ids; only `live`
-    becomes `recording` (answered-by header). Misses go to `self.shadow`, whose check
-    reads come from the recording; a lookup that raises is a miss (fail-closed hook rule).
+    replay has not diverged. Only a missed write the write log takes (`Decided.is_authored_write`),
+    or a stale recorded answer, diverges it. A recorded read is not overlaid again: its bytes
+    already show the matched writes. A recorded answer keeps its `answered_by`, overlay and
+    minted ids; only `live` becomes `recording` (answered-by header). Misses go to `self.shadow`,
+    whose check reads come from the recording; a lookup that raises is a miss (fail-closed hook
+    rule).
     """
 
     name: str = "replay"
@@ -96,9 +97,10 @@ class ReplayPolicy:
             found = None
         if found is not None:
             return found
-        if kind not in LIVE_KINDS:
-            self.recording.diverge()
         decided = self.shadow.decide(request, classification, write_log, run_id, target)
+        # Only a write the write log takes is one a later recorded read would show.
+        if decided.is_authored_write(kind):
+            self.recording.diverge()
         return replace(decided, flags=(*decided.flags, Flag.REPLAY_MISS))
 
     def _from_recording(

@@ -105,12 +105,14 @@ own placeholder. Each recorded exchange answers once, in recorded order.
 | --- | --- | --- |
 | an LLM call, or a read before the replay diverged | the recorded response | sent live |
 | a read after the replay diverged | not used | sent live, with the overlay |
-| a write | the recorded answer | faked as shadow mode fakes it; the replay diverges |
+| a write | the recorded answer | faked as shadow mode fakes it; the replay diverges unless refused |
 | telemetry, or a request sent to a target | not looked up | as in shadow mode |
 
 A write is never forwarded in a replay. A recorded read made after a recorded write that the
 replay has not made is stale: it would show a write that did not happen, so it is never served,
-and reaching one diverges the replay. irimi's check reads are answered from the recording too.
+and reaching one diverges the replay. irimi's check reads are answered from the recording too. A
+missed write that shadow mode refuses (the precondition check rejects it, or it is a retry or
+reuses an idempotency key) changes nothing a recorded read shows, so it does not diverge the replay.
 
 **Divergence** is the first of the agent's own calls that the recording did not answer: an exchange
 flagged `replay-miss`, or a read tool that ran for real. irimi's check reads and write tools' fakes

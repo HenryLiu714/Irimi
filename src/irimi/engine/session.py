@@ -25,7 +25,6 @@ from irimi.core.exchange import (
     OverlayCoverage,
     Request,
     Response,
-    WriteOutcome,
     is_authored_write,
 )
 from irimi.core.limits import MAX_DECODED_BODY
@@ -415,12 +414,7 @@ class ShadowSession:
         stream_chunks: tuple[int, ...] = (),
     ) -> Exchange:
         """Return the exchange a plan became, ending now."""
-        decision, cls = plan.decision, plan.classification
-        outcome = WriteOutcome()
-        if isinstance(decision, Respond):
-            outcome = decision.outcome
-        elif isinstance(decision, Delegate):
-            outcome = WriteOutcome(decision.precondition)
+        cls, outcome = plan.classification, plan.decision.outcome
         return Exchange(
             request=plan.request,
             response=response,

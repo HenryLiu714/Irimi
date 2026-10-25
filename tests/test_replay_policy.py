@@ -801,6 +801,39 @@ def test_a_key_reused_for_another_write_is_refused_whatever_the_recording_holds(
     )
 
 
+def test_a_missed_write_the_check_rejects_leaves_the_replay_answering_from_the_recording():
+    """A refused write changes nothing a recorded read shows, so the replay does not diverge."""
+    engine = _stored(_req(), CHARGE, issued_by="engine")
+    policy = ReplayPolicy(_recording(engine, _stored(_req())), SHIPPED)
+    refused = _answer(policy, _keyed_refund(9800, "x"))
+    assert (refused.response.status, refused.precondition) == (400, "rejected")
+    assert refused.flags[-1] == Flag.REPLAY_MISS
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "recording"
+
+
+def test_a_missed_retry_leaves_the_replay_answering_from_the_recording():
+    """A retry the recording has no answer for repeats a write already made: no divergence."""
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), shown), SHIPPED)
+    assert Flag.FROM_RECORDING in _answer(policy, _keyed_refund(100, "k1")).flags
+    retry = _answer(policy, _keyed_refund(100, "k1"))
+    assert retry.flags == (Flag.IDEMPOTENT_REPLAY, Flag.REPLAY_MISS)
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "overlay"
+
+
+def test_a_missed_reused_key_leaves_the_replay_answering_from_the_recording():
+    """A key reused for another write is refused as the service would refuse it: no divergence."""
+    shown = _stored(_req(), answered_by="overlay", flags=(), overlay="full")
+    policy = ReplayPolicy(_recording(_recorded_keyed(100, "k1"), shown), SHIPPED)
+    assert Flag.FROM_RECORDING in _answer(policy, _keyed_refund(100, "k1")).flags
+    reused = _answer(policy, _keyed_refund(250, "k1"))
+    assert reused.flags[-2:] == (Flag.IDEMPOTENCY_CONFLICT, Flag.REPLAY_MISS)
+    assert not policy.recording.diverged
+    assert _answer(policy, _req()).answered_by == "overlay"
+
+
 def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():
     """A refund refused after a refund this run never made passes when checked again."""
     engine = _stored(_req(), CHARGE, issued_by="engine")

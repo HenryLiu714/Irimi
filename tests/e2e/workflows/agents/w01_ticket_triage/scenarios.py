@@ -110,7 +110,8 @@ WORKFLOW = Workflow(
             "verify",
             "refund the whole charge, then read the charge again, which the overlay answers with "
             "the refund in it; replayed with `PROMPT=verify_only`, which refunds nothing, "
-            "that recorded read shows a refund the replay never made",
+            "that recorded read shows a refund the replay never made; replayed with "
+            "`PROMPT=verify_twice`, whose second refund is refused, it is still the recording's",
         ),
         "checked_charge": _scenario(
             "verify_only",

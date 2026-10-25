@@ -1632,6 +1632,40 @@ def test_a_replay_that_adds_a_refund_reads_live_after_it_and_sees_it(replayed):
     assert replay.internet.writes() == []
 
 
+def test_a_replay_whose_second_refund_is_refused_reads_the_charge_from_the_recording(replayed):
+    """A refund the check refuses in a replay changes nothing, so the replay does not diverge.
+
+    `verify_twice` refunds again before it reads the charge. The second refund misses and is
+    refused, as the first already refunded it all; the read after it is still the recording's,
+    which shows the first refund, and Stripe hears nothing."""
+    recorded, replay = replayed(W, "verified_refund", {"PROMPT": "verify_twice"})
+    assert check_invariants(replay) == []
+    assert replay.answered() == [
+        ("llm#1", 200, None),
+        ("get_charge#1", 200, "recording"),
+        ("llm#2", 200, None),
+        (REFUND, 200, "fake-L1"),
+        ("llm#3", 200, None),
+        ("issue_refund#3", 400, "fake-L1"),
+        ("llm#4", 200, None),
+        ("get_charge#4", 200, "overlay"),
+        ("llm#5", 200, None),
+        ("llm#6", 200, None),
+    ]
+    refused = [ex for ex in replay.reported if ex.kind == "write"][-1]
+    assert (refused.precondition.rejection_code, refused.flags) == (
+        "charge_already_refunded",
+        ("replay-miss",),
+    )
+    again = [ex for ex in replay.reported if ex.request.path == "/v1/charges/ch_TICKET1"][-1]
+    [recorded_again] = [ex for ex in recorded.reported if ex.answered_by == "overlay"]
+    assert again.flags == ("from-recording",)
+    assert again.response.body == recorded_again.response.body
+    assert replay.internet.requests("api.stripe.com") == []
+    assert replay.returned()["refund_statuses"] == [200, 400]
+    assert replay.replay_result()[3] == "  4 from the recording · 7 missed"
+
+
 def _place(result, event: str, name: str) -> int:
     """Return where in the agent's log the first `event` named `name` is."""
     return next(
