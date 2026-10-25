@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from irimi.core.exchange import Flag, Response, is_authored_write
+from irimi.core.exchange import Flag, Precondition, Response, is_authored_write
 from irimi.core.netaddr import Target
 from irimi.decide.overlay import ServiceOverlay
 from irimi.decide.policy import Decided, Delegate, Forward, Respond, ShadowPolicy
@@ -250,3 +250,19 @@ def test_a_write_sent_to_a_target_is_recorded_with_the_precondition_its_decision
     answer = json_response(200, {"id": "re_1"})
     exchange = session.complete(plan, Received(answer)).exchange
     assert (exchange.answered_by, exchange.precondition.outcome) == ("delegated", "not_evaluable")
+
+
+def test_a_forwarded_read_is_recorded_with_no_precondition_and_no_webhooks():
+    """A live forward carries no verdict, as its `Forward` says."""
+    policy = ShadowPolicy(reader=canned_reader(), maps=SHIPPED)
+    session = ShadowSession(policy, NullStore(), ServiceOverlay(), SHIPPED, "run")
+    read = make_request(path="/v1/charges/ch_REAL")
+    plan = session.plan(Admitted(read, "run", "forward", ("127.0.0.1", 1)))
+    assert isinstance(plan.decision, Forward)
+    received = Received(json_response(200, charge_document()))
+    exchange = session.complete(plan, received).exchange
+    assert (exchange.answered_by, exchange.precondition, exchange.would_fire) == (
+        "live",
+        Precondition(),
+        (),
+    )

@@ -855,7 +855,7 @@ def test_a_replay_answers_every_write_itself_whatever_the_recording_holds(state,
     elif state == "unsearchable":
         monkeypatch.setattr(recording, "answer_for", lambda *args: 1 / 0)
     policy = ReplayPolicy(recording, SHIPPED)
-    asked = 0
+    asked: dict[str, int] = {}
     for request in _every_unsafe_request():
         cls = classify(request, SHIPPED)
         if cls.kind in LIVE_KINDS:
@@ -863,8 +863,10 @@ def test_a_replay_answers_every_write_itself_whatever_the_recording_holds(state,
         decision = policy.decide(request, cls, (), "rep").decision
         assert isinstance(decision, Respond), (request.method, request.host, request.path)
         assert decision.answered_by != "live"
-        asked += 1
-    assert asked > 50
+        asked[cls.kind] = asked.get(cls.kind, 0) + 1
+    # Both kinds that are never forwarded, each over many routes.
+    assert sorted(asked) == ["unknown", "write"]
+    assert min(asked.values()) >= 5 and sum(asked.values()) > 50
 
 
 def test_a_checked_write_recorded_after_a_write_the_replay_has_not_made_is_checked_again():
