@@ -4,8 +4,10 @@ Agents call real host names, so irimi uses its shipped maps; only name resolutio
 
 from __future__ import annotations
 
+import bz2
 import contextlib
 import functools
+import gzip
 import ipaddress
 import json
 import socket
@@ -53,6 +55,14 @@ PADDED_LINE = b" "
 PADDED_BYTES = 128 * 1024 * 1024
 # The answers a bomb fault gives, by its action: the `Content-Encoding` each is sent in.
 BOMB_ENCODINGS = {"gzip-bomb": "gzip", "br-bomb": "br", "zstd-bomb": "zstd"}
+# The `Content-Encoding` a coding fault sends the service's own answer in, by its action: two
+# stacked codings irimi undoes, and one it does not decode.
+CODED = {"gzip-br": "gzip, br", "bzip2": "bzip2"}
+_ENCODERS: dict[str, Callable[[bytes], bytes]] = {
+    "gzip": lambda body: gzip.compress(body, mtime=0),
+    "br": brotli.compress,
+    "bzip2": bz2.compress,
+}
 # The most a fake service decodes of a gzip request body; past it the request is refused 413, so
 # an agent's own bomb never costs the harness more than this.
 MAX_REQUEST_DECODED = 16 * 1024 * 1024
@@ -74,6 +84,13 @@ def bomb(encoding: str) -> bytes:
         parts = [zstd.compress(BOMB_HEAD)] + [zstd.compress(block) for _ in range(blocks)]
         return b"".join([*parts, zstd.flush()])
     raise ValueError(f"no bomb in {encoding!r}")
+
+
+def _encoded(body: bytes, content_encoding: str) -> bytes:
+    """Return `body` in each coding `content_encoding` names, applied first to last."""
+    for name in content_encoding.split(", "):
+        body = _ENCODERS[name](body)
+    return body
 
 
 @dataclass(frozen=True)
@@ -163,8 +180,9 @@ class Fault:
     `401`, `429`, `500` and `garbage` answer at once, and `503-json` with an empty JSON object;
     `stall` answers late; `reset` resets before any response; `reset-stream` resets after the
     first chunk; `*-bomb` answers with `bomb()`; `gzip-padded` gzips the service's answer followed
-    by `PADDED_BYTES` of blanks. An action ending in `-paired` waits, up to `STALL_S`, for a second
-    such request, then answers, first come first. A faulted request is still recorded in `log`."""
+    by `PADDED_BYTES` of blanks; `gzip-br` and `bzip2` send it in their `CODED` encoding. An action
+    ending in `-paired` waits, up to `STALL_S`, for a second such request, then answers, first come
+    first. A faulted request is still recorded in `log`."""
 
     host: str
     action: str
@@ -308,6 +326,15 @@ class FakeInternet:
                 **resp.headers,
                 "content-type": "application/json",
                 "content-encoding": "gzip",
+            }
+            return Resp(resp.status, sent, headers), None
+        if action in CODED:
+            coding = CODED[action]
+            sent = _encoded(json.dumps(resp.body).encode(), coding)
+            headers = {
+                **resp.headers,
+                "content-type": "application/json",
+                "content-encoding": coding,
             }
             return Resp(resp.status, sent, headers), None
         return resp, action

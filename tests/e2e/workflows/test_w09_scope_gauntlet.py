@@ -2,12 +2,14 @@
 
 The labels are the calls in `tests/e2e/workflows/agents/w09_scope_gauntlet/agent.py`."""
 
+import bz2
 import dataclasses
 import hashlib
 import json
 import re
 import shlex
 import sys
+from urllib.parse import urlencode
 
 import pytest
 
@@ -27,6 +29,7 @@ from irimi.record import redact
 from irimi.record.store.layout import RUNS_DIR, SERVE_LOCK_FILE
 from irimi.report.runs import MAX_TRIGGER_SHOWN, RUN_LIST_HEADER, event_line
 from irimi.report.terminal import WIDE_BIND_NOTICE, exchange_line
+from tests.e2e.workflows.agents import credentials
 from tests.e2e.workflows.agents.w09_scope_gauntlet.agent import (
     AGENT_VERSION,
     ALLOWED_BASE_URL_HOST,
@@ -131,6 +134,11 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
         "refund_gzip": (200, "fake-L1"),
         "refund_chunked": (200, "fake-L1"),
         "customer_3mb": (200, "fake-L1"),
+        "refund_gzip_br": (200, "fake-L1"),
+        "refund_gzip_members": (200, "fake-L1"),
+        "refund_bzip2": (502, "irimi"),
+        "read_gzip_br": (200, "overlay"),
+        "read_bzip2": (200, None),
     }
     summary = "\n".join(summary_of(shadow))
     # irimi read the refund amount out of the gzip body and out of the chunked one.
@@ -146,6 +154,96 @@ def test_gzip_chunked_and_oversized_bodies_are_still_faked(run_workflow, mode):
     assert 3_000_000 < len(update.request.body) < MAX_STORED_BODY
     assert 3_000_000 < len(update.response.body) < MAX_STORED_BODY
     assert Flag.BODY_TRUNCATED not in update.flags
+
+
+def stored_refunds(result, method: str) -> list[Exchange]:
+    """The agent's stored `method /v1/refunds` exchanges, in the order it sent them."""
+    return [
+        e
+        for e in result.stored_events()
+        if isinstance(e, Exchange) and e.issued_by == "agent"
+        if (e.request.method, e.request.path) == (method, "/v1/refunds")
+    ]
+
+
+def noted_refund(amount: str) -> bytes:
+    """Return the form `bodies` refunds `amount` with, its note the agent's key."""
+    note = {"charge": CHARGE, "amount": amount, "metadata[note]": credentials.STRIPE_API_KEY}
+    return urlencode(note).encode()
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_body_in_stacked_codings_or_in_gzip_members_is_read_whole_and_stored_redacted(
+    run_workflow, mode
+):
+    """A refund in `gzip, br` and one split over two gzip members are decoded whole and faked.
+
+    The `gzip, br` note holds the agent's key, stored as its placeholder, so redaction read it."""
+    shadow = run_workflow(W, "bodies", mode)
+    key = credentials.STRIPE_API_KEY.encode()
+    hidden = redact.placeholder(redact.load_key(shadow.home), credentials.STRIPE_API_KEY).encode()
+    assert [(e.request.body, e.flags) for e in stored_refunds(shadow, "POST")] == [
+        (f"charge={CHARGE}&amount=300".encode(), ()),
+        (f"charge={CHARGE}&amount=400".encode(), ()),
+        (noted_refund("500").replace(key, hidden), ()),
+        (f"charge={CHARGE}&amount=600".encode(), ()),
+        (b"", (Flag.DECISION_FAILED, Flag.BODY_TRUNCATED)),
+    ]
+    checked = "faked; checked against live state: would succeed"
+    assert [line for line in summary_of(shadow) if line.startswith(("  ○", "  ✗"))] == [
+        f"  ○ stripe  refund $3.00 on {CHARGE}  {checked}",
+        f"  ○ stripe  refund $4.00 on {CHARGE}  {checked}",
+        f"  ○ stripe  update customer {CUSTOMER}  faked; not checked",
+        f"  ○ stripe  refund $5.00 on {CHARGE}  {checked}",
+        f"  ○ stripe  refund $6.00 on {CHARGE}  {checked}",
+        f"  {CUT_REFUND}",
+    ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_write_in_a_coding_irimi_does_not_decode_is_refused_and_stored_empty(run_workflow, mode):
+    """A refund in bzip2 gets irimi's 502, never leaves, and is stored empty and flagged.
+
+    Redaction cannot read bzip2, so stored as it came, the key in its note would reach disk."""
+    shadow = run_workflow(W, "bodies", mode)
+    assert [r for r in shadow.internet.requests() if r.method == "POST"] == []
+    refused = stored_refunds(shadow, "POST")[-1]
+    assert (refused.answered_by, refused.service, refused.operation) == (
+        "irimi",
+        "stripe",
+        "refunds.create",
+    )
+    assert refused.response is not None
+    assert json.loads(refused.response.body)["error"]["message"] == (
+        "irimi could not decide how to answer this request: request body does not decode, or "
+        "decodes to more than 64 MiB; irimi does not fake a write it cannot read whole"
+    )
+    sent = bz2.compress(noted_refund("700"))
+    on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
+    assert not any(sent in data for data in on_disk)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_read_back_in_stacked_codings_is_overlaid_and_one_in_bzip2_is_not(run_workflow, mode):
+    """The `gzip, br` read-back shows the run's four faked refunds; the bzip2 one shows none.
+
+    irimi rebuilds the first decoded, with no coding, as mitmproxy cannot encode two. The second
+    reaches the agent in bzip2 as the service sent it, stored empty and flagged."""
+    shadow = run_workflow(W, "bodies", mode)
+    assert [(e["label"], e["encoding"], e["amounts"]) for e in shadow.events("refunds")] == [
+        ("read_gzip_br", None, [600, 500, 400, 300]),
+        ("read_bzip2", "bzip2", None),
+    ]
+    reads = stored_refunds(shadow, "GET")
+    assert [(e.flags, e.overlay) for e in reads] == [
+        ((), "full"),
+        ((Flag.BODY_TRUNCATED,), "partial"),
+    ]
+    assert reads[1].response is not None and reads[1].response.body == b""
+    assert shadow.exchange_lines()[-2:] == [
+        "real          read      GET api.stripe.com/v1/refunds -> 200  [overlay]",
+        "real          read      GET api.stripe.com/v1/refunds -> 200  [body-truncated]",
+    ]
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -204,14 +302,14 @@ def test_the_big_charge_is_past_irimis_body_limit():
     assert BIG_DESCRIPTION_BYTES > MAX_BODY_BYTES
 
 
-# The scenarios that send one write whose body decodes past irimi's cap.
-CUT_WRITES = ("bombs", "cut_refund", "cut_update")
+# The scenarios that send one write whose body irimi cannot read whole.
+CUT_WRITES = ("bodies", "bombs", "cut_refund", "cut_update")
 
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("scenario", sorted(WORKFLOW.scenarios))
 def test_no_decision_ever_fails(run_workflow, scenario, mode):
-    """No gauntlet edge makes a decision fail, except a write cut at the cap, refused by design.
+    """No gauntlet edge makes a decision fail, except a write not read whole, refused by design.
 
     A failed decision answers 502 `decision-failed` (fail-closed hook rule). Each `CUT_WRITES`
     scenario reaches that path once, and every agent call gets an HTTP answer."""

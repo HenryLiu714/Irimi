@@ -93,7 +93,16 @@ WORKFLOW = Workflow(
             doc="DELETE/PATCH/PUT/unrouted POST are faked; a fixture-less write gets an echo",
         ),
         "idempotency": Scenario(("idempotency",), setup=_stripe, doc="one key, three uses"),
-        "bodies": Scenario(("bodies",), setup=_stripe, doc="gzip, chunked, and a 3 MB body"),
+        "bodies": Scenario(
+            ("bodies",),
+            setup=_stripe,
+            faults=(
+                ("api.stripe.com", "gzip-br", _refunds_read, 1),
+                ("api.stripe.com", "bzip2", _refunds_read, 1),
+            ),
+            doc="gzip, chunked, a 3 MB body, `gzip, br`, two gzip members and bzip2, then refunds "
+            "read back in `gzip, br` and in bzip2",
+        ),
         "big_reads": Scenario(
             ("big_reads",), setup=_big, doc="a 3 MB charge: the check read and the overlay give up"
         ),

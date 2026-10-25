@@ -4,6 +4,7 @@ Its control groups post runs to the control endpoint by hand, doing what the SDK
 
 from __future__ import annotations
 
+import bz2
 import gzip
 import hashlib
 import json
@@ -17,6 +18,8 @@ from collections.abc import Callable
 from http.client import HTTPConnection, HTTPException
 from typing import Any
 from urllib.parse import urlencode, urlsplit
+
+import brotli
 
 from irimi.protocol.env import CONTROL_ENV, RUN_ENV
 from tests.e2e.workflows.agents import agentkit
@@ -79,20 +82,11 @@ def _refund(form: dict[str, str], headers: dict[str, str], label: str) -> None:
 
 
 def bodies() -> None:
-    """Bodies irimi cannot read as plain fields."""
-    auth = {"Authorization": f"Bearer {agentkit.key('STRIPE_API_KEY')}"}
+    """Send bodies irimi cannot read as plain fields, then read refunds back in odd codings."""
+    key = agentkit.key("STRIPE_API_KEY")
+    auth = {"Authorization": f"Bearer {key}"}
     form = urlencode({"charge": CHARGE, "amount": "300"}).encode()
-    http(
-        "POST",
-        base("stripe") + "/v1/refunds",
-        body=gzip.compress(form),
-        headers={
-            **auth,
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Content-Encoding": "gzip",
-        },
-        label="refund_gzip",
-    )
+    _coded_refund("refund_gzip", gzip.compress(form), "gzip", auth)
     _chunked_post(
         base("stripe") + "/v1/refunds", [b"charge=", CHARGE.encode(), b"&amount=400"], auth
     )
@@ -104,6 +98,32 @@ def bodies() -> None:
         headers={**auth, "Content-Type": "application/x-www-form-urlencoded"},
         label="customer_3mb",
     )
+    # Each note holds the agent's key, which redaction finds only in a body irimi decoded.
+    noted = urlencode({"charge": CHARGE, "amount": "500", "metadata[note]": key}).encode()
+    _coded_refund("refund_gzip_br", brotli.compress(gzip.compress(noted)), "gzip, br", auth)
+    members = gzip.compress(f"charge={CHARGE}".encode()) + gzip.compress(b"&amount=600")
+    _coded_refund("refund_gzip_members", members, "gzip", auth)
+    noted = urlencode({"charge": CHARGE, "amount": "700", "metadata[note]": key}).encode()
+    _coded_refund("refund_bzip2", bz2.compress(noted), "bzip2", auth)
+    for label in ("read_gzip_br", "read_bzip2"):
+        read = stripe("GET", f"/v1/refunds?charge={CHARGE}", label=label)
+        doc = read.json()
+        agentkit.obs(
+            "refunds",
+            label=label,
+            encoding=read.headers.get("content-encoding"),
+            amounts=[r["amount"] for r in doc["data"]] if isinstance(doc, dict) else None,
+        )
+
+
+def _coded_refund(label: str, body: bytes, content_encoding: str, auth: dict[str, str]) -> None:
+    """POST a refund form already in `content_encoding`."""
+    headers = {
+        **auth,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Encoding": content_encoding,
+    }
+    http("POST", base("stripe") + "/v1/refunds", body=body, headers=headers, label=label)
 
 
 def big_reads() -> None:
