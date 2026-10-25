@@ -453,9 +453,11 @@ def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeyp
     """A coroutine closed mid-run posts its end inline and leaves the run, raising nothing.
 
     Nothing may be awaited during GeneratorExit, and the collector may close it from another
-    context. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's."""
+    context. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's, and a context
+    copied in the body is in no run once it is closed."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
+    kept: list[contextvars.Context] = []
     monkeypatch.setattr(state, "reporter", _Posts(log))
     unraisable: list[BaseException | None] = []
     monkeypatch.setattr(sys, "unraisablehook", lambda u: unraisable.append(u.exc_value))
@@ -463,6 +465,7 @@ def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeyp
     @sdk.trigger
     async def waits() -> None:
         log.append("body")
+        kept.append(contextvars.copy_context())
         await asyncio.get_running_loop().create_future()  # nothing ever resolves it
 
     async def by_hand() -> None:
@@ -472,6 +475,7 @@ def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeyp
             while not blocked.done():
                 await asyncio.sleep(0.01)
             blocked = coroutine.send(None)
+        assert kept[0].run(sdk.current_run_id) is not None
         coroutine.close()  # suspended in the body
 
     async def collected() -> None:
@@ -483,6 +487,7 @@ def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeyp
 
     asyncio.run(by_hand())
     assert log == ["start", "body", "end"] and sdk.current_run_id() is None
+    assert kept[0].run(sdk.current_run_id) is None
     asyncio.run(collected())
     assert log[3:] == ["start", "body", "end"]
     assert unraisable == []
@@ -584,6 +589,31 @@ def test_a_run_is_in_no_context_by_the_time_its_end_is_taken(irimi, monkeypatch)
     assert seen == [None]
     [run] = irimi.sdk_runs()
     assert (run.run_id, run.end.outcome) == (watched.id, "ok")
+
+
+def test_an_async_run_is_in_no_context_by_the_time_its_end_is_taken(irimi, monkeypatch):
+    """An async run ends before its `ended_at` is read, as a sync one does."""
+    kept: list[contextvars.Context] = []
+    seen: list[str | None] = []
+
+    def clock() -> float:
+        if kept:
+            seen.append(kept[0].run(sdk.current_run_id))
+        return time.time()
+
+    monkeypatch.setattr(runs, "time", types.SimpleNamespace(time=clock))
+
+    async def main() -> str:
+        async with sdk.run("watched") as watched:
+            assert watched is not None
+            kept.append(contextvars.copy_context())
+            assert kept[0].run(sdk.current_run_id) == watched.id
+            return watched.id
+
+    watched_id = asyncio.run(main())
+    assert seen == [None]
+    [run] = irimi.sdk_runs()
+    assert (run.run_id, run.end.outcome) == (watched_id, "ok")
 
 
 def test_propagate_takes_the_context_when_it_is_called_not_when_its_wrapper_runs(irimi):
