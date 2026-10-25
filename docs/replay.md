@@ -140,9 +140,10 @@ report does: `=` same, `~` changed, `-` only in A, `+` only in B, `?` not compar
   tools are not compared. A retry is the write it repeats, once.
 - **By data, not by line.** Two writes are the same when they are the same operation, irimi
   answered them the same way (faked, refused, sent to the same target; the same precondition
-  outcome and rejection code), and they carry the same fields: the objects the path names, the
-  query, the scope headers and the body less `compare_ignores:`. A write tool compares its
-  arguments. When a changed pair prints alike, the fields that differ are listed under it, as
+  outcome, rejection code and currency; the same flags for what irimi did), and they carry the
+  same fields: the objects the path names, the query, the scope headers and the body less
+  `compare_ignores:`. A write tool compares its arguments and the type of error its fake raised,
+  if any. When a changed pair prints alike, the fields that differ are listed under it, as
   `args.body` is above.
 - **Sent the same, answered otherwise.** When a changed pair's two writes sent the same (the
   fields above; for a write tool, its arguments), the line under it says
