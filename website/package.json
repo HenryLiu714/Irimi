@@ -10,7 +10,7 @@
     "dev": "npm run sync && astro dev",
     "build": "npm run sync && astro build",
     "preview": "astro preview",
-    "test:unit": "node --test scripts/",
+    "test:unit": "node --test scripts/*.test.mjs",
     "test:e2e": "playwright test",
     "test:links": "linkinator dist --recurse --skip \"^https?://(?!localhost)\""
   },

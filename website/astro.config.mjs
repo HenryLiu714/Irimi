@@ -1,10 +1,8 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
-
-// The one place the public URL lives; llms.txt and the agent install prompt read it from here.
-export const SITE = 'https://irimi.dev';
-export const GITHUB = 'https://github.com/HenryLiu714/Irimi';
+import { GITHUB, SITE } from './site.config.mjs';
+import { SIDEBAR } from './scripts/sidebar.mjs';
 
 export default defineConfig({
 	site: SITE,
@@ -12,6 +10,10 @@ export default defineConfig({
 		starlight({
 			title: 'irimi',
 			social: [{ icon: 'github', label: 'GitHub', href: GITHUB }],
+			sidebar: [
+				{ label: 'Overview', link: '/docs/' },
+				...SIDEBAR.map((g) => ({ label: g.label, items: g.items.map((slug) => `docs/${slug}`) })),
+			],
 		}),
 	],
 });
