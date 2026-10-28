@@ -10,7 +10,7 @@ npm ci
 npm run dev        # http://localhost:4321
 npm run build      # static site in dist/
 npm run test:unit  # the sync script
-npm run test:links # broken links in dist/
+npm run test:links # broken links and anchors in dist/
 npx playwright install chromium && npm run test:e2e   # browser tests against a fresh build
 ```
 
