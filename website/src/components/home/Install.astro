@@ -1,0 +1,97 @@
+---
+import CopyButton from './CopyButton.astro';
+import { SITE } from '../../../site.config.mjs';
+
+const steps = [
+	{ title: 'Install irimi', cmd: 'uv tool install --python 3.12 irimi', note: 'or: pipx install --python python3.12 irimi' },
+	{ title: 'Create the local CA', cmd: 'irimi init', note: 'generates a certificate authority in ~/.irimi/ca/, used only on this machine' },
+	{ title: 'Run your agent under shadow', cmd: 'irimi shadow -- python3 -m your_agent', note: 'any command works; irimi prints the summary when it exits' },
+];
+const tryIt = `irimi shadow -- curl -s -X POST https://api.stripe.com/v1/customers/cus_REAL123 \\
+  -d 'metadata[order_id]=6735' -d email=a@example.com`;
+const prompt = `Install irimi (shadow mode for AI agents) and run my agent under it. Follow the instructions at ${SITE}/llms.txt. Use uv tool install --python 3.12 irimi, then irimi init, then run my agent with irimi shadow -- <command>. Show me the summary irimi prints.`;
+---
+
+<div class="install">
+	<div class="tabs" role="tablist" aria-label="Install for">
+		<button type="button" role="tab" id="tab-human" aria-controls="panel-human" aria-selected="true">
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-5-6-5M12 19h8"></path></svg>
+			Terminal
+		</button>
+		<button type="button" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false" tabindex="-1">
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"></path></svg>
+			Ask your agent
+		</button>
+	</div>
+
+	<div class="panel" role="tabpanel" id="panel-human" aria-labelledby="tab-human">
+		<ol class="steps">
+			{
+				steps.map((s, i) => (
+					<li class="step">
+						<span class="step__n" aria-hidden="true">{i + 1}</span>
+						<div class="step__body">
+							<h3>{s.title}</h3>
+							<div class="cmd">
+								<code><span class="cmd__prompt" aria-hidden="true">$ </span>{s.cmd}</code>
+								<CopyButton text={s.cmd} />
+							</div>
+							<p class="step__note">{s.note}</p>
+						</div>
+					</li>
+				))
+			}
+		</ol>
+		<div class="try">
+			<p><strong>Try it in ten seconds.</strong> A first write under shadow needs no agent, no network and no key: the write never leaves your machine.</p>
+			<div class="cmd cmd--block">
+				<pre><code>{tryIt}</code></pre>
+				<CopyButton text={tryIt} />
+			</div>
+		</div>
+		<p class="install__foot">
+			Requires Python 3.12+ (a standard, not free-threaded, build) on macOS or Linux.{' '}
+			<a href="/docs/installation/">Full installation guide →</a>
+		</p>
+	</div>
+
+	<div class="panel" role="tabpanel" id="panel-agent" aria-labelledby="tab-agent" hidden>
+		<p class="panel__lead">
+			Paste this into Claude Code, Cursor, Codex or any coding agent that can run commands. It installs irimi, runs
+			your agent under shadow mode, and shows you the result.
+		</p>
+		<div class="prompt">
+			<p class="prompt__text">{prompt}</p>
+			<CopyButton text={prompt} label="Copy prompt" what="prompt" />
+		</div>
+		<ul class="agent-links">
+			<li><a href="/llms.txt"><code>/llms.txt</code></a> an index of these docs for AI tools</li>
+			<li><a href="/llms-full.txt"><code>/llms-full.txt</code></a> every docs page in one file</li>
+			<li>Every docs page has <strong>Copy page as Markdown</strong>, or add <code>.md</code> to its URL</li>
+		</ul>
+	</div>
+</div>
+
+<script>
+	const tabs = [...document.querySelectorAll<HTMLButtonElement>('.install [role="tab"]')];
+	const select = (tab: HTMLButtonElement, focus = false) => {
+		for (const t of tabs) {
+			const on = t === tab;
+			t.setAttribute('aria-selected', String(on));
+			t.tabIndex = on ? 0 : -1;
+			document.getElementById(t.getAttribute('aria-controls')!)!.hidden = !on;
+		}
+		if (focus) tab.focus();
+	};
+	tabs.forEach((tab, i) => {
+		tab.addEventListener('click', () => select(tab));
+		tab.addEventListener('keydown', (e) => {
+			const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+			if (step) {
+				e.preventDefault();
+				select(tabs[(i + step + tabs.length) % tabs.length], true);
+			}
+		});
+	});
+	if (location.hash === '#install-agent') select(tabs[1]);
+</script>

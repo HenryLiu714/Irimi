@@ -1,0 +1,32 @@
+---
+// A terminal window showing irimi's own summary output, with its status marks coloured.
+interface Props {
+	output: string;
+	title: string;
+}
+const { output, title } = Astro.props;
+
+type Part = { text: string; cls?: string };
+const lineParts = (line: string): Part[] => {
+	const mark = /^(\s*)(○|✗)(.*)$/.exec(line);
+	if (mark) {
+		const bad = mark[2] === '✗';
+		return [{ text: mark[1] }, { text: mark[2], cls: bad ? 't-bad' : 't-ok' }, { text: mark[3], cls: bad ? 't-bad-text' : undefined }];
+	}
+	if (/^\s*money:/.test(line)) return [{ text: line, cls: 't-warn' }];
+	if (/^irimi shadow ·|None of these writes/.test(line)) return [{ text: line, cls: 't-strong' }];
+	if (/^\s*(would have fired|replay with|run )/.test(line)) return [{ text: line, cls: 't-dim' }];
+	return [{ text: line }];
+};
+const lines = output.split('\n').map(lineParts);
+---
+
+<figure class="terminal">
+	<div class="terminal__bar" aria-hidden="true">
+		<span></span><span></span><span></span>
+		<p>{title}</p>
+	</div>
+	<pre class="terminal__body" tabindex="0" aria-label={`Output of ${title}`}><code>{lines.map((parts) => (
+		<span class="t-line">{parts.map((p) => (p.cls ? <span class={p.cls}>{p.text}</span> : p.text))}{'\n'}</span>
+	))}</code></pre>
+</figure>

@@ -1,0 +1,366 @@
+---
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
+import '../styles/home.css';
+import data from '../data/readme.json';
+import CopyButton from '../components/home/CopyButton.astro';
+import Install from '../components/home/Install.astro';
+import Terminal from '../components/home/Terminal.astro';
+import { GITHUB, PYPI, SITE } from '../../site.config.mjs';
+
+const INSTALL = 'uv tool install --python 3.12 irimi';
+const title = 'irimi · Shadow mode for AI agents';
+const description =
+	'A local proxy for AI agents: reads are real, writes are faked, and reads see the writes. See every write your agent would have made, and which would have failed, before you trust it.';
+
+const problems = [
+	{
+		title: 'Staging is not production',
+		body: "Your agent will meet production's customers, charges and history. A staging copy has none of them, and keeping it in step costs its own work.",
+	},
+	{
+		title: 'Mocks answer what you wrote',
+		body: "A hand-written mock returns whatever you thought the service would say, not the real service's answers and errors.",
+	},
+	{
+		title: 'Recordings stop at the first write',
+		body: 'A cassette replays what was recorded once. After the agent writes, nothing it reads reflects that write.',
+	},
+];
+
+const steps = [
+	{
+		n: '01',
+		title: 'Reads are real',
+		body: 'GETs, LLM calls and telemetry go straight through to the real service, so the agent works on real data.',
+		req: 'GET  api.stripe.com/v1/charges/ch_1',
+		res: '200 · live',
+		cls: 'live',
+	},
+	{
+		n: '02',
+		title: 'Writes are faked',
+		body: "irimi answers a write with a realistic success, never forwarding it. A refund is first checked against the real charge, so one Stripe would refuse gets Stripe's own error.",
+		req: 'POST api.stripe.com/v1/refunds',
+		res: '200 · Irimi-Answered-By: fake-L1',
+		cls: 'fake',
+	},
+	{
+		n: '03',
+		title: 'Reads see the writes',
+		body: "The agent's later reads are edited to show the run's faked writes, so what it sees stays consistent.",
+		req: 'GET  api.stripe.com/v1/charges/ch_1',
+		res: '200 · refunded: true · overlay',
+		cls: 'overlay',
+	},
+	{
+		n: '04',
+		title: 'You get the report',
+		body: 'When the agent exits, irimi lists every write it would have made, which ones would have failed, and the money involved.',
+		req: '$98.00 in faked writes',
+		res: '$49.00 of it would fail',
+		cls: 'report',
+	},
+];
+
+const limits = [
+	{
+		title: 'Only HTTP(S) through the proxy',
+		body: 'A client that ignores HTTPS_PROXY talks to the real service. SDKs that ship their own CA bundle fail TLS, and the summary counts it.',
+	},
+	{
+		title: 'Databases, files, gRPC and WebSockets are real',
+		body: 'Unless the agent wraps the function that makes them in @sdk.write_tool. Point database URLs at scratch data.',
+	},
+	{
+		title: 'Every answer is labelled',
+		body: 'Every response irimi decided carries an Irimi-Answered-By header. A write with no line in the summary went to the real service.',
+	},
+	{
+		title: 'Stored runs hold what the agent read',
+		body: 'Credentials are redacted; business data is not. irimi runs rm and irimi runs prune delete runs.',
+	},
+];
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={SITE + '/'} />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<meta property="og:type" content="website" />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={SITE + '/'} />
+		<meta name="twitter:card" content="summary" />
+		<meta name="color-scheme" content="dark light" />
+		<script is:inline>
+			// The docs' theme choice, shared through Starlight's key: stored choice, else the OS, else dark.
+			(() => {
+				let stored = null;
+				try {
+					stored = localStorage.getItem('starlight-theme');
+				} catch {}
+				const light = stored ? stored === 'light' : matchMedia('(prefers-color-scheme: light)').matches;
+				document.documentElement.dataset.theme = light ? 'light' : 'dark';
+			})();
+		</script>
+	</head>
+	<body>
+		<a class="skip" href="#main">Skip to content</a>
+		<header class="nav">
+			<div class="wrap nav__inner">
+				<a class="brand" href="/" aria-label="irimi home">
+					<img src="/favicon.svg" alt="" width="26" height="26" />
+					<span>irimi</span>
+				</a>
+				<nav aria-label="Main">
+					<a href="/docs/">Docs</a>
+					<a href="#install">Install</a>
+					<a class="hide-sm" href="/docs/limitations/">Limitations</a>
+					<a class="nav__gh" href={GITHUB} aria-label="irimi on GitHub">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"></path></svg>
+						<span class="hide-sm">GitHub</span>
+					</a>
+					<button type="button" class="theme" aria-label="Switch to light theme">
+						<svg class="theme__sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+						<svg class="theme__moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+					</button>
+				</nav>
+			</div>
+		</header>
+
+		<main id="main">
+			<section class="hero">
+				<div class="wrap hero__inner">
+					<a class="pill" href={GITHUB}>
+						<span class="pill__dot" aria-hidden="true"></span>
+						Open source · Apache-2.0 · alpha
+					</a>
+					<h1>
+						Shadow mode for AI agents.
+						<span class="accent">Reads are real. Writes are faked.</span>
+					</h1>
+					<p class="lead">
+						irimi is a local proxy between your agent and the APIs it calls. Let the agent read production, answer
+						its writes with realistic fakes, and see every write it would have made, and which would have failed,
+						before anything happens.
+					</p>
+					<div class="hero__actions">
+						<div class="cmd cmd--hero">
+							<code><span class="cmd__prompt" aria-hidden="true">$ </span>{INSTALL}</code>
+							<CopyButton text={INSTALL} what="install command" />
+						</div>
+						<a class="btn btn--primary" href="/docs/installation/">Get started</a>
+						<a class="btn btn--ghost" href="/docs/">Read the docs</a>
+					</div>
+					<div class="hero__demo">
+						<p class="caption">
+							An LLM support agent refunds the same charge twice. Under irimi, Stripe sees neither refund, the agent
+							gets Stripe's own error for the second, and the summary says so:
+						</p>
+						<Terminal output={data.heroOutput} title="irimi shadow · LLM support agent, ticket triage" />
+					</div>
+				</div>
+			</section>
+
+			<section class="section" aria-labelledby="problem">
+				<div class="wrap">
+					<p class="eyebrow">The problem</p>
+					<h2 id="problem">You can't give an agent write access until you've seen what it does with it.</h2>
+					<div class="grid grid--3">
+						{
+							problems.map((p) => (
+								<article class="card">
+									<h3>{p.title}</h3>
+									<p>{p.body}</p>
+								</article>
+							))
+						}
+					</div>
+					<p class="punch">
+						irimi lets the agent <strong>read production for real</strong> and keeps <strong>every write on your machine</strong>.
+					</p>
+				</div>
+			</section>
+
+			<section class="section" aria-labelledby="how">
+				<div class="wrap">
+					<p class="eyebrow">How it works</p>
+					<h2 id="how">One proxy, four steps.</h2>
+					<p class="sub">
+						<code>irimi shadow -- &lt;command&gt;</code> starts the proxy, runs your command with <code>HTTPS_PROXY</code>
+						and irimi's CA set, and prints the summary when it exits.{' '}
+						<a href="/docs/how-it-works/">How it works in detail →</a>
+					</p>
+					<ol class="flow">
+						{
+							steps.map((s) => (
+								<li class={`flow__step flow__step--${s.cls}`}>
+									<span class="flow__n">{s.n}</span>
+									<h3>{s.title}</h3>
+									<p>{s.body}</p>
+									<div class="flow__wire" aria-hidden="true">
+										<code>{s.req}</code>
+										<code class="flow__res">→ {s.res}</code>
+									</div>
+								</li>
+							))
+						}
+					</ol>
+				</div>
+			</section>
+
+			<section class="section section--install" id="install" aria-labelledby="install-h">
+				<div class="wrap">
+					<p class="eyebrow">Install</p>
+					<h2 id="install-h">Up and running in three commands.</h2>
+					<p class="sub">Run them yourself, or hand one prompt to your coding agent.</p>
+					<Install />
+				</div>
+			</section>
+
+			<section class="section" aria-labelledby="compare">
+				<div class="wrap">
+					<p class="eyebrow">Compared</p>
+					<h2 id="compare">Production reads, without production writes.</h2>
+					<p class="sub">How the usual ways of testing an agent compare.</p>
+					<div class="table-wrap" tabindex="0" role="region" aria-label="Comparison of approaches">
+						<table class="table table--compare">
+							<thead>
+								<tr>{data.comparison.head.map((h) => <th scope="col">{h}</th>)}</tr>
+							</thead>
+							<tbody>
+								{
+									data.comparison.rows.map((row) => (
+										<tr class:list={{ 'is-irimi': row[0] === 'irimi' }}>
+											{row.map((cell, i) => (i === 0 ? <th scope="row" set:html={cell} /> : <td set:html={cell} />))}
+										</tr>
+									))
+								}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</section>
+
+			<section class="section" aria-labelledby="supported">
+				<div class="wrap">
+					<p class="eyebrow">Supported</p>
+					<h2 id="supported">Full fakes for the APIs agents write to most.</h2>
+					<p class="sub">
+						Service maps ship with irimi; anything unmapped still gets live reads and echoed writes.{' '}
+						<a href="/docs/adding-a-service/">Add a service →</a>
+					</p>
+					<div class="table-wrap" tabindex="0" role="region" aria-label="Supported services">
+						<table class="table">
+							<thead>
+								<tr>{data.services.head.map((h) => <th scope="col">{h}</th>)}</tr>
+							</thead>
+							<tbody>
+								{
+									data.services.rows.map((row) => (
+										<tr>{row.map((cell, i) => (i === 0 ? <th scope="row" set:html={cell} /> : <td set:html={cell} />))}</tr>
+									))
+								}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</section>
+
+			<section class="section" id="what-irimi-does-not-catch" aria-labelledby="limits">
+				<div class="wrap">
+					<p class="eyebrow">Honest limits</p>
+					<h2 id="limits">What irimi does not catch.</h2>
+					<p class="sub">Read this before you rely on it.{' '}<a href="/docs/limitations/">The full list →</a></p>
+					<div class="grid grid--2">
+						{
+							limits.map((l) => (
+								<article class="card card--limit">
+									<h3>{l.title}</h3>
+									<p>{l.body}</p>
+								</article>
+							))
+						}
+					</div>
+				</div>
+			</section>
+
+			<section class="cta">
+				<div class="wrap cta__inner">
+					<h2>See what your agent would have done.</h2>
+					<p>Before it does it.</p>
+					<div class="hero__actions hero__actions--center">
+						<div class="cmd cmd--hero">
+							<code><span class="cmd__prompt" aria-hidden="true">$ </span>{INSTALL}</code>
+							<CopyButton text={INSTALL} what="install command" />
+						</div>
+						<a class="btn btn--primary" href="/docs/installation/">Get started</a>
+					</div>
+				</div>
+			</section>
+		</main>
+
+		<footer class="footer">
+			<div class="wrap footer__inner">
+				<div class="brand">
+					<img src="/favicon.svg" alt="" width="22" height="22" />
+					<span>irimi</span>
+				</div>
+				<nav aria-label="Footer">
+					<a href="/docs/">Docs</a>
+					<a href="/docs/installation/">Install</a>
+					<a href={GITHUB}>GitHub</a>
+					<a href={PYPI}>PyPI</a>
+					<a href={`${GITHUB}/blob/main/CHANGELOG.md`}>Changelog</a>
+					<a href={`${GITHUB}/blob/main/SECURITY.md`}>Security</a>
+					<a href="/llms.txt">llms.txt</a>
+				</nav>
+				<p class="footer__legal">Apache-2.0 licensed.</p>
+			</div>
+		</footer>
+
+		<script>
+			// Copy buttons: the clipboard when allowed, else select the text so ⌘C / Ctrl+C works.
+			for (const button of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+				const status = button.querySelector('.copy__status')!;
+				button.addEventListener('click', async () => {
+					let message = 'Copied';
+					try {
+						await navigator.clipboard.writeText(button.dataset.copy!);
+					} catch {
+						const code = button.parentElement?.querySelector('code, .prompt__text');
+						if (code) getSelection()?.selectAllChildren(code);
+						message = navigator.platform.includes('Mac') ? 'Press ⌘C' : 'Press Ctrl+C';
+					}
+					status.textContent = message;
+					button.classList.add('is-done');
+					setTimeout(() => {
+						status.textContent = '';
+						button.classList.remove('is-done');
+					}, 2000);
+				});
+			}
+
+			const toggle = document.querySelector<HTMLButtonElement>('.theme')!;
+			const label = () => {
+				const dark = document.documentElement.dataset.theme !== 'light';
+				toggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+			};
+			label();
+			toggle.addEventListener('click', () => {
+				const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+				document.documentElement.dataset.theme = next;
+				try {
+					localStorage.setItem('starlight-theme', next);
+				} catch {}
+				label();
+			});
+		</script>
+	</body>
+</html>

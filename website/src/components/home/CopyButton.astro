@@ -1,0 +1,18 @@
+---
+// A copy-to-clipboard button. The click handler lives once in index.astro and finds every [data-copy].
+interface Props {
+	text: string;
+	label?: string;
+	what?: string;
+}
+const { text, label, what = 'command' } = Astro.props;
+---
+
+<button type="button" class:list={['copy', { 'copy--labelled': label }]} data-copy={text} aria-label={`Copy ${what}`}>
+	<svg class="copy__icon" viewBox="0 0 24 24" aria-hidden="true">
+		<rect x="9" y="9" width="12" height="12" rx="2"></rect>
+		<path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+	</svg>
+	{label && <span class="copy__label">{label}</span>}
+	<span class="copy__status" aria-live="polite"></span>
+</button>
