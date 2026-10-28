@@ -55,8 +55,15 @@
 
 html {
 	-webkit-text-size-adjust: 100%;
-	scroll-behavior: smooth;
 	scroll-padding-top: 80px;
+}
+@media (prefers-reduced-motion: no-preference) {
+	html {
+		scroll-behavior: smooth;
+	}
+	.btn:hover {
+		transform: translateY(-1px);
+	}
 }
 
 body {
@@ -274,11 +281,9 @@ h3 {
 	border-radius: 10px;
 	font-weight: 600;
 	font-size: 16px;
+	white-space: nowrap;
 	text-decoration: none;
 	transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
-}
-.btn:hover {
-	transform: translateY(-1px);
 }
 .btn--primary {
 	background: var(--accent);
@@ -555,7 +560,7 @@ h3 {
 	font-size: 16px;
 }
 .card--limit {
-	border-left: 3px solid var(--warn);
+	box-shadow: inset 3px 0 0 var(--warn);
 }
 .punch {
 	margin: 40px 0 0;
@@ -617,8 +622,12 @@ h3 {
 	color: var(--term-text);
 	overflow-x: auto;
 }
+.flow__wire {
+	min-height: 78px;
+	justify-content: flex-end;
+}
 .flow__wire code {
-	overflow-wrap: anywhere;
+	overflow-wrap: normal;
 	font-size: inherit;
 }
 .flow__res {
@@ -657,6 +666,7 @@ h3 {
 }
 .tabs [role='tab'] {
 	flex: 1;
+	white-space: nowrap;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -733,6 +743,10 @@ h3 {
 	margin: 8px 0 0;
 	font-size: 14.5px;
 	color: var(--muted);
+}
+.step__note code,
+.try p code {
+	font-size: 0.9em;
 }
 .try {
 	margin-top: 28px;
@@ -905,6 +919,15 @@ h3 {
 	}
 }
 
+@media (max-width: 360px) {
+	.hero__actions .btn {
+		flex-basis: 100%;
+	}
+	.tabs svg {
+		display: none;
+	}
+}
+
 @media (max-width: 640px) {
 	.wrap {
 		padding: 0 16px;
@@ -938,9 +961,65 @@ h3 {
 	.hero__demo {
 		margin-top: 48px;
 	}
+	/* On a phone the terminal and the try-it command wrap, so every line can be read without scrolling. */
 	.terminal__body {
-		font-size: 12px;
+		font-size: 11.5px;
 		padding: 14px;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	.cmd--block code {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		font-size: 13px;
+	}
+	/* Tables become one card per row, each cell labelled with its column. */
+	.table {
+		min-width: 0;
+	}
+	.table thead {
+		display: none;
+	}
+	.table tr {
+		display: block;
+		padding: 14px 16px;
+		border-bottom: 1px solid var(--border);
+	}
+	.table tbody tr:last-child {
+		border-bottom: 0;
+	}
+	.table tbody th,
+	.table td {
+		display: block;
+		padding: 3px 0;
+		border: 0;
+		white-space: normal;
+	}
+	.table tbody th {
+		font-size: 17px;
+		margin-bottom: 4px;
+	}
+	.table td:empty {
+		display: none;
+	}
+	.table td::before {
+		content: attr(data-label);
+		display: block;
+		font-family: var(--mono);
+		font-size: 11.5px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--muted);
+	}
+	.table .is-irimi > * {
+		background: none;
+	}
+	.table tr.is-irimi {
+		background: var(--accent-soft);
+		box-shadow: inset 3px 0 0 var(--accent);
+	}
+	.table .is-irimi th {
+		box-shadow: none;
 	}
 	.section {
 		padding: 64px 0;

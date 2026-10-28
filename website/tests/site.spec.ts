@@ -125,7 +125,7 @@ test('copy page as Markdown', async ({ page, context }) => {
 });
 
 for (const theme of ['dark', 'light'] as const) {
-	for (const path of ['/', '/docs/concepts/', '/docs/installation/']) {
+	for (const path of ['/', '/docs/concepts/', '/docs/installation/', '/docs/how-it-works/']) {
 		test(`axe finds no contrast or a11y violations on ${path} in ${theme}`, async ({ page }) => {
 			await setTheme(page, theme);
 			await page.goto(path);
@@ -136,3 +136,88 @@ for (const theme of ['dark', 'light'] as const) {
 		});
 	}
 }
+
+test('copy page as Markdown without clipboard stays on the page', async ({ page }) => {
+	await page.addInitScript(() => {
+		Object.defineProperty(navigator, 'clipboard', {
+			value: { writeText: () => Promise.reject(new Error('denied')), write: () => Promise.reject(new Error('denied')) },
+		});
+	});
+	await page.goto('/docs/concepts/');
+	await page.getByRole('button', { name: 'Copy page as Markdown' }).click();
+	await expect(page.getByRole('button', { name: /Couldn.t copy/ })).toBeVisible();
+	expect(new URL(page.url()).pathname).toBe('/docs/concepts/');
+});
+
+test('the docs overview has Copy page as Markdown too', async ({ page }) => {
+	await page.goto('/docs/');
+	await expect(page.getByRole('button', { name: 'Copy page as Markdown' })).toBeVisible();
+});
+
+test('dark is the default theme with no stored choice, even on a light OS', async ({ browser }) => {
+	const context = await browser.newContext({ colorScheme: 'light' });
+	const page = await context.newPage();
+	for (const path of ['/', '/docs/']) {
+		await page.goto(path);
+		await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+	}
+	await context.close();
+});
+
+test('the agent prompt points at llms.txt on the site it was copied from', async ({ page, context }) => {
+	await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+	await page.goto('/');
+	await page.getByRole('tab', { name: 'Ask your agent' }).click();
+	await page.getByRole('button', { name: 'Copy prompt' }).click();
+	const copied = await page.evaluate(() => navigator.clipboard.readText());
+	expect(copied).toContain('http://localhost:4330/llms.txt');
+	expect(copied).toMatch(/database/);
+});
+
+test('llms.txt tells an agent what to check before running', async ({ request }) => {
+	const llms = await (await request.get('/llms.txt')).text();
+	expect(llms).toContain('docs.astral.sh/uv');
+	expect(llms).toMatch(/before running/i);
+	expect(llms).toMatch(/database/i);
+	// Free text sits before the first H2, per llmstxt.org; H2 sections hold link lists.
+	const firstH2 = llms.indexOf('\n## ');
+	expect(llms.indexOf('uv tool install')).toBeLessThan(firstH2);
+});
+
+test('homepage copy does not overclaim', async ({ page }) => {
+	await page.goto('/');
+	const text = await page.locator('main').innerText();
+	expect(text).not.toContain('Full fakes');
+	expect(text).toContain('HTTPS_PROXY and');
+	await expect(page.locator('#what-irimi-does-not-catch code').first()).toBeVisible();
+	await expect(page.locator('#what-irimi-does-not-catch')).toContainText('Unmapped services');
+});
+
+test.describe('at 375px', () => {
+	test.use({ viewport: { width: 375, height: 800 } });
+
+	test('the comparison shows what each approach misses without scrolling sideways', async ({ page }) => {
+		await page.goto('/');
+		const wrap = page.locator('.table-wrap').first();
+		expect(await wrap.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+		const cell = page.locator('.table--compare .is-irimi td').last();
+		await cell.scrollIntoViewIfNeeded();
+		await expect(cell).toBeInViewport();
+	});
+
+	for (const sel of ['.try pre', '.terminal__body']) {
+		test(`${sel} shows its whole text`, async ({ page }) => {
+			await page.goto('/');
+			const clipped = await page.locator(sel).evaluate((el) => el.scrollWidth - el.clientWidth);
+			expect(clipped).toBeLessThanOrEqual(0);
+		});
+	}
+});
+
+test('the how-it-works diagram is drawn at a readable size', async ({ page }) => {
+	await page.goto('/docs/how-it-works/');
+	const label = page.locator('pre.mermaid svg .nodeLabel').first();
+	await expect(label).toBeVisible();
+	const height = await label.evaluate((el) => el.getBoundingClientRect().height);
+	expect(height).toBeGreaterThanOrEqual(12);
+});

@@ -3,13 +3,26 @@ import CopyButton from './CopyButton.astro';
 import { SITE } from '../../../site.config.mjs';
 
 const steps = [
-	{ title: 'Install irimi', cmd: 'uv tool install --python 3.12 irimi', note: 'or: pipx install --python python3.12 irimi' },
-	{ title: 'Create the local CA', cmd: 'irimi init', note: 'generates a certificate authority in ~/.irimi/ca/, used only on this machine' },
-	{ title: 'Run your agent under shadow', cmd: 'irimi shadow -- python3 -m your_agent', note: 'any command works; irimi prints the summary when it exits' },
+	{
+		title: 'Install irimi',
+		cmd: 'uv tool install --python 3.12 irimi',
+		note: 'Needs <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a>. If <code>irimi</code> is not found afterwards, run <code>uv tool update-shell</code>. Or use <code>pipx install --python python3.12 irimi</code>.',
+	},
+	{
+		title: 'Create the local CA',
+		cmd: 'irimi init',
+		note: 'Writes a certificate authority to <code>~/.irimi/ca/</code>. It is never added to your system or browser trust store; only processes irimi starts trust it.',
+	},
+	{
+		title: 'Run your agent under shadow',
+		cmd: 'irimi shadow -- python3 -m your_agent',
+		note: "Any command works; irimi prints the summary when it exits. On macOS, run the agent with its own Python (a venv or uv), not the system <code>/usr/bin/python3</code>, which ignores irimi's CA.",
+	},
 ];
-const tryIt = `irimi shadow -- curl -s -X POST https://api.stripe.com/v1/customers/cus_REAL123 \\
+const tryIt = `irimi shadow -- curl -si -X POST https://api.stripe.com/v1/customers/cus_REAL123 \\
   -d 'metadata[order_id]=6735' -d email=a@example.com`;
-const prompt = `Install irimi (shadow mode for AI agents) and run my agent under it. Follow the instructions at ${SITE}/llms.txt. Use uv tool install --python 3.12 irimi, then irimi init, then run my agent with irimi shadow -- <command>. Show me the summary irimi prints.`;
+// SITE is replaced with the page's own origin in the browser, so a copied prompt points at the site it came from.
+const prompt = `Install irimi (shadow mode for AI agents) and run my agent under it. Follow the instructions at ${SITE}/llms.txt. Use uv tool install --python 3.12 irimi, then irimi init, then run my agent with irimi shadow -- <command>. Before running it, check with me if the agent writes to a database, files or anything other than HTTP APIs: irimi only fakes HTTP(S) writes. Show me the summary irimi prints.`;
 ---
 
 <div class="install">
@@ -36,16 +49,16 @@ const prompt = `Install irimi (shadow mode for AI agents) and run my agent under
 								<code><span class="cmd__prompt" aria-hidden="true">$ </span>{s.cmd}</code>
 								<CopyButton text={s.cmd} />
 							</div>
-							<p class="step__note">{s.note}</p>
+							<p class="step__note" set:html={s.note} />
 						</div>
 					</li>
 				))
 			}
 		</ol>
 		<div class="try">
-			<p><strong>Try it in ten seconds.</strong> A first write under shadow needs no agent, no network and no key: the write never leaves your machine.</p>
+			<p><strong>Try it in ten seconds.</strong> A first write under shadow needs no agent, no network and no key: the write never leaves your machine. curl prints a whole Stripe customer and an <code>irimi-answered-by</code> header; irimi prints the summary.</p>
 			<div class="cmd cmd--block">
-				<pre><code>{tryIt}</code></pre>
+				<pre tabindex="0" aria-label="Command to try"><code>{tryIt}</code></pre>
 				<CopyButton text={tryIt} />
 			</div>
 		</div>
@@ -55,7 +68,7 @@ const prompt = `Install irimi (shadow mode for AI agents) and run my agent under
 		</p>
 	</div>
 
-	<div class="panel" role="tabpanel" id="panel-agent" aria-labelledby="tab-agent" hidden>
+	<div class="panel" role="tabpanel" id="panel-agent" aria-labelledby="tab-agent" hidden data-site={SITE}>
 		<p class="panel__lead">
 			Paste this into Claude Code, Cursor, Codex or any coding agent that can run commands. It installs irimi, runs
 			your agent under shadow mode, and shows you the result.
@@ -86,12 +99,21 @@ const prompt = `Install irimi (shadow mode for AI agents) and run my agent under
 	tabs.forEach((tab, i) => {
 		tab.addEventListener('click', () => select(tab));
 		tab.addEventListener('keydown', (e) => {
-			const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-			if (step) {
+			const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+			if (to !== undefined) {
 				e.preventDefault();
-				select(tabs[(i + step + tabs.length) % tabs.length], true);
+				select(tabs[(to + tabs.length) % tabs.length], true);
 			}
 		});
 	});
 	if (location.hash === '#install-agent') select(tabs[1]);
+
+	const agent = document.getElementById('panel-agent')!;
+	const site = agent.dataset.site!;
+	if (location.origin !== site) {
+		for (const el of agent.querySelectorAll<HTMLElement>('.prompt__text, [data-copy]')) {
+			if (el.dataset.copy) el.dataset.copy = el.dataset.copy.replaceAll(site, location.origin);
+			else el.textContent = el.textContent!.replaceAll(site, location.origin);
+		}
+	}
 </script>

@@ -98,3 +98,22 @@ test('inlineMarkdown renders code, links and escapes html', async () => {
 	);
 	assert.equal(inlineMarkdown('`a<b`'), '<code>a&lt;b</code>');
 });
+
+test('link text that is a bare filename becomes the page title', async () => {
+	const { rewriteLinks: rw } = await import('./lib.mjs');
+	const titles = new Map([['concepts', 'Concepts'], ['index', 'Documentation']]);
+	const o = { ...opts, titles };
+	assert.equal(rw('see [concepts.md](concepts.md#a).', o), 'see [Concepts](/docs/concepts/#a).');
+	assert.equal(rw('[the terms](concepts.md)', o), '[the terms](/docs/concepts/)');
+	assert.equal(rw('[`cli.md`](cli.md)', o), '[`cli.md`](/docs/cli/)');
+});
+
+test('toPage ignores a # line inside a code fence', () => {
+	assert.throws(() => toPage('```sh\n# comment\n```\n', 'x', opts), /no "# " title/);
+});
+
+test('section errors name the heading', async () => {
+	const { readmeTable, readmeCodeBlock } = await import('./lib.mjs');
+	assert.throws(() => readmeTable('## A\nno table\n', 'A'), /README section "A": no Markdown table found/);
+	assert.throws(() => readmeCodeBlock('## A\nplain\n', 'A'), /README section "A": no code block found/);
+});

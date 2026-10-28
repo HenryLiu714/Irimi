@@ -2,7 +2,7 @@
 // Run before every dev and build; the output is gitignored. Fails loudly when the source changes shape.
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { GITHUB } from '../site.config.mjs';
-import { firstCodeBlock, inlineMarkdown, parseTable, rewriteLinks, section, toPage } from './lib.mjs';
+import { inlineMarkdown, readmeCodeBlock, readmeTable, rewriteLinks, section, toPage } from './lib.mjs';
 import { SIDEBAR } from './sidebar.mjs';
 
 const REPO = new URL('../../', import.meta.url);
@@ -14,7 +14,10 @@ const readme = read('README.md');
 const docFiles = readdirSync(new URL('docs/', REPO)).filter((f) => f.endsWith('.md'));
 const slugOf = (file) => (file === 'README.md' ? 'index' : file.slice(0, -3));
 const pages = new Set([...docFiles.map(slugOf), 'introduction', 'installation']);
-const opts = { pages, github: GITHUB };
+const titleOf = (md) => /^# (.+)$/m.exec(md)?.[1].replace(/`/g, '').trim();
+const titles = new Map(docFiles.map((f) => [slugOf(f), titleOf(read(`docs/${f}`))]));
+titles.set('index', 'Documentation');
+const opts = { pages, github: GITHUB, titles };
 
 // One-line descriptions, from the docs index's "- [Title](page.md): description." list.
 const descriptions = new Map(
@@ -83,14 +86,14 @@ if (stale.length) throw new Error(`scripts/sidebar.mjs names pages that do not e
 
 // Homepage data. Links in table cells are rewritten from the repo root, then rendered to HTML.
 const table = (heading) => {
-	const t = parseTable(rewriteLinks(section(readme, heading), { ...opts, from: 'root' }));
+	const t = readmeTable(rewriteLinks(readme, { ...opts, from: 'root' }), heading);
 	return { head: t.head, rows: t.rows.map((r) => r.map(inlineMarkdown)) };
 };
 const order = SIDEBAR.flatMap((g) => g.items.map((slug) => ({ slug, group: g.label })));
 const bySlug = new Map(written.map((p) => [p.slug, p]));
 const data = {
 	tagline,
-	heroOutput: firstCodeBlock(section(readme, 'What you get')),
+	heroOutput: readmeCodeBlock(readme, 'What you get'),
 	comparison: table('Why'),
 	services: table('What is supported'),
 	pages: [{ slug: 'index', group: null, ...bySlug.get('index') }, ...order.map((o) => ({ ...o, ...bySlug.get(o.slug) }))],

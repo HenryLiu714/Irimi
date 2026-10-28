@@ -37,7 +37,7 @@ function siteRoute(repoPath, pages) {
  * Point every Markdown link at the page that will exist on the site: sibling docs at their routes,
  * anything else in the repo at GitHub. `from` is the directory the Markdown lives in: `docs` or `root`.
  */
-export function rewriteLinks(markdown, { pages, github, from = 'docs' }) {
+export function rewriteLinks(markdown, { pages, github, from = 'docs', titles = new Map() }) {
 	const blob = `${github}/blob/main/`;
 	const resolve = (url) => {
 		if (url.startsWith('#')) return url;
@@ -51,18 +51,48 @@ export function rewriteLinks(markdown, { pages, github, from = 'docs' }) {
 		const repoPath = posix.normalize(posix.join(from === 'root' ? '' : from, path));
 		return (siteRoute(repoPath, pages) ?? blob + repoPath) + anchor;
 	};
+	// A link whose text is just its own filename (`[concepts.md](concepts.md)`) reads as the page title.
+	const named = (text, url) => {
+		const m = /^([\w-]+)\.md$/.exec(text);
+		return m && url.split('#')[0] === text ? (titles.get(m[1] === 'README' ? 'index' : m[1]) ?? text) : text;
+	};
 	return outsideFences(markdown, (line) =>
-		line.replace(LINK, (_, url, title) => `](${resolve(url)}${title})`),
+		line
+			.replace(/\[([^\]\[]+)\]\(([^)\s]+)/g, (all, text, url) => `[${named(text, url)}](${url}`)
+			.replace(LINK, (_, url, title) => `](${resolve(url)}${title})`),
 	);
 }
 
 /** Split a doc into its title (the first `# H1`, as plain text) and the body after it. */
 export function toPage(markdown, slug, opts) {
-	const m = /^# (.+)$/m.exec(markdown);
-	if (!m) throw new Error(`docs/${slug}.md has no "# " title`);
-	const title = m[1].replace(/`/g, '').trim();
-	const body = markdown.slice(m.index + m[0].length).replace(/^\n+/, '');
+	const lines = markdown.split('\n');
+	let inFence = false;
+	const at = lines.findIndex((l) => {
+		if (FENCE.test(l)) inFence = !inFence;
+		return !inFence && l.startsWith('# ');
+	});
+	if (at === -1) throw new Error(`docs/${slug}.md has no "# " title`);
+	const title = lines[at].slice(2).replace(/`/g, '').trim();
+	const body = lines.slice(at + 1).join('\n').replace(/^\n+/, '');
 	return { title, body: rewriteLinks(body, opts) };
+}
+
+/** The first table in a README section, with the heading named in any error. */
+export function readmeTable(markdown, heading) {
+	try {
+		return parseTable(section(markdown, heading));
+	} catch (err) {
+		throw new Error(`README section "${heading}": ${err.message}`);
+	}
+}
+
+/** The first code block in a README section, with the heading named in any error. */
+export function readmeCodeBlock(markdown, heading) {
+	try {
+		return firstCodeBlock(section(markdown, heading));
+	} catch (err) {
+		throw new Error(`README section "${heading}": ${err.message}`);
+	}
 }
 
 /** The body of the `## heading` section, up to the next `## `. Throws if there is none. */

@@ -14,4 +14,4 @@ npm run test:links # broken links and anchors in dist/
 npx playwright install chromium && npm run test:e2e   # browser tests against a fresh build
 ```
 
-The public URL is `SITE` in `astro.config.mjs`.
+The public URL is `SITE` in `site.config.mjs`.

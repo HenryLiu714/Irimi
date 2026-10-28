@@ -11,6 +11,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'irimi',
+			logo: { src: './public/favicon.svg', alt: '' },
 			description: 'Shadow mode for AI agents: reads are real, writes are faked, and reads see the writes.',
 			favicon: '/favicon.svg',
 			social: [{ icon: 'github', label: 'GitHub', href: GITHUB }],
@@ -19,6 +20,8 @@ export default defineConfig({
 			components: {
 				PageTitle: './src/components/PageTitle.astro',
 				MarkdownContent: './src/components/MarkdownContent.astro',
+				ThemeProvider: './src/components/ThemeProvider.astro',
+				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
 			sidebar: [
 				{ label: 'Overview', link: '/docs/' },

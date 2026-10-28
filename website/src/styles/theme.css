@@ -32,6 +32,7 @@
 }
 
 .sl-markdown-content pre.mermaid {
+	overflow-x: auto;
 	background: var(--sl-color-gray-6);
 	border: 1px solid var(--sl-color-gray-5);
 	border-radius: 0.5rem;
@@ -40,6 +41,31 @@
 	/* Hidden until mermaid has drawn it, so readers never see the raw diagram source flash. */
 	color: transparent;
 }
+.sl-markdown-content pre.mermaid svg {
+	/* Starlight caps images at the column width, which shrinks a wide diagram's text to unreadable. */
+	max-width: none !important;
+	height: auto;
+}
 .sl-markdown-content pre.mermaid[data-processed] {
 	color: inherit;
+}
+
+/* Flags such as `--entrypoint MODULE:FUNC` stay on one line in option tables. */
+.sl-markdown-content td:first-child code {
+	white-space: nowrap;
+}
+.sl-markdown-content :is(h2, h3) code {
+	background: none;
+	padding: 0;
+	border: 0;
+}
+
+/* Starlight's mobile menu button and search use the palette rather than their stock colours. */
+:root {
+	--pagefind-ui-primary: var(--sl-color-accent);
+}
+starlight-menu-button button {
+	background-color: var(--sl-color-gray-6) !important;
+	color: var(--sl-color-white) !important;
+	border: 1px solid var(--sl-color-gray-5);
 }

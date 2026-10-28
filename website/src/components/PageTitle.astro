@@ -2,7 +2,7 @@
 import Default from '@astrojs/starlight/components/PageTitle.astro';
 
 const id = Astro.locals.starlightRoute.entry.id;
-const isDoc = id.startsWith('docs/');
+const isDoc = id === 'docs' || id.startsWith('docs/');
 const mdHref = isDoc ? `/${id === 'docs' ? 'docs/index' : id}.md` : null;
 ---
 
@@ -11,7 +11,7 @@ const mdHref = isDoc ? `/${id === 'docs' ? 'docs/index' : id}.md` : null;
 	mdHref && (
 		<div class="page-actions">
 			<button type="button" class="copy-md" data-href={mdHref}>
-				<span class="label">Copy page as Markdown</span>
+				<span class="label" aria-live="polite">Copy page as Markdown</span>
 			</button>
 			<a href={mdHref}>View as Markdown</a>
 		</div>
@@ -45,19 +45,31 @@ const mdHref = isDoc ? `/${id === 'docs' ? 'docs/index' : id}.md` : null;
 </style>
 
 <script>
+	// Safari only allows a clipboard write during the click itself, so the Markdown is fetched on load
+	// and the click writes it at once. A failed copy says so and leaves the reader on the page.
 	for (const button of document.querySelectorAll<HTMLButtonElement>('.copy-md')) {
 		const label = button.querySelector('.label')!;
+		const markdown = fetch(button.dataset.href!).then((r) => {
+			if (!r.ok) throw new Error(`${r.status}`);
+			return r.text();
+		});
+		markdown.catch(() => {});
+		const show = (text: string) => {
+			label.textContent = text;
+			setTimeout(() => (label.textContent = 'Copy page as Markdown'), 2500);
+		};
 		button.addEventListener('click', async () => {
 			try {
-				const res = await fetch(button.dataset.href!);
-				await navigator.clipboard.writeText(await res.text());
-				label.textContent = 'Copied';
+				if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+					const blob = markdown.then((t) => new Blob([t], { type: 'text/plain' }));
+					await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+				} else {
+					await navigator.clipboard.writeText(await markdown);
+				}
+				show('Copied');
 			} catch {
-				// No clipboard access: open the Markdown so it can be copied by hand.
-				window.location.href = button.dataset.href!;
-				return;
+				show("Couldn't copy: use View as Markdown");
 			}
-			setTimeout(() => (label.textContent = 'Copy page as Markdown'), 2000);
 		});
 	}
 </script>

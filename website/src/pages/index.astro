@@ -11,7 +11,7 @@ import { GITHUB, PYPI, SITE } from '../../site.config.mjs';
 const INSTALL = 'uv tool install --python 3.12 irimi';
 const title = 'irimi · Shadow mode for AI agents';
 const description =
-	'A local proxy for AI agents: reads are real, writes are faked, and reads see the writes. See every write your agent would have made, and which would have failed, before you trust it.';
+	'A local proxy for AI agents: reads are real, writes are faked, and reads see the writes. See the HTTP writes your agent would have made, and where irimi can check, which would have failed, before you trust it.';
 
 const problems = [
 	{
@@ -33,30 +33,30 @@ const steps = [
 		n: '01',
 		title: 'Reads are real',
 		body: 'GETs, LLM calls and telemetry go straight through to the real service, so the agent works on real data.',
-		req: 'GET  api.stripe.com/v1/charges/ch_1',
+		req: 'GET  api.stripe.com|/v1/charges/ch_1',
 		res: '200 · live',
 		cls: 'live',
 	},
 	{
 		n: '02',
 		title: 'Writes are faked',
-		body: "irimi answers a write with a realistic success, never forwarding it. A refund is first checked against the real charge, so one Stripe would refuse gets Stripe's own error.",
-		req: 'POST api.stripe.com/v1/refunds',
+		body: "irimi answers a write with a fake success instead of forwarding it: a whole object where irimi knows the service, an echo otherwise. A Stripe refund is first checked against the real charge, so one Stripe would refuse gets Stripe's own error.",
+		req: 'POST api.stripe.com|/v1/refunds',
 		res: '200 · Irimi-Answered-By: fake-L1',
 		cls: 'fake',
 	},
 	{
 		n: '03',
 		title: 'Reads see the writes',
-		body: "The agent's later reads are edited to show the run's faked writes, so what it sees stays consistent.",
-		req: 'GET  api.stripe.com/v1/charges/ch_1',
+		body: "For Stripe and Slack, the agent's later reads are edited to show the run's faked writes, so what it sees stays consistent.",
+		req: 'GET  api.stripe.com|/v1/charges/ch_1',
 		res: '200 · refunded: true · overlay',
 		cls: 'overlay',
 	},
 	{
 		n: '04',
 		title: 'You get the report',
-		body: 'When the agent exits, irimi lists every write it would have made, which ones would have failed, and the money involved.',
+		body: 'When the agent exits, irimi lists every write it sent through the proxy, which ones would have failed where it could check, and the money involved.',
 		req: '$98.00 in faked writes',
 		res: '$49.00 of it would fail',
 		cls: 'report',
@@ -66,19 +66,23 @@ const steps = [
 const limits = [
 	{
 		title: 'Only HTTP(S) through the proxy',
-		body: 'A client that ignores HTTPS_PROXY talks to the real service. SDKs that ship their own CA bundle fail TLS, and the summary counts it.',
+		body: 'A client that ignores <code>HTTPS_PROXY</code> talks to the real service. A client that ships its own CA bundle fails TLS instead, and the summary counts it.',
 	},
 	{
 		title: 'Databases, files, gRPC and WebSockets are real',
-		body: 'Unless the agent wraps the function that makes them in @sdk.write_tool. Point database URLs at scratch data.',
+		body: 'Unless the agent wraps the function that makes them in <code>@sdk.write_tool</code>. Point database URLs at scratch data.',
+	},
+	{
+		title: 'Unmapped services are echoed, not modelled',
+		body: 'Whole objects, the overlay and precondition checks exist for Stripe and Slack today. Other APIs get live reads and an echo of each write.',
 	},
 	{
 		title: 'Every answer is labelled',
-		body: 'Every response irimi decided carries an Irimi-Answered-By header. A write with no line in the summary went to the real service.',
+		body: 'Every response irimi decided carries an <code>Irimi-Answered-By</code> header. A write with no line in the summary went to the real service.',
 	},
 	{
 		title: 'Stored runs hold what the agent read',
-		body: 'Credentials are redacted; business data is not. irimi runs rm and irimi runs prune delete runs.',
+		body: 'Credentials are redacted; business data is not. <code>irimi runs rm</code> and <code>irimi runs prune</code> delete runs.',
 	},
 ];
 ---
@@ -99,14 +103,13 @@ const limits = [
 		<meta name="twitter:card" content="summary" />
 		<meta name="color-scheme" content="dark light" />
 		<script is:inline>
-			// The docs' theme choice, shared through Starlight's key: stored choice, else the OS, else dark.
+			// The docs' theme choice, shared through Starlight's key: dark unless the reader picked light.
 			(() => {
 				let stored = null;
 				try {
 					stored = localStorage.getItem('starlight-theme');
 				} catch {}
-				const light = stored ? stored === 'light' : matchMedia('(prefers-color-scheme: light)').matches;
-				document.documentElement.dataset.theme = light ? 'light' : 'dark';
+				document.documentElement.dataset.theme = stored === 'light' ? 'light' : 'dark';
 			})();
 		</script>
 	</head>
@@ -146,9 +149,8 @@ const limits = [
 						<span class="accent">Reads are real. Writes are faked.</span>
 					</h1>
 					<p class="lead">
-						irimi is a local proxy between your agent and the APIs it calls. Let the agent read production, answer
-						its writes with realistic fakes, and see every write it would have made, and which would have failed,
-						before anything happens.
+						A local proxy between your agent and the APIs it calls. The agent reads production; its HTTP writes are
+						answered with fakes and listed for you, with the ones the real service would have refused.
 					</p>
 					<div class="hero__actions">
 						<div class="cmd cmd--hero">
@@ -161,7 +163,8 @@ const limits = [
 					<div class="hero__demo">
 						<p class="caption">
 							An LLM support agent refunds the same charge twice. Under irimi, Stripe sees neither refund, the agent
-							gets Stripe's own error for the second, and the summary says so:
+							gets Stripe's own error for the second, and the summary says so. Reproduce it from a clone with
+							<code>make demo EXAMPLE=w01</code>:
 						</p>
 						<Terminal output={data.heroOutput} title="irimi shadow · LLM support agent, ticket triage" />
 					</div>
@@ -183,7 +186,7 @@ const limits = [
 						}
 					</div>
 					<p class="punch">
-						irimi lets the agent <strong>read production for real</strong> and keeps <strong>every write on your machine</strong>.
+						irimi lets the agent <strong>read production for real</strong> and keeps <strong>every HTTP write it sends through irimi on your machine</strong>.
 					</p>
 				</div>
 			</section>
@@ -193,7 +196,7 @@ const limits = [
 					<p class="eyebrow">How it works</p>
 					<h2 id="how">One proxy, four steps.</h2>
 					<p class="sub">
-						<code>irimi shadow -- &lt;command&gt;</code> starts the proxy, runs your command with <code>HTTPS_PROXY</code>
+						<code>irimi shadow -- &lt;command&gt;</code> starts the proxy, runs your command with <code>HTTPS_PROXY</code>{' '}
 						and irimi's CA set, and prints the summary when it exits.{' '}
 						<a href="/docs/how-it-works/">How it works in detail →</a>
 					</p>
@@ -205,7 +208,7 @@ const limits = [
 									<h3>{s.title}</h3>
 									<p>{s.body}</p>
 									<div class="flow__wire" aria-hidden="true">
-										<code>{s.req}</code>
+										<code>{s.req.split('|')[0]}<wbr />{s.req.split('|')[1]}</code>
 										<code class="flow__res">→ {s.res}</code>
 									</div>
 								</li>
@@ -238,7 +241,9 @@ const limits = [
 								{
 									data.comparison.rows.map((row) => (
 										<tr class:list={{ 'is-irimi': row[0] === 'irimi' }}>
-											{row.map((cell, i) => (i === 0 ? <th scope="row" set:html={cell} /> : <td set:html={cell} />))}
+											{row.map((cell, i) =>
+												i === 0 ? <th scope="row" set:html={cell} /> : <td data-label={data.comparison.head[i]} set:html={cell} />,
+											)}
 										</tr>
 									))
 								}
@@ -251,7 +256,7 @@ const limits = [
 			<section class="section" aria-labelledby="supported">
 				<div class="wrap">
 					<p class="eyebrow">Supported</p>
-					<h2 id="supported">Full fakes for the APIs agents write to most.</h2>
+					<h2 id="supported">Stripe and Slack, modelled. Everything else, still shadowed.</h2>
 					<p class="sub">
 						Service maps ship with irimi; anything unmapped still gets live reads and echoed writes.{' '}
 						<a href="/docs/adding-a-service/">Add a service →</a>
@@ -264,7 +269,11 @@ const limits = [
 							<tbody>
 								{
 									data.services.rows.map((row) => (
-										<tr>{row.map((cell, i) => (i === 0 ? <th scope="row" set:html={cell} /> : <td set:html={cell} />))}</tr>
+										<tr>
+											{row.map((cell, i) =>
+												i === 0 ? <th scope="row" set:html={cell} /> : <td data-label={data.services.head[i]} set:html={cell} />,
+											)}
+										</tr>
 									))
 								}
 							</tbody>
@@ -283,7 +292,7 @@ const limits = [
 							limits.map((l) => (
 								<article class="card card--limit">
 									<h3>{l.title}</h3>
-									<p>{l.body}</p>
+									<p set:html={l.body} />
 								</article>
 							))
 						}
