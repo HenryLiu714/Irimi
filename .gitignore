@@ -31,3 +31,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Brainstorming and plan-execution scratch
+.superpowers/
