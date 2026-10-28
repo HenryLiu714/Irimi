@@ -1,0 +1,63 @@
+---
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+
+const id = Astro.locals.starlightRoute.entry.id;
+const isDoc = id.startsWith('docs/');
+const mdHref = isDoc ? `/${id === 'docs' ? 'docs/index' : id}.md` : null;
+---
+
+<Default />
+{
+	mdHref && (
+		<div class="page-actions">
+			<button type="button" class="copy-md" data-href={mdHref}>
+				<span class="label">Copy page as Markdown</span>
+			</button>
+			<a href={mdHref}>View as Markdown</a>
+		</div>
+	)
+}
+
+<style>
+	.page-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1rem;
+		align-items: center;
+		margin-top: 0.75rem;
+		font-size: var(--sl-text-sm);
+	}
+	.copy-md {
+		font: inherit;
+		color: var(--sl-color-white);
+		background: var(--sl-color-gray-6);
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: 0.375rem;
+		padding: 0.3rem 0.7rem;
+		cursor: pointer;
+	}
+	.copy-md:hover {
+		border-color: var(--sl-color-accent);
+	}
+	.page-actions a {
+		color: var(--sl-color-gray-2);
+	}
+</style>
+
+<script>
+	for (const button of document.querySelectorAll<HTMLButtonElement>('.copy-md')) {
+		const label = button.querySelector('.label')!;
+		button.addEventListener('click', async () => {
+			try {
+				const res = await fetch(button.dataset.href!);
+				await navigator.clipboard.writeText(await res.text());
+				label.textContent = 'Copied';
+			} catch {
+				// No clipboard access: open the Markdown so it can be copied by hand.
+				window.location.href = button.dataset.href!;
+				return;
+			}
+			setTimeout(() => (label.textContent = 'Copy page as Markdown'), 2000);
+		});
+	}
+</script>

@@ -1,0 +1,45 @@
+/* irimi palette for Starlight. Dark is the default; every text colour clears WCAG AA on its background. */
+:root {
+	--sl-font: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+	--sl-font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+	--sl-color-accent-low: #0f3323;
+	--sl-color-accent: #7ee2a8;
+	--sl-color-accent-high: #c8f5da;
+	--sl-color-white: #f4f6f8;
+	--sl-color-gray-1: #e8eaed;
+	--sl-color-gray-2: #c9d1d9;
+	--sl-color-gray-3: #aab4be;
+	--sl-color-gray-4: #7d8790;
+	--sl-color-gray-5: #2a3138;
+	--sl-color-gray-6: #161b21;
+	--sl-color-black: #0b0d10;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #d7f5e3;
+	--sl-color-accent: #1a7f4b;
+	--sl-color-accent-high: #0d5c33;
+	--sl-color-white: #0b0d10;
+	--sl-color-gray-1: #1a1f24;
+	--sl-color-gray-2: #2d343b;
+	--sl-color-gray-3: #4a535c;
+	--sl-color-gray-4: #6b7580;
+	--sl-color-gray-5: #c9d1d9;
+	--sl-color-gray-6: #eef1f4;
+	--sl-color-gray-7: #f6f8fa;
+	--sl-color-black: #ffffff;
+}
+
+.sl-markdown-content pre.mermaid {
+	background: var(--sl-color-gray-6);
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.5rem;
+	padding: 1rem;
+	text-align: center;
+	/* Hidden until mermaid has drawn it, so readers never see the raw diagram source flash. */
+	color: transparent;
+}
+.sl-markdown-content pre.mermaid[data-processed] {
+	color: inherit;
+}

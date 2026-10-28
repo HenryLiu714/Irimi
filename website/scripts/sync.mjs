@@ -18,7 +18,10 @@ const opts = { pages, github: GITHUB };
 
 // One-line descriptions, from the docs index's "- [Title](page.md): description." list.
 const descriptions = new Map(
-	[...read('docs/README.md').matchAll(/^- \[[^\]]+\]\(([^)]+)\.md\): (.+)$/gm)].map((m) => [m[1], m[2]]),
+	[...read('docs/README.md').matchAll(/^- \[[^\]]+\]\(([^)]+)\.md\): (.+(?:\n {2,}\S.*)*)/gm)].map((m) => [
+		m[1],
+		m[2].replace(/\s*\n\s*/g, ' '),
+	]),
 );
 
 const README_PAGES = {
