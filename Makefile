@@ -1,6 +1,6 @@
 # Contributor shortcuts. Every target is a one-line `uv` command; see CONTRIBUTING.md.
 .DEFAULT_GOAL := help
-.PHONY: help setup test test-fast workflows cov live demo lint fmt typecheck check
+.PHONY: help setup test test-fast workflows cov live demo lint fmt typecheck check website website-dev website-test
 
 help:  ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-10s %s\n", $$1, $$2}'
@@ -39,3 +39,12 @@ typecheck:  ## mypy over src/, examples/ and tests/
 	uv run mypy
 
 check: lint typecheck test  ## everything CI runs, in CI's order
+
+website:  ## build the website into website/dist (needs Node 22+)
+	cd website && npm ci && npm run build
+
+website-dev:  ## serve the website locally with live reload
+	cd website && npm run dev
+
+website-test:  ## the website's unit, link and browser tests, after a build
+	cd website && npm run test:unit && npm run test:links && npm run test:e2e

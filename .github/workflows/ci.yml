@@ -84,3 +84,27 @@ jobs:
       - run: uvx twine check --strict dist/*
       - name: Smoke-test the wheel in a clean 3.12 venv
         run: scripts/smoke-test-wheel.sh dist/*.whl
+
+  # The website builds from docs/ and the README, its links and anchors resolve, and it works in a
+  # real browser. It fails when a README section the homepage reads from is renamed.
+  website:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run build
+      - run: npm run test:links
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

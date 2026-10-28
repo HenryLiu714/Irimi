@@ -1,0 +1,57 @@
+---
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+---
+
+<Default><slot /></Default>
+<noscript><style>pre.mermaid { color: inherit !important; }</style></noscript>
+
+<script>
+	// Load mermaid only on pages that have a diagram, and redraw it in the palette when the theme changes.
+	const diagrams = [...document.querySelectorAll<HTMLElement>('pre.mermaid')];
+	if (diagrams.length) {
+		const sources = diagrams.map((el) => el.textContent ?? '');
+		const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+		const draw = async () => {
+			try {
+				const { default: mermaid } = await import('mermaid');
+				mermaid.initialize({
+					startOnLoad: false,
+					securityLevel: 'strict',
+					theme: 'base',
+					fontFamily: css('--sl-font'),
+					// Drawn at its natural size; theme.css lets it scroll sideways on a narrow screen.
+					flowchart: { useMaxWidth: false },
+					themeVariables: {
+						fontSize: '15px',
+						background: css('--sl-color-gray-6'),
+						primaryColor: css('--sl-color-black'),
+						primaryTextColor: css('--sl-color-white'),
+						primaryBorderColor: css('--sl-color-gray-4'),
+						lineColor: css('--sl-color-gray-3'),
+						textColor: css('--sl-color-white'),
+						edgeLabelBackground: css('--sl-color-gray-6'),
+						clusterBkg: css('--sl-color-gray-6'),
+						clusterBorder: css('--sl-color-accent'),
+					},
+				});
+				diagrams.forEach((el, i) => {
+					el.removeAttribute('data-processed');
+					el.textContent = sources[i];
+				});
+				await mermaid.run({ nodes: diagrams });
+			} catch (err) {
+				// A diagram that fails to draw stays readable as its source.
+				diagrams.forEach((el) => el.setAttribute('data-processed', 'error'));
+				console.warn('mermaid', err);
+			}
+		};
+		let drawn = document.documentElement.dataset.theme;
+		await draw();
+		// Starlight re-sets data-theme on load with the same value; redraw only on a real change.
+		new MutationObserver(() => {
+			if (document.documentElement.dataset.theme === drawn) return;
+			drawn = document.documentElement.dataset.theme;
+			draw();
+		}).observe(document.documentElement, { attributeFilter: ['data-theme'] });
+	}
+</script>
